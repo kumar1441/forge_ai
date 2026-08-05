@@ -1,0 +1,15 @@
+# Build output
+bin/
+obj/
+.vs/
+*.user
+*.suo
+
+# Local config / secrets — never commit keys
+*.key
+config.json
+
+# CAD artifacts
+~$*.sld*
+*.SLDPRT~
+Models/

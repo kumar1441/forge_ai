@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Forge</title>
+<style>
+  :root {
+    --bg:#ffffff; --ink:#1b1f24; --soft:#6b727c; --faint:#9aa1ab;
+    --line:#e9ecf0; --field:#f6f7f9; --accent:#ff6b2c; --accentink:#b34516;
+    --okbg:#f0faf3; --okline:#bfe6cd; --okink:#1f7a43;
+    --glow:#fff6ec; --glowline:#ffd9b8; --userbg:#f2f4f7;
+  }
+  * { box-sizing:border-box; }
+  html, body { height:100%; }
+  body {
+    margin:0; background:var(--bg); color:var(--ink);
+    font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;
+    display:flex; flex-direction:column; height:100vh; overflow:hidden;
+  }
+
+  /* header */
+  .head { padding:14px 18px 10px; border-bottom:1px solid var(--line); }
+  .headtop { display:flex; align-items:center; justify-content:space-between; }
+  .clearbtn { background:var(--field); border:1px solid var(--line); border-radius:8px; color:var(--faint);
+    font:inherit; font-size:11px; padding:2px 9px; cursor:pointer; }
+  .clearbtn:hover { border-color:var(--accent); color:var(--ink); }
+  .brand { font-size:13px; letter-spacing:.3px; color:var(--faint); }
+  .brand b { color:var(--ink); font-weight:600; }
+  .brand b span { color:var(--accent); }
+  .know { margin-top:5px; font-size:12px; color:var(--soft); min-height:16px; }
+  .know .part { color:var(--ink); font-weight:600; }
+  .know .dot { color:var(--accent); }
+
+  /* scrollable transcript */
+  .transcript { flex:1; overflow-y:auto; padding:16px 16px 8px; display:flex; flex-direction:column; gap:16px; }
+
+  /* empty state */
+  .empty { margin:auto; text-align:center; font-size:12.5px; color:var(--faint); line-height:1.9; }
+  .empty b { color:var(--soft); font-weight:600; }
+
+  .turn { display:flex; flex-direction:column; gap:8px; }
+  .bubble.user {
+    align-self:flex-end; max-width:88%; background:var(--userbg);
+    border:1px solid var(--line); border-radius:14px 14px 4px 14px;
+    padding:9px 13px; font-size:13.5px; white-space:pre-wrap; word-break:break-word;
+  }
+  .forge { display:flex; flex-direction:column; gap:6px; }
+
+  /* the named-crew step lines — the honest machinery */
+  .steps { display:flex; flex-direction:column; gap:4px; }
+  .step { font-size:12.5px; color:var(--soft); display:flex; align-items:baseline; gap:7px; }
+  .step .agent { font-weight:600; color:var(--accentink); }
+  .step .glyph { font-size:11px; width:12px; text-align:center; flex:none; }
+  .step.run .glyph { color:var(--accent); animation:pulse 1s ease-in-out infinite; }
+  .step.done .glyph { color:var(--okink); }
+  @keyframes pulse { 0%,100%{opacity:.35} 50%{opacity:1} }
+
+  /* cycling mechanical gerund — the "thinking" word */
+  .thinking { font-size:12.5px; color:var(--soft); display:flex; align-items:center; gap:8px; min-height:18px; }
+  .thinking .tdot { color:var(--accent); animation:pulse 1s ease-in-out infinite; font-size:9px; }
+  .thinking .tword { font-weight:600; color:var(--ink); }
+
+  .result { display:flex; flex-direction:column; gap:8px; }
+
+  .card {
+    border:1px solid var(--line); border-radius:12px; padding:12px 14px;
+    background:#fff; display:flex; flex-direction:column; gap:3px;
+  }
+  .card.ok { background:var(--okbg); border-color:var(--okline); }
+  .card.fail { background:#fff5f5; border-color:#f3c9c6; }
+  .card .top { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  .card .name { font-weight:600; }
+  .card .sub { font-size:11.5px; color:var(--soft); word-break:break-word; }
+  .card .answer { font-size:15px; color:var(--ink); }
+  .card .fb { margin-top:8px; display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+  .card .fb button { background:none; border:1px solid var(--line,#d0d0d0); border-radius:6px; cursor:pointer; font-size:13px; padding:2px 8px; opacity:.7; }
+  .card .fb button:hover { opacity:1; }
+  .card .fb .reasons { display:inline-flex; gap:4px; }
+  .card .fb .reasons button { font-size:11px; }
+  .card .fb .fbthx2 { font-size:12px; opacity:.6; }
+  .tag { font-size:10.5px; padding:2px 8px; border-radius:20px; background:var(--okbg); color:var(--okink); border:1px solid var(--okline); white-space:nowrap; }
+  .card.fail .tag { background:#fff5f5; color:#b3261e; border-color:#f3c9c6; }
+  .card.review { background:var(--glow); border-color:var(--glowline); }
+  .card.review .tag { background:#fff; color:var(--accentink); border-color:var(--glowline); }
+  .card.bifrost { background:#eef4ff; border-color:#bcd3ff; }
+  .card.bifrost .tag { background:#fff; color:#2a5bd7; border-color:#bcd3ff; }
+  .done { font-size:13px; color:var(--okink); font-weight:600; }
+  .err  { font-size:13px; color:#b3261e; }
+
+  /* composer pinned to the bottom */
+  .composer { border-top:1px solid var(--line); padding:12px 14px 8px; background:var(--bg); }
+  .ask { position:relative; }
+  textarea {
+    width:100%; resize:none; overflow:hidden; min-height:48px; max-height:160px;
+    background:var(--field); border:1px solid var(--line); border-radius:14px;
+    padding:13px 15px; font:inherit; color:var(--ink); outline:none;
+    transition:border-color .15s, background .15s;
+  }
+  textarea::placeholder { color:var(--faint); }
+  textarea:focus { border-color:var(--accent); background:#fff; }
+  .hint { margin:7px 2px 0; font-size:11px; color:var(--faint); }
+  .hint kbd { background:var(--field); border:1px solid var(--line); border-radius:5px; padding:0 5px; font-size:10.5px; }
+
+  /* attach affordance — hand Forge a file (e.g. the other version) without typing a path */
+  .attachrow { display:flex; align-items:center; gap:8px; margin:0 2px 8px; flex-wrap:wrap; }
+  .attachbtn { background:var(--field); border:1px solid var(--line); border-radius:9px; padding:4px 10px;
+    cursor:pointer; font:inherit; font-size:12px; color:var(--soft); }
+  .attachbtn:hover { border-color:var(--accent); color:var(--ink); }
+  .chip { display:inline-flex; align-items:center; gap:6px; background:var(--glow); border:1px solid var(--glowline);
+    border-radius:9px; padding:3px 6px 3px 9px; font-size:11.5px; color:var(--accentink); }
+  .chip .x { cursor:pointer; border:none; background:none; color:var(--accentink); font-size:13px; padding:0 2px; opacity:.7; }
+  .chip .x:hover { opacity:1; }
+
+  /* slim usage feedback footer */
+  .fb { margin-top:8px; display:flex; align-items:center; gap:7px; flex-wrap:wrap; font-size:11.5px; color:var(--faint); }
+  .fbbtn { background:var(--field); border:1px solid var(--line); border-radius:8px; padding:1px 7px; cursor:pointer; font-size:13px; }
+  .fbbtn:hover { border-color:var(--accent); }
+  .fbtxt { flex:1; min-width:110px; background:var(--field); border:1px solid var(--line); border-radius:8px;
+    padding:5px 8px; font:inherit; font-size:11.5px; color:var(--ink); outline:none; }
+  .fbthx { color:var(--okink); font-weight:600; }
+</style>
+</head>
+<body>
+  <div class="head">
+    <div class="headtop">
+      <div class="brand"><b><span>◆</span> Forge</b></div>
+      <button class="clearbtn" id="clearbtn" title="Clear the panel for a fresh recording take">Clear</button>
+    </div>
+    <div class="know" id="know">Looking for your part…</div>
+  </div>
+
+  <div class="transcript" id="transcript">
+    <div class="empty" id="empty">
+      Forge <b>knows</b> your part.<br>
+      Forge <b>understands</b> what you mean.<br>
+      Forge <b>gets it done.</b>
+    </div>
+  </div>
+
+  <div class="composer">
+    <div class="attachrow">
+      <button class="attachbtn" id="attach" title="Attach a file — e.g. the other version to compare against">📎 Attach a file</button>
+      <span class="chip" id="chip" style="display:none"></span>
+    </div>
+    <div class="ask">
+      <textarea id="intent" rows="1"></textarea>
+      <div class="hint"><kbd>Enter</kbd> to run · <kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line</div>
+    </div>
+    <div class="fb" id="fb">
+      <span>Useful so far?</span>
+      <button class="fbbtn" id="fbup" title="Yes">👍</button>
+      <button class="fbbtn" id="fbdown" title="Not really">👎</button>
+      <input class="fbtxt" id="fbtxt" placeholder="tell Ravi more (optional)" />
+      <span class="fbthx" id="fbthx"></span>
+    </div>
+  </div>
+
+<script>
+  const hasBridge = !!(window.chrome && window.chrome.webview);
+  const post = (o) => { if (hasBridge) window.chrome.webview.postMessage(JSON.stringify(o)); };
+  const $ = (id) => document.getElementById(id);
+  const transcript = $("transcript");
+  const intent = $("intent");
+
+  // rotating mechanical "thinking" words — one shared pool
+  const WORDS = ["Mating","Fastening","Threading","Torquing","Bolting","Calibrating",
+    "Aligning","Meshing","Tightening","Riveting","Forging","Combobulating",
+    "Ratcheting","Whirring","Clanking","Cranking","Sprocketing","Kerchunking"];
+
+  const grow = () => { intent.style.height = "auto"; intent.style.height = Math.min(intent.scrollHeight,160) + "px"; };
+  intent.addEventListener("input", grow);
+
+  function refresh() { post({ action: "readModel" }); }
+  window.addEventListener("DOMContentLoaded", refresh);
+
+  // Clear the panel for a fresh recording take: wipe the transcript + reset Forge's pending threads.
+  function clearPanel() {
+    stopWords();
+    working = false; turn = null;
+    transcript.innerHTML = '<div class="empty" id="empty">Forge <b>knows</b> your part.<br>' +
+      'Forge <b>understands</b> what you mean.<br>Forge <b>gets it done.</b></div>';
+    hideChip();
+    intent.value = ""; grow();
+    post({ action: "reset" });
+    intent.focus();
+  }
+  $("clearbtn").addEventListener("click", clearPanel);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+
+  intent.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      const text = intent.value.trim();
+      if (text) run(text);
+    }
+  });
+
+  let working = false;
+  let turn = null;          // { steps, thinking, result } DOM refs for the active Forge turn
+  let wordTimer = null;
+
+  function nearBottom() { return transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 60; }
+  function scroll() { transcript.scrollTop = transcript.scrollHeight; }
+
+  function run(text) {
+    if (working) return;
+    working = true;
+    const e = $("empty"); if (e) e.remove();
+
+    // user bubble
+    const t = document.createElement("div");
+    t.className = "turn";
+    const u = document.createElement("div");
+    u.className = "bubble user"; u.textContent = text;
+    const f = document.createElement("div"); f.className = "forge";
+    const steps = document.createElement("div"); steps.className = "steps";
+    const thinking = document.createElement("div"); thinking.className = "thinking";
+    thinking.innerHTML = `<span class="tdot">●</span><span class="tword">${WORDS[0]}…</span>`;
+    const result = document.createElement("div"); result.className = "result";
+    f.append(steps, thinking, result);
+    t.append(u, f);
+    transcript.append(t);
+    turn = { steps, thinking, result, tword: thinking.querySelector(".tword") };
+    scroll();
+    startWords();
+
+    // CLEAR the input — like any chat
+    intent.value = ""; grow();
+
+    post({ action: "generate", intent: text });
+    if (!hasBridge) demoRun(text);   // standalone browser preview
+  }
+
+  function startWords() {
+    let i = 0;
+    stopWords();
+    wordTimer = setInterval(() => {
+      i = Math.floor(Math.random() * WORDS.length);
+      if (turn) turn.tword.textContent = WORDS[i] + "…";
+    }, 850);
+  }
+  function stopWords() { if (wordTimer) { clearInterval(wordTimer); wordTimer = null; } }
+
+  // a named-crew step line — running, then resolved
+  function stepLine(agent, gloss, state, result) {
+    if (!turn) return;
+    let el = agent ? turn.steps.querySelector(`[data-agent="${agent}"]`) : null;
+    const wasBottom = nearBottom();
+    if (!el) {
+      el = document.createElement("div");
+      if (agent) el.dataset.agent = agent;
+      turn.steps.append(el);
+    }
+    if (state === "done") {
+      el.className = "step done";
+      el.innerHTML = `<span class="glyph">✓</span><span>${agent ? `<span class="agent">${agent}</span> · ` : ""}${(result || gloss || "").replace(/</g,"&lt;")}</span>`;
+    } else {
+      el.className = "step run";
+      el.innerHTML = `<span class="glyph">◆</span><span>${agent ? `Deploying <span class="agent">${agent}</span> · ` : ""}${(gloss || "").replace(/</g,"&lt;")}</span>`;
+    }
+    if (wasBottom) scroll();
+  }
+
+  // finish the turn: stop the gerund, drop the thinking line, render the result card(s)
+  function finish(html) {
+    stopWords();
+    if (turn) {
+      turn.thinking.remove();
+      if (html) turn.result.innerHTML = html;
+    }
+    working = false; turn = null;
+    scroll();
+  }
+
+  function renderRedWave(m) {
+    const clean = m.clean;
+    const title = m.removed > 0 ? `Removed ${m.removed} conflicting mate${m.removed===1?"":"s"}` : "Checked the mates";
+    return `<div class="card ${clean ? "ok" : "review"}">
+      <div class="top"><span class="name">${title}</span><span class="tag">${clean ? "fixed" : "review"}</span></div>
+      <div class="sub">${(m.info||"").replace(/</g,"&lt;")}</div></div>`;
+  }
+
+  function handle(m) {
+    if (m.type === "model") {
+      if (m.title) {
+        const n = (m.dimensions || []).length;
+        $("know").innerHTML = `<span class="dot">●</span> Working on <span class="part">${m.title}</span> — I see ${n} dimension${n===1?"":"s"} I can drive.`;
+      } else {
+        $("know").innerHTML = `Open a part and I'll get to work.`;
+      }
+    }
+
+    else if (m.type === "step") { stepLine(m.agent, m.gloss, m.state, m.result); }
+    else if (m.type === "status") { stepLine(null, m.message, "run"); }
+
+    else if (m.type === "attached") { showChip(m.name); }
+    else if (m.type === "attachCleared") { hideChip(); }
+
+    else if (m.type === "error") {
+      finish(`<div class="err">${(m.message || "").replace(/</g,"&lt;")}</div>`);
+    }
+
+    else if (m.type === "variants") { finish(renderVariants(m)); }
+
+    else if (m.type === "impact") {
+      finish(`<div class="card review">
+        <div class="top"><span class="name">Impact analysis</span><span class="tag">review</span></div>
+        <div class="sub" style="white-space:pre-wrap">${(m.explanation || "").replace(/</g,"&lt;")}</div>
+      </div>`);
+    }
+
+    else if (m.type === "answer") {
+      const thumbs = m.runId ? `<div class="fb" data-run="${m.runId}" data-handler="${m.handler||''}">
+          <button class="tup" title="worked">👍</button><button class="tdn" title="not right">👎</button>
+          <span class="reasons" style="display:none">
+            <button data-r="wrong_parts">wrong parts</button><button data-r="too_much">did too much</button><button data-r="didnt_work">didn't work</button>
+          </span></div>` : "";
+      finish(`<div class="card"><div class="answer">${(m.answer || "").replace(/</g,"&lt;")}</div>${thumbs}</div>`);
+    }
+
+    else if (m.type === "clarify") {
+      finish(`<div class="card">
+        <div class="top"><span class="name">One quick question</span></div>
+        <div class="sub">${(m.message || "").replace(/</g,"&lt;")}</div>
+      </div>`);
+    }
+
+    else if (m.type === "edit") { finish(renderEdit(m)); }
+    else if (m.type === "red_wave") { finish(renderRedWave(m)); }
+
+    else if (m.type === "shared") {
+      finish(`<div class="card ok"><div class="top"><span class="name">Shared with your team</span><span class="tag">done</span></div>
+        <div class="sub">Pushed your version (${m.count} dimensions). Teammates will be offered to pull it.</div></div>`);
+    }
+
+    else if (m.type === "mated") {
+      const proud = m.proud || 0, seated = (m.seated != null ? m.seated : m.count);
+      const tail = m.failed ? `, ${m.failed} skipped` : "";
+      const good = m.clean && proud === 0;
+      const thumbs = m.runId ? `<div class="fb" data-run="${m.runId}" data-handler="${m.handler||''}">
+          <button class="tup" title="worked">👍</button><button class="tdn" title="not right">👎</button>
+          <span class="reasons" style="display:none">
+            <button data-r="wrong_parts">wrong parts</button><button data-r="too_much">did too much</button><button data-r="didnt_work">didn't work</button>
+          </span></div>` : "";
+      finish(`<div class="card ${good ? "ok" : "review"}">
+        <div class="top"><span class="name">Auto-mated ${m.count} fastener${m.count===1?"":"s"}${tail}</span><span class="tag">${good ? "done" : "review"}</span></div>
+        <div class="sub">${
+          proud > 0
+            ? `${seated} seated flush · ${proud} aligned but didn't sit flush — worth a look.`
+            : (m.clean ? "All seated flush — rebuild clean, nothing else moved." : "Mated, but a rebuild warning appeared — worth a look.")
+        }</div>${thumbs}</div>`);
+    }
+
+    // cross-tool / teammate notifications arrive any time — append as a system card
+    else if (m.type === "bifrost") {
+      systemCard(`<div class="card bifrost">
+        <div class="top"><span class="name">⚡ ${(m.source||"another tool")} changed the board</span><span class="tag">cross-tool</span></div>
+        <div class="sub">${(m.summary||"").replace(/</g,"&lt;")}</div>
+        <div class="sub" style="margin-top:4px">Ask: <i>"does this board change affect my part?"</i></div>
+      </div>`);
+    }
+    else if (m.type === "incoming") {
+      const lines = (m.diff || []).map(d => `<div class="sub">• ${String(d).replace(/</g,"&lt;")}</div>`).join("");
+      systemCard(`<div class="card bifrost">
+        <div class="top"><span class="name">👥 ${(m.summary||"A teammate shared a version").replace(/</g,"&lt;")}</span><span class="tag">team</span></div>
+        ${lines}<div class="sub" style="margin-top:4px">Reply <b>"apply"</b> to update your model to match.</div>
+      </div>`);
+    }
+
+    // safety net: any unhandled TERMINAL card must still stop the gerund + end the turn (never leave it looping)
+    else if (working) { finish(m.info ? `<div class="card ok"><div class="sub">${String(m.info).replace(/</g,"&lt;")}</div></div>` : ""); }
+  }
+
+  function systemCard(html) {
+    const e = $("empty"); if (e) e.remove();
+    const wasBottom = nearBottom();
+    const t = document.createElement("div"); t.className = "turn"; t.innerHTML = html;
+    transcript.append(t);
+    if (wasBottom) scroll();
+  }
+
+  if (hasBridge) window.chrome.webview.addEventListener("message", (e) => handle(JSON.parse(e.data)));
+
+  function renderVariants(m) {
+    const clean = m.variants.filter(v => v.success && v.healthy !== false).length;
+    const review = m.variants.filter(v => v.success && v.healthy === false).length;
+    let head = `Done — ${clean} ready${review ? `, ${review} need a look` : ""}${m.dimensionName ? " · " + m.dimensionName : ""}.`;
+    let html = `<div class="done">${head}</div>`;
+    if (m.description) html += `<div class="sub">${m.description.replace(/</g,"&lt;")}</div>`;
+    html += m.variants.map(v => {
+      if (!v.success) return `<div class="card fail"><div class="top"><span class="name">${v.label}</span><span class="tag">failed</span></div><div class="sub">${v.error || ""}</div></div>`;
+      const drawing = v.drawingPath ? `<div class="sub">Drawing · ${v.drawingPath}</div>` : "";
+      if (v.healthy === false) {
+        return `<div class="card review">
+          <div class="top"><span class="name">${v.label}</span><span class="tag">review</span></div>
+          <div class="sub">Changed cleanly, but <b>${v.issue || "a feature"}</b> needs a quick look — the new size moved geometry it depended on.</div>
+          <div class="sub">${v.path || ""}</div>${drawing}</div>`;
+      }
+      return `<div class="card ok">
+        <div class="top"><span class="name">${v.label}</span><span class="tag">ready</span></div>
+        <div class="sub">${v.path || ""}</div>${drawing}</div>`;
+    }).join("");
+    return html;
+  }
+
+  function renderEdit(m) {
+    const what = (m.changed || []).join(", ");
+    if (m.error) return `<div class="card fail"><div class="top"><span class="name">Couldn't apply</span></div><div class="sub">${(m.error||"").replace(/</g,"&lt;")}</div></div>`;
+    if (m.reverted) return `<div class="card review">
+      <div class="top"><span class="name">${what}</span><span class="tag">would break</span></div>
+      <div class="sub">That would break <b>${m.issue||"a feature"}</b>, so I left your part unchanged. Reply <b>"do it anyway"</b> to force it, or ask me to fix ${m.issue||"it"}.</div></div>`;
+    if (m.healthy === false) return `<div class="card review">
+      <div class="top"><span class="name">${what}</span><span class="tag">review</span></div>
+      <div class="sub">Saved a forced-edit copy — <b>${m.issue||"a feature"}</b> is broken in it. Your open part is untouched.${m.path?`<div class="sub" style="margin-top:4px">${m.path}</div>`:""}</div></div>`;
+    return `<div class="card ok">
+      <div class="top"><span class="name">${what}</span><span class="tag">done</span></div>
+      <div class="sub">Saved an edited copy — nothing else broke, and your open part is untouched.${m.path?`<div class="sub" style="margin-top:4px">${m.path}</div>`:""}</div></div>`;
+  }
+
+  // ---- standalone browser preview: fakes the crew narration so the look can be checked without SolidWorks ----
+  function demoRun(text) {
+    const seq = [
+      [500,  () => handle({type:"step", agent:"Gauge",    gloss:"reading the assembly"})],
+      [1400, () => handle({type:"step", agent:"Gauge",    state:"done", result:"found 112 fasteners in 14 holes"})],
+      [1500, () => handle({type:"step", agent:"Torque",   gloss:"mating the wheel bolts"})],
+      [3600, () => handle({type:"step", agent:"Torque",   state:"done", result:"112 fasteners mated"})],
+      [3700, () => handle({type:"step", agent:"Sentinel", gloss:"verifying the rebuild"})],
+      [4600, () => handle({type:"step", agent:"Sentinel", state:"done", result:"rebuild clean, nothing broke"})],
+      [4800, () => handle({type:"mated", count:112, failed:0, clean:true})],
+    ];
+    seq.forEach(([t, fn]) => setTimeout(fn, t));
+  }
+  if (!hasBridge) handle({ type:"model", title:"Wheel Hub Assembly (demo)", dimensions:new Array(22) });
+
+  // per-run thumbs: tags feedback to the exact run trace (correction data)
+  document.addEventListener("click", (e) => {
+    const fb = e.target.closest(".fb"); if (!fb) return;
+    const run = fb.getAttribute("data-run"), handler = fb.getAttribute("data-handler") || "";
+    if (e.target.classList.contains("tup")) { post({ action:"feedback", runId:run, handler:handler, sentiment:1 }); fb.innerHTML = "<span class='fbthx2'>thanks</span>"; }
+    else if (e.target.classList.contains("tdn")) { const r = fb.querySelector(".reasons"); if (r) r.style.display = "inline"; }
+    else if (e.target.hasAttribute("data-r")) { post({ action:"feedback", runId:run, handler:handler, sentiment:0, reason:e.target.getAttribute("data-r") }); fb.innerHTML = "<span class='fbthx2'>thanks - noted</span>"; }
+  });
+
+  // attach affordance: hand Forge a file (the other version to compare, etc.) without typing a path
+  function showChip(name) {
+    const chip = $("chip");
+    chip.innerHTML = `📎 ${(name||"file").replace(/</g,"&lt;")} <button class="x" id="chipx" title="remove">✕</button>`;
+    chip.style.display = "inline-flex";
+    $("chipx").addEventListener("click", () => post({ action: "clearAttach" }));
+  }
+  function hideChip() { const chip = $("chip"); chip.style.display = "none"; chip.innerHTML = ""; }
+  $("attach").addEventListener("click", () => post({ action: "attach" }));
+
+  // usage feedback
+  function fbThanks() { $("fbthx").textContent = "thanks!"; }
+  $("fbup").addEventListener("click", () => { post({ action:"feedback", sentiment:1 }); fbThanks(); });
+  $("fbdown").addEventListener("click", () => { post({ action:"feedback", sentiment:0 }); fbThanks(); });
+  $("fbtxt").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { const t = $("fbtxt").value.trim(); if (t) { post({ action:"feedback", text:t }); $("fbtxt").value=""; fbThanks(); } }
+  });
+</script>
+</body>
+</html>

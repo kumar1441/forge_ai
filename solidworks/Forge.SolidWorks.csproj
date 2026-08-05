@@ -1,0 +1,79 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Forge SolidWorks add-in.
+    .NET Framework 4.8 COM class library (required for SolidWorks COM interop + regasm).
+    Build x64 to match SolidWorks. Register with:  regasm /codebase Forge.SolidWorks.dll
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <LangVersion>latest</LangVersion>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AssemblyName>Forge.SolidWorks</AssemblyName>
+    <RootNamespace>Forge.SolidWorks</RootNamespace>
+    <!-- COM add-ins must NOT be registered by the build; we run regasm /codebase manually. -->
+    <RegisterForComInterop>false</RegisterForComInterop>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2210.55" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+
+  <!-- net48 framework assemblies not auto-referenced by the SDK -->
+  <ItemGroup>
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.Security" />
+    <Reference Include="Microsoft.CSharp" />
+  </ItemGroup>
+
+  <!--
+    SolidWorks interop assemblies. These ship with every SolidWorks install.
+    Default path shown below — update the version folder if yours differs.
+    Private=true: copy to output so regasm AND the runtime can load them (they are NOT in the
+    GAC on a 3DEXPERIENCE Makers install; our AssemblyResolve also finds them in the output folder).
+  -->
+  <ItemGroup>
+    <Reference Include="SolidWorks.Interop.sldworks">
+      <HintPath>C:\Program Files\Dassault Systemes\SOLIDWORKS 3DEXPERIENCE R2026x\SOLIDWORKS\api\redist\SolidWorks.Interop.sldworks.dll</HintPath>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="SolidWorks.Interop.swconst">
+      <HintPath>C:\Program Files\Dassault Systemes\SOLIDWORKS 3DEXPERIENCE R2026x\SOLIDWORKS\api\redist\SolidWorks.Interop.swconst.dll</HintPath>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="SolidWorks.Interop.swpublished">
+      <HintPath>C:\Program Files\Dassault Systemes\SOLIDWORKS 3DEXPERIENCE R2026x\SOLIDWORKS\api\redist\SolidWorks.Interop.swpublished.dll</HintPath>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="panel.html">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <!-- WebView2's native loader ships under runtimes\win-x64\native\. A net48 COM add-in hosted in SLDWORKS.exe does
+       NOT do the runtimes\ probing a .NET Core app does, so the WebView2 panel throws "loader not found" at load and
+       SW disables the add-in. Copy it next to the DLL so the panel always initialises. -->
+  <Target Name="CopyWebView2Loader" AfterTargets="Build">
+    <Copy SourceFiles="$(OutDir)runtimes\win-x64\native\WebView2Loader.dll"
+          DestinationFolder="$(OutDir)" SkipUnchangedFiles="true"
+          Condition="Exists('$(OutDir)runtimes\win-x64\native\WebView2Loader.dll')" />
+  </Target>
+
+  <ItemGroup>
+    <None Update="prompts\intent-system.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+</Project>
