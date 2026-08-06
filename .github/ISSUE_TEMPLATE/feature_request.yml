@@ -1,0 +1,29 @@
+name: Feature request
+description: Request a new command or workflow for Forge.
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: workflow
+    attributes:
+      label: What command/workflow do you want?
+      description: Describe the command or workflow you'd like Forge to support.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why do you need it?
+      description: What problem does it solve for you? How often do you hit it?
+    validations:
+      required: true
+  - type: textarea
+    id: phrasing
+    attributes:
+      label: Example phrasing
+      description: The exact kind of phrasing you'd type or say to trigger it.
+      placeholder: |
+        "make every second hole 10mm"
+        "export the drawing to DXF at 1:1"
+    validations:
+      required: true
