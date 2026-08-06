@@ -1,6 +1,6 @@
 # Forge
 
-[![GitHub stars](https://img.shields.io/github/stars/kumar1441/forge_ai)](https://github.com/kumar1441/forge_ai)
+[![GitHub stars](https://img.shields.io/github/stars/kumar1441/forge_ai)](https://github.com/kumar1441/forge_ai) [![Discord](https://img.shields.io/badge/Discord-Forge-%235865F2?logo=discord&logoColor=white)](https://discord.gg/YOUR_INVITE_LINK)
 
 **Talk to SolidWorks. Get verified changes.** Forge is an open-source add-in that turns plain English into real parametric edits inside SolidWorks — and independently re-measures every change before it claims success.
 
@@ -63,7 +63,7 @@ PRs welcome. A new command = one spec row + one handler class + one test — see
 
 ## Support Forge
 
-Forge is free, open source, and built one afternoon at a time. If it saves you one, **star the repo** — stars are how power users find it. Know a fellow engineer fighting SolidWorks? Send them this page. Found a bug or want a command? Open an [issue](https://github.com/kumar1441/forge_ai/issues).
+Forge is free, open source, and built one afternoon at a time. If it saves you one, **star the repo** — stars are how power users find it. Know a fellow engineer fighting SolidWorks? Send them this page. Found a bug or want a command? Open an [issue](https://github.com/kumar1441/forge_ai/issues) — report a bug or request a command using the issue templates.
 
 ## License
 

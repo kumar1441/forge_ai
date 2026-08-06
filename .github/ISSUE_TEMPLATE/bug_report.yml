@@ -1,0 +1,60 @@
+name: Bug report
+description: Report a bug in Forge — crashes, wrong geometry, broken commands.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug description
+      description: What happened? What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact steps that trigger the bug, ideally including the exact phrasing you used.
+      placeholder: |
+        1. Open the model
+        2. Say "set the bore to 25mm"
+        3. Forge reported success but the dimension is unchanged
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual
+      description: What did you expect Forge to do, and what did it actually do?
+    validations:
+      required: true
+  - type: input
+    id: forge_version
+    attributes:
+      label: Forge version
+      description: The release/build of Forge you're running.
+    validations:
+      required: true
+  - type: input
+    id: solidworks_version
+    attributes:
+      label: SolidWorks version
+      description: e.g. SolidWorks 2024 SP2.0
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider (if BYOK)
+      description: Which LLM provider are you using, if any?
+      multiple: false
+      options:
+        - None (keyless / local parsing)
+        - Anthropic
+        - OpenAI
+        - DeepSeek
+        - OpenRouter
+        - Ollama (local)
+        - Other / not sure
+    validations:
+      required: false
