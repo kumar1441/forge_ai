@@ -206,15 +206,53 @@
   .fbtxt { flex:1; min-width:110px; background:var(--raised); border:1px solid var(--line); border-radius:8px;
     padding:5px 8px; font:inherit; font-size:11.5px; color:var(--ink); outline:none; }
   .fbthx { color:var(--mint); font-weight:600; }
+
+  /* header right cluster: settings + clear */
+  .headacts { display:flex; align-items:center; gap:8px; }
+  .gear { background:var(--raised); border:1px solid var(--line); border-radius:8px; color:var(--soft);
+    font:inherit; font-size:14px; padding:1px 9px; cursor:pointer; line-height:1.4; }
+  .gear:hover { border-color:var(--accent); color:var(--ink); }
+
+  /* settings popover */
+  .settings { position:absolute; top:52px; right:14px; z-index:60; width:230px;
+    background:var(--raised); border:1px solid var(--line); border-radius:12px;
+    padding:10px; display:flex; flex-direction:column; gap:4px; }
+  .settings .srow { display:flex; align-items:center; justify-content:space-between; gap:10px;
+    padding:7px 6px; font-size:12.5px; color:var(--ink); }
+  .settings .srow label { color:var(--soft); }
+  .settings .ssep { border-top:1px solid var(--line); margin:4px 0; }
+  .toggle { position:relative; width:38px; height:22px; flex:none; cursor:pointer; }
+  .toggle input { opacity:0; width:0; height:0; }
+  .toggle .tk { position:absolute; inset:0; background:var(--raised); border:1px solid var(--line); border-radius:999px; transition:background .18s; }
+  .toggle .tk::after { content:""; position:absolute; left:3px; top:2px; width:16px; height:16px; border-radius:50%; background:var(--soft); transition:transform .18s, background .18s; }
+  .toggle input:checked + .tk { background:var(--accent-soft); border-color:var(--accent); }
+  .toggle input:checked + .tk::after { transform:translateX(16px); background:var(--accent); }
+  .settings .sclose { background:none; border:none; color:var(--faint); font:inherit; font-size:11.5px;
+    text-align:right; cursor:pointer; padding:4px 6px 0; }
+  .settings .sclose:hover { color:var(--ink); }
+  .settings .sfoot { font-size:10.5px; color:var(--faint); padding:2px 6px 4px; }
 </style>
 </head>
 <body>
   <div class="head">
     <div class="headtop" id="headtop">
       <div class="brand"><b><span>◆</span> Forge</b></div>
-      <button class="clearbtn" id="clearbtn" title="Clear the panel for a fresh recording take">Clear</button>
+      <div class="headacts">
+        <button class="gear" id="gearbtn" title="Settings">⚙</button>
+        <button class="clearbtn" id="clearbtn" title="Clear the panel for a fresh recording take">Clear</button>
+      </div>
     </div>
     <div class="know" id="know">Looking for your part…</div>
+    <div class="settings" id="settings" style="display:none">
+      <button class="sclose" id="sclose">✕</button>
+      <div class="srow"><label>Dark theme</label>
+        <span class="toggle"><input type="checkbox" id="themetgl" /><span class="tk"></span></span>
+      </div>
+      <div class="ssep"></div>
+      <div class="srow"><label>Provider</label><span style="color:var(--faint);font-size:11.5px">BYOK · see README</span></div>
+      <div class="srow"><label>Telemetry</label><span style="color:var(--faint);font-size:11.5px">anonymous · on</span></div>
+      <div class="sfoot">settings pane — more controls coming with the signed installer</div>
+    </div>
   </div>
 
   <div class="transcript" id="transcript">
@@ -273,6 +311,22 @@
     intent.focus();
   }
   $("clearbtn").addEventListener("click", clearPanel);
+
+  // ---- settings: gear open/close + theme toggle (persists; default = follow OS) ----
+  const settingsEl = $("settings"), themeTgl = $("themetgl");
+  function applyTheme() {
+    const saved = localStorage.getItem("forge_theme");            // "dark" | "light" | null = follow OS
+    const osLight = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches;
+    const dark = saved ? saved !== "light" : !osLight;
+    document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+    themeTgl.checked = saved === "dark" || (!saved && !osLight);
+  }
+  $("gearbtn").addEventListener("click", (e) => { e.stopPropagation(); settingsEl.style.display = settingsEl.style.display === "none" ? "flex" : "none"; });
+  $("sclose").addEventListener("click", () => settingsEl.style.display = "none");
+  document.addEventListener("click", (e) => { if (!e.target.closest("#settings") && !e.target.closest("#gearbtn")) settingsEl.style.display = "none"; });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") settingsEl.style.display = "none"; });
+  themeTgl.addEventListener("change", () => { localStorage.setItem("forge_theme", themeTgl.checked ? "dark" : "light"); applyTheme(); });
+  applyTheme();
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 
   intent.addEventListener("keydown", (e) => {
