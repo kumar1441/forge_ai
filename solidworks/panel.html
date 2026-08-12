@@ -6,10 +6,31 @@
 <title>Forge</title>
 <style>
   :root {
-    --bg:#ffffff; --ink:#1b1f24; --soft:#6b727c; --faint:#9aa1ab;
-    --line:#e9ecf0; --field:#f6f7f9; --accent:#ff6b2c; --accentink:#b34516;
-    --okbg:#f0faf3; --okline:#bfe6cd; --okink:#1f7a43;
-    --glow:#fff6ec; --glowline:#ffd9b8; --userbg:#f2f4f7;
+    /* FDL v1 dark (default) — docs/ui-design-system.md §2 */
+    --bg:#0B0D12;        /* panel background */
+    --surface:#12151C;   /* cards */
+    --raised:#181C26;    /* composer, hover states, user bubble */
+    --ink:#F1F3F5;       /* primary text */
+    --soft:rgba(241,243,245,.55);
+    --faint:rgba(241,243,245,.32);
+    --line:rgba(241,243,245,.08);
+
+    --ember1:#FC9165; --ember2:#F47840;
+    --accent:#F47840;
+    --accent-ink:#FFB08A;
+    --accent-soft:rgba(244,120,64,.14);
+
+    --mint:#7ED3A0;  --mint-soft:rgba(126,211,160,.10);
+    --amber:#F5C169; --amber-soft:rgba(245,193,105,.10);
+    --red:#F27D72;   --red-soft:rgba(242,125,114,.10);
+    --sky:#7AA5FF;   --sky-soft:rgba(122,165,255,.12);
+    --violet:#B794F6;--violet-soft:rgba(183,148,246,.12);
+  }
+  /* FDL v1 light (override only — tools that force it) */
+  [data-theme="light"] {
+    --bg:#FFFFFF; --surface:#FFFFFF; --raised:#F6F7F9;
+    --ink:#1B1F24; --soft:rgba(27,31,36,.62); --faint:rgba(27,31,36,.38);
+    --line:rgba(27,31,36,.10); --accent-ink:#B34516;
   }
   * { box-sizing:border-box; }
   html, body { height:100%; }
@@ -22,7 +43,7 @@
   /* header */
   .head { padding:14px 18px 10px; border-bottom:1px solid var(--line); }
   .headtop { display:flex; align-items:center; justify-content:space-between; }
-  .clearbtn { background:var(--field); border:1px solid var(--line); border-radius:8px; color:var(--faint);
+  .clearbtn { background:var(--raised); border:1px solid var(--line); border-radius:8px; color:var(--faint);
     font:inherit; font-size:11px; padding:2px 9px; cursor:pointer; }
   .clearbtn:hover { border-color:var(--accent); color:var(--ink); }
   .brand { font-size:13px; letter-spacing:.3px; color:var(--faint); }
@@ -41,7 +62,7 @@
 
   .turn { display:flex; flex-direction:column; gap:8px; }
   .bubble.user {
-    align-self:flex-end; max-width:88%; background:var(--userbg);
+    align-self:flex-end; max-width:88%; background:var(--raised);
     border:1px solid var(--line); border-radius:14px 14px 4px 14px;
     padding:9px 13px; font-size:13.5px; white-space:pre-wrap; word-break:break-word;
   }
@@ -50,10 +71,10 @@
   /* the named-crew step lines — the honest machinery */
   .steps { display:flex; flex-direction:column; gap:4px; }
   .step { font-size:12.5px; color:var(--soft); display:flex; align-items:baseline; gap:7px; }
-  .step .agent { font-weight:600; color:var(--accentink); }
+  .step .agent { font-weight:600; color:var(--accent-ink); }
   .step .glyph { font-size:11px; width:12px; text-align:center; flex:none; }
   .step.run .glyph { color:var(--accent); animation:pulse 1s ease-in-out infinite; }
-  .step.done .glyph { color:var(--okink); }
+  .step.done .glyph { color:var(--mint); }
   @keyframes pulse { 0%,100%{opacity:.35} 50%{opacity:1} }
 
   /* cycling mechanical gerund — the "thinking" word */
@@ -65,10 +86,10 @@
 
   .card {
     border:1px solid var(--line); border-radius:12px; padding:12px 14px;
-    background:#fff; display:flex; flex-direction:column; gap:3px;
+    background:var(--surface); display:flex; flex-direction:column; gap:3px;
   }
-  .card.ok { background:var(--okbg); border-color:var(--okline); }
-  .card.fail { background:#fff5f5; border-color:#f3c9c6; }
+  .card.ok { background:var(--mint-soft); border-color:rgba(126,211,160,.30); }
+  .card.fail { background:var(--red-soft); border-color:rgba(242,125,114,.30); }
   .card .top { display:flex; justify-content:space-between; align-items:center; gap:8px; }
   .card .name { font-weight:600; }
   .card .sub { font-size:11.5px; color:var(--soft); word-break:break-word; }
@@ -79,51 +100,117 @@
   .card .fb .reasons { display:inline-flex; gap:4px; }
   .card .fb .reasons button { font-size:11px; }
   .card .fb .fbthx2 { font-size:12px; opacity:.6; }
-  .tag { font-size:10.5px; padding:2px 8px; border-radius:20px; background:var(--okbg); color:var(--okink); border:1px solid var(--okline); white-space:nowrap; }
-  .card.fail .tag { background:#fff5f5; color:#b3261e; border-color:#f3c9c6; }
-  .card.review { background:var(--glow); border-color:var(--glowline); }
-  .card.review .tag { background:#fff; color:var(--accentink); border-color:var(--glowline); }
-  .card.bifrost { background:#eef4ff; border-color:#bcd3ff; }
-  .card.bifrost .tag { background:#fff; color:#2a5bd7; border-color:#bcd3ff; }
-  .done { font-size:13px; color:var(--okink); font-weight:600; }
-  .err  { font-size:13px; color:#b3261e; }
+  .tag { font-size:10.5px; padding:2px 8px; border-radius:20px; background:var(--mint-soft); color:var(--mint); border:1px solid rgba(126,211,160,.30); white-space:nowrap; }
+  .card.fail .tag { background:var(--red-soft); color:var(--red); border-color:rgba(242,125,114,.30); }
+  .card.review { background:var(--amber-soft); border-color:rgba(245,193,105,.30); }
+  .card.review .tag { background:var(--amber-soft); color:var(--amber); border-color:rgba(245,193,105,.30); }
+  .card.bifrost { background:var(--sky-soft); border-color:rgba(122,165,255,.30); }
+  .card.team { background:var(--violet-soft); border-color:rgba(183,148,246,.30); }
+  .card.team .tag { background:var(--violet-soft); color:var(--violet); border-color:rgba(183,148,246,.30); }
+
+  /* FDL 4.4 ConfirmGate — the trust component (ember left border) */
+  .gate { border-left:2px solid var(--accent); }
+  .gate.permanent .name { color:var(--red); }
+  .gate .rows { display:flex; flex-direction:column; gap:3px; margin:4px 0 2px; }
+  .gate .row { display:flex; justify-content:space-between; gap:8px; font-size:12.5px; color:var(--soft); }
+  .gate .row b { color:var(--ink); font-family:ui-monospace,"Cascadia Code",Consolas,monospace; font-weight:600; }
+  .gate .excl { font-size:11.5px; color:var(--faint); }
+  .gate .files { font-size:11.5px; color:var(--faint); font-family:ui-monospace,"Cascadia Code",Consolas,monospace; }
+  .gate .acts { display:flex; gap:8px; margin-top:8px; }
+  .gate .acts button { font:inherit; font-size:13px; font-weight:600; padding:9px 18px; border-radius:999px; cursor:pointer; border:none; }
+  .gate .go { background:linear-gradient(135deg,var(--ember1),var(--ember2)); color:#0B0D12; box-shadow:0 4px 24px rgba(252,145,101,.35); }
+  .gate .nope { background:none; border:1px solid var(--line) !important; color:var(--soft); }
+  .gate .gfoot { margin-top:6px; font-size:11px; color:var(--faint); }
+
+  /* FDL 4.5 BucketReport — three hue-coded rows */
+  .report .bucket { display:flex; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid var(--line); font-size:13px; }
+  .report .bucket:last-child { border-bottom:none; }
+  .report .bucket .n { font-family:ui-monospace,"Cascadia Code",Consolas,monospace; font-weight:600; min-width:22px; text-align:right; }
+  .report .bucket.ok .n { color:var(--mint); }
+  .report .bucket.review .n { color:var(--amber); }
+  .report .bucket.fail .n { color:var(--red); }
+  .report .bucket .t { color:var(--soft); }
+  .report .bucket.fail .t b { color:var(--red); font-weight:600; }
+  .report .bucket .names { color:var(--faint); font-family:ui-monospace,"Cascadia Code",Consolas,monospace; font-size:11.5px; margin-left:auto; text-align:right; }
+
+  /* FDL 4.7 ShareLink — the Drop card */
+  .share .link { font-family:ui-monospace,"Cascadia Code",Consolas,monospace; font-size:11.5px; color:var(--sky);
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .share .stats { display:flex; gap:12px; font-size:11.5px; color:var(--faint); margin-top:6px; }
+  .share .stats b { color:var(--mint); font-weight:600; }
+  .share .mini { background:none; border:1px solid var(--line); border-radius:8px; color:var(--soft); font:inherit;
+    font-size:11.5px; padding:2px 8px; cursor:pointer; }
+  .share .mini:hover { border-color:var(--accent); color:var(--ink); }
+
+  /* FDL 4.9 PresenceRow — avatar dots in the header */
+  .presence { display:flex; align-items:center; gap:2px; }
+  .avatar { width:24px; height:24px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+    font-size:10.5px; font-weight:600; color:#0B0D12; background:linear-gradient(135deg,var(--ember1),var(--ember2));
+    border:2px solid var(--bg); margin-left:-4px; }
+  .avatar.editing { border-color:var(--violet); }
+  .avatar.more { background:var(--raised); color:var(--soft); border:1px solid var(--line); }
+
+  /* FDL 3-page onboarding overlay (trap.md: welcome+key / trust / try-it) */
+  .onboard { position:absolute; inset:0; z-index:50; background:var(--bg);
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:16px; padding:28px; }
+  .onboard .obdiamond { font-size:26px; color:var(--accent); }
+  .onboard h1 { margin:0; font-size:20px; font-weight:700; letter-spacing:.3px; }
+  .onboard .obsub { font-size:13.5px; color:var(--soft); text-align:center; max-width:300px; line-height:1.6; }
+  .onboard .obpill { font:inherit; font-size:13.5px; font-weight:600; padding:10px 22px; border-radius:999px;
+    background:linear-gradient(135deg,var(--ember1),var(--ember2)); color:#0B0D12; cursor:pointer; border:none;
+    box-shadow:0 4px 24px rgba(252,145,101,.35); }
+  .onboard .obghost { background:none; border:1px solid var(--line); color:var(--soft); }
+  .onboard .obkey { width:100%; max-width:300px; background:var(--raised); border:1px solid var(--line);
+    border-radius:14px; padding:12px 14px; font:inherit; font-size:13px; color:var(--ink); outline:none; }
+  .onboard .obkey:focus { border-color:var(--accent); }
+  .onboard .obskip { position:absolute; top:14px; right:16px; background:none; border:none; color:var(--faint);
+    font:inherit; font-size:12px; cursor:pointer; }
+  .onboard .obtrust { text-align:left; max-width:320px; display:flex; flex-direction:column; gap:10px; }
+  .onboard .obtrust div { display:flex; gap:10px; align-items:flex-start; font-size:13px; color:var(--soft); }
+  .onboard .obtrust .glyph2 { color:var(--mint); flex:none; }
+  .onboard .obdots { display:flex; gap:6px; margin-top:6px; }
+  .onboard .obdot { width:7px; height:7px; border-radius:50%; background:var(--raised); border:1px solid var(--line); }
+  .onboard .obdot.on { background:var(--accent); border-color:var(--accent); }
+  .card.bifrost .tag { background:var(--sky-soft); color:var(--sky); border-color:rgba(122,165,255,.30); }
+  .done { font-size:13px; color:var(--mint); font-weight:600; }
+  .err  { font-size:13px; color:var(--red); }
 
   /* composer pinned to the bottom */
   .composer { border-top:1px solid var(--line); padding:12px 14px 8px; background:var(--bg); }
   .ask { position:relative; }
   textarea {
     width:100%; resize:none; overflow:hidden; min-height:48px; max-height:160px;
-    background:var(--field); border:1px solid var(--line); border-radius:14px;
+    background:var(--raised); border:1px solid var(--line); border-radius:14px;
     padding:13px 15px; font:inherit; color:var(--ink); outline:none;
     transition:border-color .15s, background .15s;
   }
   textarea::placeholder { color:var(--faint); }
-  textarea:focus { border-color:var(--accent); background:#fff; }
+  textarea:focus { border-color:var(--accent); background:var(--raised); }
   .hint { margin:7px 2px 0; font-size:11px; color:var(--faint); }
-  .hint kbd { background:var(--field); border:1px solid var(--line); border-radius:5px; padding:0 5px; font-size:10.5px; }
+  .hint kbd { background:var(--raised); border:1px solid var(--line); border-radius:5px; padding:0 5px; font-size:10.5px; }
 
   /* attach affordance — hand Forge a file (e.g. the other version) without typing a path */
   .attachrow { display:flex; align-items:center; gap:8px; margin:0 2px 8px; flex-wrap:wrap; }
-  .attachbtn { background:var(--field); border:1px solid var(--line); border-radius:9px; padding:4px 10px;
+  .attachbtn { background:var(--raised); border:1px solid var(--line); border-radius:9px; padding:4px 10px;
     cursor:pointer; font:inherit; font-size:12px; color:var(--soft); }
   .attachbtn:hover { border-color:var(--accent); color:var(--ink); }
-  .chip { display:inline-flex; align-items:center; gap:6px; background:var(--glow); border:1px solid var(--glowline);
-    border-radius:9px; padding:3px 6px 3px 9px; font-size:11.5px; color:var(--accentink); }
-  .chip .x { cursor:pointer; border:none; background:none; color:var(--accentink); font-size:13px; padding:0 2px; opacity:.7; }
+  .chip { display:inline-flex; align-items:center; gap:6px; background:var(--amber-soft); border:1px solid rgba(245,193,105,.30);
+    border-radius:9px; padding:3px 6px 3px 9px; font-size:11.5px; color:var(--accent-ink); }
+  .chip .x { cursor:pointer; border:none; background:none; color:var(--accent-ink); font-size:13px; padding:0 2px; opacity:.7; }
   .chip .x:hover { opacity:1; }
 
   /* slim trial feedback footer */
   .fb { margin-top:8px; display:flex; align-items:center; gap:7px; flex-wrap:wrap; font-size:11.5px; color:var(--faint); }
-  .fbbtn { background:var(--field); border:1px solid var(--line); border-radius:8px; padding:1px 7px; cursor:pointer; font-size:13px; }
+  .fbbtn { background:var(--raised); border:1px solid var(--line); border-radius:8px; padding:1px 7px; cursor:pointer; font-size:13px; }
   .fbbtn:hover { border-color:var(--accent); }
-  .fbtxt { flex:1; min-width:110px; background:var(--field); border:1px solid var(--line); border-radius:8px;
+  .fbtxt { flex:1; min-width:110px; background:var(--raised); border:1px solid var(--line); border-radius:8px;
     padding:5px 8px; font:inherit; font-size:11.5px; color:var(--ink); outline:none; }
-  .fbthx { color:var(--okink); font-weight:600; }
+  .fbthx { color:var(--mint); font-weight:600; }
 </style>
 </head>
 <body>
   <div class="head">
-    <div class="headtop">
+    <div class="headtop" id="headtop">
       <div class="brand"><b><span>◆</span> Forge</b></div>
       <button class="clearbtn" id="clearbtn" title="Clear the panel for a fresh recording take">Clear</button>
     </div>
@@ -281,6 +368,47 @@
       <div class="sub">${(m.info||"").replace(/</g,"&lt;")}</div></div>`;
   }
 
+  // FDL 4.4 ConfirmGate — counts, exclusions, new files, [Forge it]/[Not yet]
+  function renderConfirm(m) {
+    const rows = (m.counts || []).map(c => `<div class="row"><span>${c.label}</span><b>${c.value}</b></div>`).join("");
+    const excl = (m.exclusions || []).length
+      ? `<div class="excl">skipping ${m.exclusions.length} — ${m.exclusions.map(x=>String(x).replace(/</g,"&lt;")).join(", ")}</div>` : "";
+    const files = (m.files || []).length
+      ? `<div class="files">new: ${m.files.map(f=>String(f).replace(/</g,"&lt;")).join(" · ")}</div>` : "";
+    const perm = m.permanent ? " permanent" : "";
+    return `<div class="card gate${perm}">
+      <div class="top"><span class="name">${String(m.name||"Confirm").replace(/</g,"&lt;")}</span><span class="tag review">${m.permanent ? "permanent" : "confirm"}</span></div>
+      ${rows ? `<div class="rows">${rows}</div>` : ""}${excl}${files}
+      <div class="acts"><button class="go" data-confirm="1">${m.permanent ? "Do it" : "Forge it"}</button>
+      <button class="nope" data-confirm="0">Not yet</button></div>
+      <div class="gfoot">say "revert" anytime after</div></div>`;
+  }
+
+  // FDL 4.5 BucketReport — clean / auto-fixed / need human (+ quarantined)
+  function renderReport(m) {
+    const b = (n, cls, label, names) => n > 0
+      ? `<div class="bucket ${cls}"><span class="n">${n}</span><span class="t">${label}</span>${names ? `<span class="names">${names.map(x=>String(x).replace(/</g,"&lt;")).join(", ")}</span>` : ""}</div>` : "";
+    return `<div class="card report">
+      ${b(m.clean, "ok", "clean", null)}
+      ${b(m.auto, "review", "auto-fixed", null)}
+      ${b(m.human, "fail", "need human", m.humanNames)}
+      ${b(m.quarantined, "fail", "quarantined", null)}
+    </div>`;
+  }
+
+  // FDL 4.7 ShareLink — the Drop card
+  function renderShare(m) {
+    return `<div class="card share">
+      <div class="top"><span class="name">${String(m.name||"File dropped").replace(/</g,"&lt;")}</span><span class="tag">done</span></div>
+      <div class="link">${String(m.link||"").replace(/</g,"&lt;")}</div>
+      <div class="top" style="margin-top:6px">
+        <div class="sub">view link · expires in 7 days · ${m.downloads||0} downloads</div>
+        <div><button class="mini" data-copy="1">copy</button><button class="mini" data-revoke="1">revoke</button></div>
+      </div>
+      <div class="stats"><span><b>${m.views||0}</b> views</span><span><b>${m.pulls||0}</b> pulls</span><span><b>${m.joined||0}</b> joined</span></div>
+    </div>`;
+  }
+
   function handle(m) {
     if (m.type === "model") {
       if (m.title) {
@@ -352,6 +480,13 @@
         }</div>${thumbs}</div>`);
     }
 
+    // FDL 4.4/4.5/4.7 — the batch-5 components (a type without a renderer is a bug)
+    else if (m.type === "confirm") { finish(renderConfirm(m)); }
+    else if (m.type === "report") { finish(renderReport(m)); }
+    else if (m.type === "share") { finish(renderShare(m)); }
+    else if (m.type === "presence") { renderPresence(m); }
+    else if (m.type === "firstrun") { showOnboard(); }
+
     // cross-tool / teammate notifications arrive any time — append as a system card
     else if (m.type === "bifrost") {
       systemCard(`<div class="card bifrost">
@@ -379,6 +514,69 @@
     transcript.append(t);
     if (wasBottom) scroll();
   }
+
+  // FDL 4.9 PresenceRow — avatar dots in the header
+  function renderPresence(m) {
+    let host = document.querySelector(".presence");
+    if (!host) {
+      host = document.createElement("div"); host.className = "presence";
+      $("headtop").appendChild(host);
+    }
+    const people = (m.people || []).slice(0, 4);
+    const more = (m.people || []).length - people.length;
+    host.innerHTML = people.map((p, i) =>
+      `<div class="avatar ${p.editing ? "editing" : ""}" title="${String(p.name||"").replace(/"/g,"&quot;")}">${String((p.name||"?")[0]).toUpperCase()}</div>`
+    ).join("") + (more > 0 ? `<div class="avatar more">+${more}</div>` : "");
+  }
+
+  // FDL 3-page onboarding (trap.md LOCKED 08-12): welcome+key / trust / try-it. Skip on every page.
+  // Pure panel UI; the host (ForgePanel.cs) later sends { type:"firstrun" } and handles the key save via DPAPI.
+  let onboarded = false;
+  function showOnboard() {
+    if (onboarded || localStorage.getItem("forge_onboarded")) return;
+    onboarded = true;
+    const o = document.createElement("div"); o.className = "onboard"; o.id = "onboard";
+    let page = 1;
+    const dots = () => `<div class="obdots">${[1,2,3].map(p=>`<div class="obdot ${p===page?"on":""}"></div>`).join("")}</div>`;
+    const page1 = `<span class="obdiamond">◆</span><h1>Welcome to Forge</h1>
+      <div class="obsub">Talk to SolidWorks in plain English. Get verified changes.</div>
+      <input class="obkey" id="obkey" placeholder="Paste a provider key (optional) — or get a free one" />
+      <button class="obpill" id="obnext">Continue</button>
+      <button class="obghost obpill" id="obskip">Skip for now — I'll stay keyless</button>`;
+    const page2 = `<span class="obdiamond">◆</span><h1>Your data stays yours</h1>
+      <div class="obtrust">
+        <div><span class="glyph2">✓</span>we never get your model geometry</div>
+        <div><span class="glyph2">✓</span>no IP · no file names · no dimensions</div>
+        <div><span class="glyph2">✓</span>your key never leaves your machine</div>
+        <div><span class="glyph2">✓</span>off is off — nothing leaves</div>
+      </div>
+      <button class="obpill" id="obnext">Continue</button>`;
+    const page3 = `<span class="obdiamond">◆</span><h1>Try it</h1>
+      <div class="obsub">"make the bore 25mm"</div>
+      <div class="obsub" style="color:var(--faint)">Forge reads, edits, and independently re-measures — it never claims a change it didn't verify.</div>
+      <button class="obpill" id="obfinish">Start using Forge</button>`;
+    const render = () => {
+      o.innerHTML = `<button class="obskip" id="obskipall">Skip</button>${page===1?page1:page===2?page2:page3}${dots()}`;
+      const nxt = o.querySelector("#obnext");
+      if (nxt) nxt.addEventListener("click", () => {
+        const k = o.querySelector("#obkey");
+        if (k && k.value.trim()) post({ action: "saveKey", key: k.value.trim() });
+        page++; render();
+      });
+      const fin = o.querySelector("#obfinish");
+      if (fin) fin.addEventListener("click", done);
+      const sk = o.querySelector("#obskip"), sa = o.querySelector("#obskipall");
+      if (sk) sk.addEventListener("click", done);
+      if (sa) sa.addEventListener("click", done);
+      const k = o.querySelector("#obkey");
+      if (k) k.addEventListener("keydown", (e) => { if (e.key === "Enter") { page++; render(); } });
+    };
+    const done = () => { localStorage.setItem("forge_onboarded","1"); o.remove(); intent.focus(); };
+    render();
+    transcript.appendChild(o);
+  }
+  // the host tells us it's a fresh run; until it does, the standalone preview still shows onboarding once
+  if (!hasBridge && !localStorage.getItem("forge_onboarded")) showOnboard();
 
   if (hasBridge) window.chrome.webview.addEventListener("message", (e) => handle(JSON.parse(e.data)));
 
@@ -432,6 +630,21 @@
     seq.forEach(([t, fn]) => setTimeout(fn, t));
   }
   if (!hasBridge) handle({ type:"model", title:"Wheel Hub Assembly (demo)", dimensions:new Array(22) });
+
+  // ConfirmGate + ShareLink actions (delegated)
+  document.addEventListener("click", (e) => {
+    const go = e.target.closest("[data-confirm]");
+    if (go) {
+      const gate = go.closest(".gate");
+      post({ action: "confirm", accept: go.getAttribute("data-confirm") === "1" });
+      if (gate) gate.innerHTML = `<div class="sub" style="color:var(--soft)">${go.getAttribute("data-confirm") === "1" ? "Running it…" : "Standing down — nothing changed."}</div>`;
+      return;
+    }
+    const cp = e.target.closest("[data-copy]");
+    if (cp) { const link = cp.closest(".share").querySelector(".link").textContent; try { navigator.clipboard.writeText(link); cp.textContent = "copied"; } catch {} return; }
+    const rv = e.target.closest("[data-revoke]");
+    if (rv) { post({ action: "revokeShare" }); rv.textContent = "revoked"; return; }
+  });
 
   // per-run thumbs: tags feedback to the exact run trace (correction data)
   document.addEventListener("click", (e) => {
