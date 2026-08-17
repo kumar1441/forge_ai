@@ -1,0 +1,79 @@
+# Forge — build + sign the MSI installer (SignPath OSS = free code signing for open source).
+#
+# GATES before this is fully live:
+#   1. The repo must be PUBLIC (SignPath OSS requires a public OSS repo + GitHub org approval).
+#   2. SignPath OSS account + project set up; add repo secrets (see the sign-msi job).
+#   3. Building the add-in on a clean runner needs the SolidWorks interop assemblies the csproj
+#      references via a local HintPath. Until interop is vendored, produce the MSI on a machine
+#      with SolidWorks via installer/build-msi.ps1.
+#
+# Until the gates open, this workflow builds the unsigned MSI (when interop is available) and
+# uploads it as an artifact; the sign step reports a clear setup message instead of failing silently.
+
+name: Build & sign MSI
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+jobs:
+  build-msi:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # Gate 3: clean runners have no SolidWorks interop. Once 2.4 lands (interop via script/NuGet),
+      # this just works. Until then it fails here with the csproj's HintPath missing — expected.
+      - name: Build add-in (Release x64)
+        run: dotnet build solidworks/Forge.SolidWorks.csproj -c Release -p:Platform=x64
+
+      - name: Build MSI
+        run: powershell -ExecutionPolicy Bypass -File installer/build-msi.ps1
+
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-msi
+          path: dist/*.msi
+
+      - name: Attach MSI to release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.msi
+
+  # SignPath OSS (https://www.signpath.io/oss) — free, real cert, Smart App Control trusts the result.
+  # Setup checklist (Ravi):
+  #   1. Make the repo public; sign in to SignPath OSS with the org account (github app approval).
+  #   2. Create the project for this repo; grant a service account "signing" on the project.
+  #   3. Paste SignPath's generated workflow step here — the dashboard generates the exact API call
+  #      (their docs: https://docs.signpath.io/Integrations/GitHub). Do NOT hand-write the endpoint.
+  #   4. Add the repo secrets the generated step needs (SignPath API token + org/project/policy ids).
+  # The MSI must be embedded-single-file and x64 — installer/Product.wxs already does that.
+  sign-msi:
+    needs: build-msi
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check SignPath secrets are configured
+        run: |
+          if ("${{ secrets.SIGNPATH_API_TOKEN }}" -eq "") {
+            Write-Host "SignPath OSS secrets not configured yet. Add SIGNPATH_API_TOKEN + the"
+            Write-Host "SIGNPATH_ORG_ID / SIGNPATH_PROJECT_SLUG / SIGNPATH_SIGNING_POLICY_SLUG"
+            Write-Host "secrets (values from the SignPath OSS dashboard) and paste the generated"
+            Write-Host "signing-request step from https://docs.signpath.io/Integrations/GitHub."
+            exit 1
+          }
+
+      # PLACEHOLDER — replace with SignPath's generated signing step once secrets exist.
+      # Download the MSI from the build-msi artifact, submit the signing request, wait, download
+      # the signed MSI, re-upload. Every artifact created by that step is the release asset.
