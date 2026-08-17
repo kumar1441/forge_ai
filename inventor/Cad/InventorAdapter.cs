@@ -16,9 +16,9 @@ namespace Forge.Cad
     /// </summary>
     public class InventorAdapter : ICadAdapter
     {
-        private readonly Inventor.Application _app;
+        private readonly global::Inventor.Application _app;
 
-        public InventorAdapter(Inventor.Application app) { _app = app; }
+        public InventorAdapter(global::Inventor.Application app) { _app = app; }
 
         public string HostId => "inventor";
 

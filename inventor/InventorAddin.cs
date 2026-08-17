@@ -18,7 +18,8 @@ namespace Forge.Inventor
     public class InventorAddin : ApplicationAddInServer
     {
         // Shared so the docked panel control can reach the host application.
-        public static Inventor.Application InvApp;
+        // (global:: — our own Forge.Inventor namespace shadows the interop's Inventor namespace.)
+        public static global::Inventor.Application InvApp;
 
         private InventorPanel _panel;
         private Forge.Cad.InventorAdapter _cadAdapter;
@@ -55,13 +56,13 @@ namespace Forge.Inventor
 
         private void CreateDockablePanel()
         {
-            // DockableWindows.Add(clientId, title) → DockableWindow; host the WinForms control via
-            // AddChild(control.Handle); .Visible = true to show. Verify exact signatures against the
-            // installed interop (multicad.md §6 rule — do not ship on assumed names).
+            // Verified against the vendored 2026 (v30) interop by build + reflection:
+            // DockableWindows.Add(ClientId, InternalName, Caption) → DockableWindow; host the
+            // WinForms control via AddChild(control.Handle); Visible is settable (set_Visible).
             try
             {
                 var windows = InvApp.UserInterfaceManager.DockableWindows;
-                var window = windows.Add("Forge.ForgePanel", "Forge");
+                var window = windows.Add("5B1E4A7C-2D9F-4C8A-B6E3-1F7D9C2A8E4B", "Forge", "Forge");
                 _panel = new InventorPanel(InvApp);
                 window.AddChild(_panel.Handle);
                 window.Visible = true;

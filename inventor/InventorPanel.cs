@@ -1,8 +1,9 @@
 using System;
 using System.IO;
 using System.Windows.Forms;
-using Inventor;
 using Microsoft.Web.WebView2.WinForms;
+// NOTE: no "using Inventor;" — Inventor.Path/Inventor.File collide with System.IO. The one interop
+// type used here (Application) is referenced as global::Inventor.Application.
 
 namespace Forge.Inventor
 {
@@ -14,10 +15,10 @@ namespace Forge.Inventor
     /// </summary>
     public class InventorPanel : UserControl
     {
-        private readonly Inventor.Application _app;
+        private readonly global::Inventor.Application _app;
         private WebView2 _web;
 
-        public InventorPanel(Inventor.Application app)
+        public InventorPanel(global::Inventor.Application app)
         {
             _app = app;
             Dock = DockStyle.Fill;
