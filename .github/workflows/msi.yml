@@ -1,14 +1,13 @@
 # Forge — build + sign the MSI installer (SignPath OSS = free code signing for open source).
+# Target: winget install Forge.Forge — needs the signed MSI attached to a GitHub Release,
+# then the winget manifest (winget/) submitted to microsoft/winget-pkgs.
 #
-# GATES before this is fully live:
-#   1. The repo must be PUBLIC (SignPath OSS requires a public OSS repo + GitHub org approval).
-#   2. SignPath OSS account + project set up; add repo secrets (see the sign-msi job).
-#   3. Building the add-in on a clean runner needs the SolidWorks interop assemblies the csproj
-#      references via a local HintPath. Until interop is vendored, produce the MSI on a machine
-#      with SolidWorks via installer/build-msi.ps1.
+# The add-in builds on a clean runner because the SolidWorks interop assemblies are committed in
+# lib/sw-interop (produced by installer/fetch-interop.ps1 on a SolidWorks machine) and the csproj
+# resolves them via -p:SwInteropRoot. Remaining gate to FULLY live: SignPath OSS account + secrets.
 #
-# Until the gates open, this workflow builds the unsigned MSI (when interop is available) and
-# uploads it as an artifact; the sign step reports a clear setup message instead of failing silently.
+# Until signing secrets exist, this workflow builds the MSI and uploads it as an artifact (+ attaches
+# to a tag release); the sign step reports a clear setup message instead of failing silently.
 
 name: Build & sign MSI
 
@@ -29,10 +28,19 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      # Gate 3: clean runners have no SolidWorks interop. Once 2.4 lands (interop via script/NuGet),
-      # this just works. Until then it fails here with the csproj's HintPath missing — expected.
+      - name: Verify SolidWorks interop (lib/sw-interop)
+        run: |
+          $interop = Join-Path $env:GITHUB_WORKSPACE 'lib\sw-interop'
+          $need = @('SolidWorks.Interop.sldworks.dll','SolidWorks.Interop.swconst.dll','SolidWorks.Interop.swpublished.dll')
+          $missing = $need | Where-Object { -not (Test-Path (Join-Path $interop $_)) }
+          if ($missing) {
+            Write-Host "Missing interop DLLs: $($missing -join ', ')"
+            Write-Host 'Run installer/fetch-interop.ps1 on a SolidWorks machine and commit lib/sw-interop.'
+            exit 1
+          }
+
       - name: Build add-in (Release x64)
-        run: dotnet build solidworks/Forge.SolidWorks.csproj -c Release -p:Platform=x64
+        run: dotnet build solidworks/Forge.SolidWorks.csproj -c Release -p:Platform=x64 -p:SwInteropRoot="$env:GITHUB_WORKSPACE\lib\sw-interop"
 
       - name: Build MSI
         run: powershell -ExecutionPolicy Bypass -File installer/build-msi.ps1
