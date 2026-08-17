@@ -24,6 +24,27 @@
     <SwInteropRoot>C:\Program Files\Dassault Systemes\SOLIDWORKS 3DEXPERIENCE R2026x\SOLIDWORKS\api\redist</SwInteropRoot>
   </PropertyGroup>
 
+  <!--
+    Harness/runner/ is its OWN separate csproj (ForgeHarnessRunner, a standalone exe). It lives inside this
+    project's default recursive glob (solidworks/**/*.cs), so it and its bin/obj must be excluded here or its
+    checked-in generated .NETFramework AssemblyAttributes.cs collides with this project's own (CS0579 duplicate
+    TargetFrameworkAttribute) and its source gets double-compiled into this library.
+  -->
+  <ItemGroup>
+    <Compile Remove="Harness/runner/**/*.cs" />
+    <Compile Remove="**/bin/**/*.cs" />
+    <Compile Remove="**/obj/**/*.cs" />
+    <EmbeddedResource Remove="Harness/runner/**" />
+    <None Remove="Harness/runner/**" />
+  </ItemGroup>
+
+  <!-- Shared multi-CAD core (docs/kb/multicad.md): canonical Forge.Cad interfaces + Forge.Providers
+       BYOK clients. Shared as SOURCES, not a DLL — a second regasm/manifest add-in (Inventor) can't
+       rely on a sibling assembly resolving. -->
+  <ItemGroup>
+    <Compile Include="..\shared\**\*.cs" LinkBase="shared" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2210.55" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
@@ -62,7 +83,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Update="panel.html">
+    <None Include="..\panel\panel.html">
+      <Link>panel.html</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>
