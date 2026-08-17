@@ -6,8 +6,10 @@
 # lib/sw-interop (produced by installer/fetch-interop.ps1 on a SolidWorks machine) and the csproj
 # resolves them via -p:SwInteropRoot. Remaining gate to FULLY live: SignPath OSS account + secrets.
 #
-# Until signing secrets exist, this workflow builds the MSI and uploads it as an artifact (+ attaches
-# to a tag release); the sign step reports a clear setup message instead of failing silently.
+# Until signing secrets exist, this workflow builds the MSI and uploads it as an artifact; the sign
+# step reports a clear setup message instead of failing silently. The MSI is attached to a release
+# ONLY by the sign-msi job (after signing) — never attach the unsigned MSI, or the winget package
+# would point at an asset Smart App Control blocks.
 
 name: Build & sign MSI
 
@@ -51,12 +53,6 @@ jobs:
           name: forge-msi
           path: dist/*.msi
 
-      - name: Attach MSI to release (on tag)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*.msi
-
   # SignPath OSS (https://www.signpath.io/oss) — free, real cert, Smart App Control trusts the result.
   # Setup checklist (Ravi):
   #   1. Make the repo public; sign in to SignPath OSS with the org account (github app approval).
@@ -72,6 +68,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Download MSI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: forge-msi
+          path: dist
+
       - name: Check SignPath secrets are configured
         run: |
           if ("${{ secrets.SIGNPATH_API_TOKEN }}" -eq "") {
@@ -83,5 +85,12 @@ jobs:
           }
 
       # PLACEHOLDER — replace with SignPath's generated signing step once secrets exist.
-      # Download the MSI from the build-msi artifact, submit the signing request, wait, download
-      # the signed MSI, re-upload. Every artifact created by that step is the release asset.
+      # It submits a signing request for the downloaded dist\*.msi and downloads the signed MSI
+      # back into dist\. Then the attach step below publishes ONLY that signed MSI as the release
+      # asset (winget requires the signed binary; never ship the unsigned one).
+
+      - name: Attach SIGNED MSI to release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.msi

@@ -15,10 +15,14 @@
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
 
+  <!-- ProductCode is PINNED (not auto-generated): winget's installer manifest must reference the
+       exact MSI ProductCode, and a stable identity keeps MajorUpgrade + per-version winget-pkgs
+       manifests correct. Keep in sync with winget/Forge.Forge.installer.yaml. -->
   <Package
       Name="Forge"
       Manufacturer="Forge"
       Version="0.1.0"
+      ProductCode="3A7C9E11-B2F4-4D6E-8A1C-5B9D3F7C2E4A"
       UpgradeCode="7A1D0A4E-2B8F-4C6E-9D3A-5E4F2C8B1A6D"
       Language="1033"
       Scope="perMachine"
