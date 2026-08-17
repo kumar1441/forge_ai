@@ -1,0 +1,74 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Forge Inventor add-in (adapter #2 — docs/kb/multicad.md).
+    .NET Framework 4.8 class library against the Inventor COM interop. Registered via a .addin
+    MANIFEST (Forge.Inventor.addin), NOT regasm — Inventor resolves the add-in from the manifest.
+
+    SCAFFOLD STATUS (2026-08-17): written before Inventor is installed on the HP box. It builds only
+    once Autodesk.Inventor.Interop.dll exists at $(InventorInteropRoot) (default below = a typical
+    Inventor 2025 install; the .NET SDK does not validate HintPaths until build). After install:
+    vendor the interop to lib\inventor-interop (mirror of installer/fetch-interop.ps1) so CI builds
+    on a clean runner, then build this project green BEFORE writing op bodies (multicad.md §6 rule:
+    verify every API claim against the INSTALLED interop first).
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <LangVersion>latest</LangVersion>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AssemblyName>Forge.Inventor</AssemblyName>
+    <RootNamespace>Forge.Inventor</RootNamespace>
+    <!-- Inventor interop. Default = local Inventor install's Public Assemblies. CI overrides with
+         -p:InventorInteropRoot=lib\inventor-interop (vendored copies, same pattern as sw-interop). -->
+    <InventorInteropRoot>C:\Program Files\Autodesk\Inventor 2025\Bin\Public Assemblies</InventorInteropRoot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="**/bin/**/*.cs" />
+    <Compile Remove="**/obj/**/*.cs" />
+  </ItemGroup>
+
+  <!-- Shared multi-CAD core as SOURCES (not a DLL) — same pattern as Forge.SolidWorks.csproj. -->
+  <ItemGroup>
+    <Compile Include="..\shared\**\*.cs" LinkBase="shared" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2210.55" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.Security" />
+    <Reference Include="Microsoft.CSharp" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="Autodesk.Inventor.Interop">
+      <HintPath>$(InventorInteropRoot)\Autodesk.Inventor.Interop.dll</HintPath>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\panel\panel.html">
+      <Link>panel.html</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <!-- net48 add-in hosted in Inventor.exe doesn't probe runtimes\ — copy the native loader next to
+       the DLL, same fix as the SolidWorks add-in. -->
+  <Target Name="CopyWebView2Loader" AfterTargets="Build">
+    <Copy SourceFiles="$(OutDir)runtimes\win-x64\native\WebView2Loader.dll"
+          DestinationFolder="$(OutDir)" SkipUnchangedFiles="true"
+          Condition="Exists('$(OutDir)runtimes\win-x64\native\WebView2Loader.dll')" />
+  </Target>
+</Project>

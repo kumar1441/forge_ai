@@ -23,6 +23,7 @@ namespace Forge.SolidWorks
         private int _addinCookie;
         private ITaskpaneView _taskpaneView;
         private ForgePanel _panel;
+        private Forge.SolidWorks.Cad.SolidWorksAdapter _cadAdapter;
 
         private const string PanelProgId = "Forge.ForgePanel";
 
@@ -44,6 +45,10 @@ namespace Forge.SolidWorks
             _addinCookie = cookie;
             SwApp.SetAddinCallbackInfo2(0, this, cookie);
 
+            // Multi-CAD: register adapter #1 so canonical Forge.Cad tools can reach this host (multicad.md).
+            _cadAdapter = new Forge.SolidWorks.Cad.SolidWorksAdapter(SwApp);
+            Forge.Cad.CadHost.Register(_cadAdapter);
+
             // Correction capture (undo) is armed per-doc inside CorrectionWatcher.RecordRun after each Forge run.
             // Crash/hang recovery: if the last run never finished, the panel surfaces it on first command.
 
@@ -63,6 +68,8 @@ namespace Forge.SolidWorks
         public bool DisconnectFromSW()
         {
             Telemetry.Log("session_end");
+            Forge.Cad.CadHost.Unregister(_cadAdapter);
+            _cadAdapter = null;
             if (_taskpaneView != null)
             {
                 _taskpaneView.DeleteView();
