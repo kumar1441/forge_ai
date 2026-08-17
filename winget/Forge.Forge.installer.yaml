@@ -1,6 +1,7 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
 # Forge winget installer manifest — submit to microsoft/winget-pkgs once the first SIGNED MSI is
-# released. Fill InstallerSha256 (SHA-256 of the MSI) and ProductCode (from the MSI) after release.
+# released. ProductCode matches the PINNED ProductCode in installer/Product.wxs. Only remaining
+# fill-in before submission: InstallerSha256 = SHA-256 of the signed Forge-Setup-0.1.0.msi.
 PackageIdentifier: Forge.Forge
 PackageVersion: 0.1.0
 InstallerType: wix
@@ -8,7 +9,7 @@ Scope: machine
 Installers:
 - Architecture: x64
   InstallerUrl: https://github.com/kumar1441/forge_ai/releases/download/v0.1.0/Forge-Setup-0.1.0.msi
-  InstallerSha256: <fill: SHA-256 of the released MSI>
-  ProductCode: <fill: MSI ProductCode from installer/Product.wxs>
+  InstallerSha256: "<fill: SHA-256 of the released signed MSI>"
+  ProductCode: 3A7C9E11-B2F4-4D6E-8A1C-5B9D3F7C2E4A
 ManifestType: installer
 ManifestVersion: 1.6.0
