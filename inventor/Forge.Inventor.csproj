@@ -5,12 +5,9 @@
     .NET Framework 4.8 class library against the Inventor COM interop. Registered via a .addin
     MANIFEST (Forge.Inventor.addin), NOT regasm — Inventor resolves the add-in from the manifest.
 
-    SCAFFOLD STATUS (2026-08-17): written before Inventor is installed on the HP box. It builds only
-    once Autodesk.Inventor.Interop.dll exists at $(InventorInteropRoot) (default below = a typical
-    Inventor 2025 install; the .NET SDK does not validate HintPaths until build). After install:
-    vendor the interop to lib\inventor-interop (mirror of installer/fetch-interop.ps1) so CI builds
-    on a clean runner, then build this project green BEFORE writing op bodies (multicad.md §6 rule:
-    verify every API claim against the INSTALLED interop first).
+    SCAFFOLD STATUS (2026-08-17): interop vendored (Inventor 2026, v30). Member names written from
+    the published object model were verified by BUILD — see multicad.md §6 for the runtime checks
+    that remain (DockableWindow hosting on the real session).
   -->
 
   <PropertyGroup>
@@ -23,9 +20,10 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <AssemblyName>Forge.Inventor</AssemblyName>
     <RootNamespace>Forge.Inventor</RootNamespace>
-    <!-- Inventor interop. Default = local Inventor install's Public Assemblies. CI overrides with
-         -p:InventorInteropRoot=lib\inventor-interop (vendored copies, same pattern as sw-interop). -->
-    <InventorInteropRoot>C:\Program Files\Autodesk\Inventor 2025\Bin\Public Assemblies</InventorInteropRoot>
+    <!-- Inventor interop, VENDORED at lib\inventor-interop (repo-relative — builds on any checkout
+         incl. CI). Override for a box without the vendored copy:
+         -p:InventorInteropRoot="C:\Program Files\Autodesk\Inventor 2026\Bin\Public Assemblies" -->
+    <InventorInteropRoot>$(MSBuildProjectDirectory)\..\lib\inventor-interop</InventorInteropRoot>
   </PropertyGroup>
 
   <ItemGroup>
