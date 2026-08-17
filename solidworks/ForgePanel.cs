@@ -8,8 +8,10 @@ using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
+using Forge.Providers;
 
 namespace Forge.SolidWorks
 {
@@ -57,6 +59,15 @@ namespace Forge.SolidWorks
             string html = Path.Combine(dir, "panel.html");
             _web.CoreWebView2.Navigate(new Uri(html).AbsoluteUri);
 
+            // Tell the panel what's real once the page is up: first-run onboarding (trap.md 2b/2c â€” the
+            // panel gating on its own localStorage so this is harmless every session) + the current usage-data
+            // state so the Settings toggle reflects ForgeData.ShareUsage (host = source of truth).
+            _web.CoreWebView2.NavigationCompleted += (s, e) =>
+            {
+                Send(new { type = "telemetryState", on = ForgeData.ShareUsage });
+                if (!_firstrunShown) { _firstrunShown = true; Send(new { type = "firstrun" }); }
+            };
+
             // Bifrost: watch for board changes pushed from KiCad/Altium to this part's project.
             _bifrost = new Timer { Interval = 15000 };
             _bifrost.Tick += BifrostTick;
@@ -71,11 +82,12 @@ namespace Forge.SolidWorks
         private Timer _harness;
         private bool _harnessBusy;
         private static bool _noticesShown;   // crash-recovery + update notice, once per session
+        private static bool _firstrunShown;  // onboarding overlay, once per process (panel also gates on localStorage)
         private string _currentRunId;        // per-command id: ties thumbs feedback + corrections to the run
 
         // Central post-run logging for EVERY live handler: masked event -> the data spine (fills the telemetry store +
         // Layer-3 replay + crash-recovery close), plus correction capture (rephrase pairing + arms undo).
-        // Everything is masked here; hard exclusions live in ForgeData. Best-effort — never surfaces to the user.
+        // Everything is masked here; hard exclusions live in ForgeData. Best-effort â€” never surfaces to the user.
         private void LogRun(string handler, string intent, IModelDoc2 doc, string outcome, bool verified,
             int itemCount, IntentPlan plan = null, string errorCode = null, long durationMs = 0)
         {
@@ -90,7 +102,7 @@ namespace Forge.SolidWorks
             catch { }
         }
 
-        // Material executor body — shared by the material router branch and the intent-layer fallback so a
+        // Material executor body â€” shared by the material router branch and the intent-layer fallback so a
         // typo'd material command ("make teh bolts brras") still reaches the same resolve-verify path.
         private async Task RunMaterialPlan(IModelDoc2 doc, IntentPlan mPlan, string intent)
         {
@@ -148,7 +160,7 @@ namespace Forge.SolidWorks
 
                     if (ev.Dims != null)
                     {
-                        // A teammate's shared model version — diff vs our current part (CAD git pull).
+                        // A teammate's shared model version â€” diff vs our current part (CAD git pull).
                         var current = VariantGenerator.ReadDimensions(model);
                         var mine = new System.Collections.Generic.Dictionary<string, double>();
                         foreach (var d in current) if (!mine.ContainsKey(d.Name)) mine[d.Name] = d.ValueMm;
@@ -161,7 +173,7 @@ namespace Forge.SolidWorks
                             if (mine.TryGetValue(ds.Name, out cur) && Math.Abs(cur - ds.ValueMm) > 0.01)
                             {
                                 changes.Add(new EditChange { Name = ds.Name, Label = ds.Name, Unit = "mm", Value = ds.ValueMm });
-                                diff.Add(ds.Name + ": " + Math.Round(cur, 2) + " → " + Math.Round(ds.ValueMm, 2) + " mm");
+                                diff.Add(ds.Name + ": " + Math.Round(cur, 2) + " â†’ " + Math.Round(ds.ValueMm, 2) + " mm");
                             }
                         }
                         if (changes.Count > 0)
@@ -172,7 +184,7 @@ namespace Forge.SolidWorks
                     }
                     else
                     {
-                        _lastBoardChange = ev.Summary; // board change — remember for "what does it impact?"
+                        _lastBoardChange = ev.Summary; // board change â€” remember for "what does it impact?"
                         Send(new { type = "bifrost", source = ev.Source, summary = ev.Summary });
                     }
                 }
@@ -221,10 +233,47 @@ namespace Forge.SolidWorks
                     }
                     catch { }
                 }
+
+                // FDL 4.4 ConfirmGate buttons: [Forge it] = feed the affirmative to the pending preview
+                // (same path as typing "go"); [Not yet] = stand down, keep the model untouched.
+                else if (action == "confirm")
+                {
+                    bool accept = false;
+                    try { accept = (bool)msg.accept; } catch { }
+                    if (accept) { if (await ResolvePendingConfirm("go")) { } }
+                    else { _pendingConfirm = null; }
+                }
+
+                // Onboarding "I have a key" (trap.md 2b): provider + key -> config.json (provider/baseUrl/model,
+                // key NEVER in the file) + the DPAPI-protected key store. This is the BYOK close that makes
+                // `winget install` -> open SW -> paste key -> done feel like one step.
+                else if (action == "saveKey")
+                {
+                    string key = null, provider = null;
+                    try { key = (string)msg.key; } catch { }
+                    try { provider = (string)msg.provider; } catch { }
+                    if (string.IsNullOrWhiteSpace(key))
+                    { Send(new { type = "answer", answer = "No key entered â€” staying on the keyless local path." }); return; }
+                    try
+                    {
+                        SaveProviderKey(provider, key.Trim());
+                        Send(new { type = "answer", answer = "Provider key saved â€” encrypted locally (DPAPI), never leaves this machine." });
+                    }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't save the key: " + ex.Message }); }
+                }
+
+                // Settings usage-data toggle (trap.md item 2: off switch easy to find). Host = source of truth.
+                else if (action == "telemetry")
+                {
+                    bool on = true;
+                    try { on = (bool)msg.on; } catch { }
+                    ForgeData.ShareUsage = on;
+                    Send(new { type = "answer", answer = "Anonymous usage sharing is now " + (on ? "ON" : "OFF") + "." });
+                }
             }
             catch (Exception ex)
             {
-                // Telemetry gets the exception TYPE only — never ex.Message (it can contain a file path).
+                // Telemetry gets the exception TYPE only â€” never ex.Message (it can contain a file path).
                 Telemetry.Log("crash", success: false, errorCode: ex.GetType().Name, swVersion: SwVer());
                 Send(new { type = "error", message = ex.Message });
             }
@@ -232,7 +281,7 @@ namespace Forge.SolidWorks
 
         // The attach affordance (panel-testing.md): the ONLY way a real user hands Forge a specific file without
         // typing a PC path. Opens the native file picker; the chosen file becomes _attachedFile, which handlers
-        // that need a second file/model (Compare) pick up. A human action end-to-end — no path is ever typed.
+        // that need a second file/model (Compare) pick up. A human action end-to-end â€” no path is ever typed.
         private void DoAttach()
         {
             try
@@ -286,12 +335,50 @@ namespace Forge.SolidWorks
 
         private static string SwVer() { try { return SwAddin.SwApp.RevisionNumber(); } catch { return null; } }
 
+        // ---- BYOK wiring (README "Get a free key" + ProviderFactory): writes %APPDATA%\Forge\config.json
+        //      {provider, baseUrl, model} â€” the API key is NEVER in the file â€” and stores the key via
+        //      KeyStore (DPAPI, current-user). Presets match the README's student instructions exactly so
+        //      the onboarding key box configures a real, working provider. ----
+        private static void SaveProviderKey(string provider, string key)
+        {
+            var preset = ProviderPresetFor((provider ?? "").Trim().ToLowerInvariant());
+            KeyStore.Save(preset.Provider, key);
+            string dir = Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData), "Forge");
+            Directory.CreateDirectory(dir);
+            string cfgPath = Path.Combine(dir, "config.json");
+            JObject cfg;
+            try { cfg = JObject.Parse(File.ReadAllText(cfgPath)); } catch { cfg = new JObject(); }
+            cfg["provider"] = preset.Provider;
+            cfg["baseUrl"] = preset.BaseUrl;
+            cfg["model"] = preset.Model;
+            File.WriteAllText(cfgPath, cfg.ToString());
+        }
+
+        private class ProviderPreset
+        {
+            public string Provider, BaseUrl, Model;
+            public ProviderPreset(string provider, string baseUrl, string model) { Provider = provider; BaseUrl = baseUrl; Model = model; }
+        }
+
+        private static ProviderPreset ProviderPresetFor(string slug)
+        {
+            switch (slug)
+            {
+                case "openrouter": return new ProviderPreset("openai-compatible", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini");
+                case "openai":     return new ProviderPreset("openai-compatible", "https://api.openai.com/v1", "gpt-4o-mini");
+                case "anthropic":  return new ProviderPreset("anthropic", "https://api.anthropic.com/v1", "claude-3-5-sonnet-20241022");
+                case "ollama":     return new ProviderPreset("openai-compatible", "http://localhost:11434/v1", "llama3.2");
+                case "deepseek":
+                default:           return new ProviderPreset("openai-compatible", "https://api.deepseek.com/v1", "deepseek-chat");
+            }
+        }
+
         private async Task Generate(string intent)
         {
             _currentRunId = Guid.NewGuid().ToString("N").Substring(0, 12);   // tags this run for thumbs feedback + correction capture
-            // Usage gates — run nothing if we couldn't set up safely, or the usage has ended.
+            // Usage gates â€” run nothing if we couldn't set up safely, or the usage has ended.
             if (!UsageInit.Ready)
-            { Send(new { type = "error", message = "Forge couldn't set up its safe workspace — nothing was run." }); return; }
+            { Send(new { type = "error", message = "Forge couldn't set up its safe workspace â€” nothing was run." }); return; }
             if (UsageInit.IsExpired())
             { Telemetry.Log("expiry_block"); Send(new { type = "error", message = UsageInit.ContactLine }); return; }
 
@@ -299,9 +386,9 @@ namespace Forge.SolidWorks
             if ((intent ?? "").Trim().ToLowerInvariant() == "usage diagnostics")
             { Send(new { type = "impact", explanation = CostLedger.Diagnostics(), affected = new string[0] }); return; }
 
-            // DEMO ROUTE — authoritative, and BEFORE anything that can `await`/yield (the one-time UpdateNotice
+            // DEMO ROUTE â€” authoritative, and BEFORE anything that can `await`/yield (the one-time UpdateNotice
             // below does a network call). flat-pattern-DXF / drawing-package / interference route here so (a) a
-            // misclassification can't drop them to the generic answer path, and (b) — critical for interference —
+            // misclassification can't drop them to the generic answer path, and (b) â€” critical for interference â€”
             // their apartment-bound COM runs on THIS UI/STA thread, never a post-await threadpool thread (a
             // threadpool COM read on the InterferenceDetectionManager access-violates and takes SolidWorks down).
             if (await TryDemoRouteFirst(intent)) return;
@@ -325,17 +412,17 @@ namespace Forge.SolidWorks
 
             // Enforce mode: once the operation cap is reached, every command is blocked.
             if (OpCounter.LimitReached)
-            { Telemetry.Log("limit_block", opsUsed: OpCounter.Count); Send(new { type = "error", message = "Usage limit reached — contact Ravi REDACTED" }); return; }
+            { Telemetry.Log("limit_block", opsUsed: OpCounter.Count); Send(new { type = "error", message = "Usage limit reached â€” contact Ravi REDACTED" }); return; }
 
-            // A preview was shown last turn and is awaiting a "go" — resolve it before anything else.
+            // A preview was shown last turn and is awaiting a "go" â€” resolve it before anything else.
             if (await ResolvePendingConfirm(intent)) return;
 
             // Change-impact FOLLOW-UP (Demo 3, RULE #2): after "what breaks if I change X?" a reply like
-            // "show me the pattern" / "highlight it" references the dependent we just named — resolve + SHOW it
+            // "show me the pattern" / "highlight it" references the dependent we just named â€” resolve + SHOW it
             // instead of re-asking. Only fires when we have a remembered impact AND the reply is anaphoric.
             if (TryImpactFollowup(intent)) return;
 
-            // Bulk resize fasteners (Demo #6, M6→M8) — route AUTHORITATIVELY before the cloud parse. A clear
+            // Bulk resize fasteners (Demo #6, M6â†’M8) â€” route AUTHORITATIVELY before the cloud parse. A clear
             // "replace all the M6 bolts with M8" must ACT, never fall to the parser's spurious "bolt sizes not
             // stated" ambiguity + the destructive-write hedge (RULE #2). Gated on 2 M-tokens so it's specific.
             if (Resizer.IsResizeIntent((intent ?? "").Trim().ToLowerInvariant()))
@@ -359,14 +446,14 @@ namespace Forge.SolidWorks
                 return;
             }
 
-            // ★ SHARED HANDLER PIPELINE (parse-first): the single path every handler flows through, so all handlers
-            //   — and future ones — get parse -> confirm-or-ask -> preview -> execute -> verify -> log uniformly.
+            // â˜… SHARED HANDLER PIPELINE (parse-first): the single path every handler flows through, so all handlers
+            //   â€” and future ones â€” get parse -> confirm-or-ask -> preview -> execute -> verify -> log uniformly.
             //   Returns false only when the cloud parser is unreachable or the action is unknown; then the
             //   per-handler regex blocks below run as the OFFLINE fallback (and the legacy variant path after them).
             if (await RunViaPipeline(intent)) return;
 
-            // Auto-mate — the first "doer". Works on an ASSEMBLY, so intercept here BEFORE ActivePart()
-            // (which only accepts parts). Deploys the Gauge → Torque → Sentinel crew with live narration.
+            // Auto-mate â€” the first "doer". Works on an ASSEMBLY, so intercept here BEFORE ActivePart()
+            // (which only accepts parts). Deploys the Gauge â†’ Torque â†’ Sentinel crew with live narration.
             if (AutoMate.IsMateIntent((intent ?? "").Trim().ToLowerInvariant()))
             {
                 var doc = SwAddin.SwApp?.ActiveDoc as IModelDoc2;
@@ -391,7 +478,7 @@ namespace Forge.SolidWorks
                 return;
             }
 
-            // Mirror — reflect a component to the other side of a principal plane. Assembly-only.
+            // Mirror â€” reflect a component to the other side of a principal plane. Assembly-only.
             if (Mirror.IsMirrorIntent((intent ?? "").Trim().ToLowerInvariant()))
             {
                 var doc = SwAddin.SwApp?.ActiveDoc as IModelDoc2;
@@ -413,7 +500,7 @@ namespace Forge.SolidWorks
                 return;
             }
 
-            // Explode — spread an assembly's parts apart. Assembly-only, so intercept here too.
+            // Explode â€” spread an assembly's parts apart. Assembly-only, so intercept here too.
             if (Exploder.IsExplodeIntent((intent ?? "").Trim().ToLowerInvariant()))
             {
                 var doc = SwAddin.SwApp?.ActiveDoc as IModelDoc2;
@@ -435,7 +522,7 @@ namespace Forge.SolidWorks
                 return;
             }
 
-            // Material change — now goes through the AI INTENT LAYER (parse -> resolve -> confirm-or-ask -> execute
+            // Material change â€” now goes through the AI INTENT LAYER (parse -> resolve -> confirm-or-ask -> execute
             // -> verify). Supports DIFFERENT materials per part/kind, typos, and library mapping. First migrated handler.
             if (Materializer.IsMaterialIntent((intent ?? "").Trim().ToLowerInvariant()))
             {
@@ -450,7 +537,7 @@ namespace Forge.SolidWorks
                 return;
             }
 
-            // Scan / assembly doctor — READ-ONLY report on an assembly. Assembly-only, intercept before ActivePart.
+            // Scan / assembly doctor â€” READ-ONLY report on an assembly. Assembly-only, intercept before ActivePart.
             if (Scout.IsScanIntent((intent ?? "").Trim().ToLowerInvariant()))
             {
                 var doc = SwAddin.SwApp?.ActiveDoc as IModelDoc2;
@@ -471,7 +558,7 @@ namespace Forge.SolidWorks
                 return;
             }
 
-            // Isolate / show-all — assembly visibility. Intercept before ActivePart.
+            // Isolate / show-all â€” assembly visibility. Intercept before ActivePart.
             if (Isolator.IsIsolateIntent((intent ?? "").Trim().ToLowerInvariant()))
             {
                 var doc = SwAddin.SwApp?.ActiveDoc as IModelDoc2;
@@ -493,7 +580,7 @@ namespace Forge.SolidWorks
                 return;
             }
 
-            // Batch — apply print-prep across EVERY part in an assembly. Assembly-only; check before Simplifier.
+            // Batch â€” apply print-prep across EVERY part in an assembly. Assembly-only; check before Simplifier.
             if (Batcher.IsBatchIntent((intent ?? "").Trim().ToLowerInvariant()))
             {
                 var doc = SwAddin.SwApp?.ActiveDoc as IModelDoc2;
@@ -515,7 +602,7 @@ namespace Forge.SolidWorks
                 return;
             }
 
-            // Print-prep / simplify. On a PART → simplify that part. On an ASSEMBLY → simplify ALL its parts
+            // Print-prep / simplify. On a PART â†’ simplify that part. On an ASSEMBLY â†’ simplify ALL its parts
             // (batch), so the user doesn't have to say "all the parts". Works on either doc type.
             if (Simplifier.IsSimplifyIntent((intent ?? "").Trim().ToLowerInvariant()))
             {
@@ -579,7 +666,7 @@ namespace Forge.SolidWorks
             // short reply ("do 20") resolves against what was being discussed.
             string effective = string.IsNullOrEmpty(_pendingIntent) ? intent : (_pendingIntent + ". " + intent);
 
-            Send(new { type = "status", message = "Thinking…" });
+            Send(new { type = "status", message = "Thinkingâ€¦" });
             ActResult act = await ForgeApi.Act(effective, dims, deps, selectedFeatures, _lastBoardChange);
 
             // Enforce mode: the server hit the per-operation token ceiling (assembly too large).
@@ -587,7 +674,7 @@ namespace Forge.SolidWorks
             {
                 Telemetry.Log("token_ceiling_hit", success: false, swVersion: SwVer(),
                     tokensIn: act.Meter.TokensIn, tokensOut: act.Meter.TokensOut, opsUsed: OpCounter.Count);
-                Send(new { type = "error", message = "This assembly is too large for the usage version — contact Ravi REDACTED" });
+                Send(new { type = "error", message = "This assembly is too large for the usage version â€” contact Ravi REDACTED" });
                 return;
             }
 
@@ -599,14 +686,14 @@ namespace Forge.SolidWorks
                 Send(new { type = "clarify", message = act.Clarify });
                 return;
             }
-            _pendingIntent = null; // a real action happened — the conversation thread is resolved
+            _pendingIntent = null; // a real action happened â€” the conversation thread is resolved
 
             // In-place dependency-aware edit: change the part, rebuild, report what (if anything) broke.
             if (act.Action == "edit")
             {
                 if (act.EditChanges == null || act.EditChanges.Count == 0)
                     throw new Exception("Forge could not map that to a change.");
-                Send(new { type = "status", message = "Applying your change on a safe copy…" });
+                Send(new { type = "status", message = "Applying your change on a safe copyâ€¦" });
                 OpCounter.Increment();
                 var swE = System.Diagnostics.Stopwatch.StartNew();
                 var guardE = OriginalGuard.Capture(SafeIO.GetOriginalPaths(SwAddin.SwApp, model));
@@ -614,7 +701,7 @@ namespace Forge.SolidWorks
 
                 // Tripwire: prove the original is byte-for-byte unchanged before reporting anything.
                 if (!guardE.AllIntact())
-                { Telemetry.Log("guardrail_violation", success: false, swVersion: SwVer()); Send(new { type = "error", message = "Forge stopped: a safety check flagged a change to an original. Your files are untouched — please tell Ravi." }); return; }
+                { Telemetry.Log("guardrail_violation", success: false, swVersion: SwVer()); Send(new { type = "error", message = "Forge stopped: a safety check flagged a change to an original. Your files are untouched â€” please tell Ravi." }); return; }
 
                 CostLedger.Record("edit_run", 1, act.Meter.TokensIn, act.Meter.TokensOut, act.Meter.EstCostUsd, act.Meter.CacheHits, act.Meter.LlmCalls);
                 Telemetry.Log("edit_run", success: er.Error == null, featuresCount: act.EditChanges.Count, durationMs: swE.ElapsedMilliseconds, swVersion: SwVer(), errorCode: er.Error == null ? null : "edit_error",
@@ -659,9 +746,9 @@ namespace Forge.SolidWorks
 
             string what = string.Join(" + ", plan.Changes.ConvertAll(c => c.Label));
             string drawNote = (plan.Drawings || plan.DrawOriginal) ? " + drawings" : "";
-            Send(new { type = "status", message = "Generating " + plan.Count + " variants (" + what + drawNote + ")…" });
+            Send(new { type = "status", message = "Generating " + plan.Count + " variants (" + what + drawNote + ")â€¦" });
 
-            // SolidWorks COM must run on the UI/STA thread — we are already on it.
+            // SolidWorks COM must run on the UI/STA thread â€” we are already on it.
             OpCounter.Increment();
             var swV = System.Diagnostics.Stopwatch.StartNew();
             var guardV = OriginalGuard.Capture(SafeIO.GetOriginalPaths(SwAddin.SwApp, model));
@@ -669,7 +756,7 @@ namespace Forge.SolidWorks
 
             // Tripwire: the base part and its references must be byte-for-byte unchanged.
             if (!guardV.AllIntact())
-            { Telemetry.Log("guardrail_violation", success: false, swVersion: SwVer()); Send(new { type = "error", message = "Forge stopped: a safety check flagged a change to an original. Your files are untouched — please tell Ravi." }); return; }
+            { Telemetry.Log("guardrail_violation", success: false, swVersion: SwVer()); Send(new { type = "error", message = "Forge stopped: a safety check flagged a change to an original. Your files are untouched â€” please tell Ravi." }); return; }
 
             int cleanV = summary.Variants.FindAll(v => v.Success).Count;
             CostLedger.Record("variant_run", plan.Count, act.Meter.TokensIn, act.Meter.TokensOut, act.Meter.EstCostUsd, act.Meter.CacheHits, act.Meter.LlmCalls);
@@ -688,7 +775,7 @@ namespace Forge.SolidWorks
             });
         }
 
-        // Full names of dimensions the engineer pinned in SolidWorks — a dimension directly, a
+        // Full names of dimensions the engineer pinned in SolidWorks â€” a dimension directly, a
         // feature/sketch (all its dims), or a cylindrical FACE (the hole/boss they clicked, matched
         // to the dimension that drives its diameter). Empty set if nothing pinned.
         private static System.Collections.Generic.HashSet<string> GetSelectedDimNames(
@@ -750,7 +837,7 @@ namespace Forge.SolidWorks
             return names;
         }
 
-        // Names of features the engineer selected — a feature directly, or via a clicked face
+        // Names of features the engineer selected â€” a feature directly, or via a clicked face
         // (e.g. clicking a chamfer/fillet face). Used as the subject for impact questions.
         private static System.Collections.Generic.List<string> GetSelectedFeatureNames(IModelDoc2 model)
         {
@@ -781,7 +868,7 @@ namespace Forge.SolidWorks
 
         // Light up the named features in the 3D model so the engineer SEES what's affected.
         // ---- Change-impact follow-up: "show/highlight/isolate the pattern / it / that" after a change_impact run.
-        //      Resolves the anaphor to the dependent we just named, selects+zooms it, and answers with its name —
+        //      Resolves the anaphor to the dependent we just named, selects+zooms it, and answers with its name â€”
         //      never a "one quick question". Returns true iff it handled the message. ----
         private bool TryImpactFollowup(string intent)
         {
@@ -810,7 +897,7 @@ namespace Forge.SolidWorks
                     if (!string.IsNullOrEmpty(d) && i.Contains(d.ToLowerInvariant())) { pick = d; break; }
 
             HighlightFeatures(model, new System.Collections.Generic.List<string> { pick });
-            Send(new { type = "answer", answer = "Highlighted " + pick + " in the tree — that's the dependent of " +
+            Send(new { type = "answer", answer = "Highlighted " + pick + " in the tree â€” that's the dependent of " +
                 (_lastImpactTarget ?? "the feature") + ".", affected = new[] { pick }, runId = _currentRunId, handler = "change_impact" });
             return true;
         }
@@ -831,7 +918,7 @@ namespace Forge.SolidWorks
             catch { /* highlight is best-effort */ }
         }
 
-        // Light up parts/features whose NAME contains any of the given substrings — robust to exact
+        // Light up parts/features whose NAME contains any of the given substrings â€” robust to exact
         // naming. Handles assemblies (select components) and parts (select features). Used by the
         // demo panel to show a teammate's changed parts glowing.
         private void HighlightByName(dynamic msg)
@@ -864,7 +951,7 @@ namespace Forge.SolidWorks
                 }
                 else
                 {
-                    // Part: this engine is imported SURFACE/solid BODIES named per component — select bodies by name.
+                    // Part: this engine is imported SURFACE/solid BODIES named per component â€” select bodies by name.
                     var partDoc = model as PartDoc;
                     if (partDoc != null)
                     {
@@ -891,7 +978,7 @@ namespace Forge.SolidWorks
             try { PanelCapture.Log("out", payload); } catch { }
             // Send as a STRING: the panel does JSON.parse(e.data). PostWebMessageAsJson would make
             // e.data an already-parsed object, so JSON.parse throws and every message is dropped
-            // (that was the "stuck on On it…" bug — the panel never got the done/status messages).
+            // (that was the "stuck on On itâ€¦" bug â€” the panel never got the done/status messages).
             string json = JsonConvert.SerializeObject(payload);
             if (_web.InvokeRequired)
                 _web.BeginInvoke(new Action(() => _web.CoreWebView2.PostWebMessageAsString(json)));
