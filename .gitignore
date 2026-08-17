@@ -13,3 +13,9 @@ config.json
 ~$*.sld*
 *.SLDPRT~
 Models/
+
+# WiX installer build artifacts (FileComponents.wxs is harvested with absolute paths — regenerate, never commit)
+installer/FileComponents.wxs
+installer/bin/
+installer/obj/
+/dist/
