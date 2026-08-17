@@ -68,10 +68,6 @@ Signed one-command installer coming.
 
 Join the Forge Discord — install help, demo requests, and feature votes: **https://discord.gg/xprNrjtaWx**
 
-## Telemetry
-
-Forge telemetry is on by default and sends anonymous usage statistics only — hashes, never geometry, file names, or anything identifying. Turn it off any time in Settings; with it off, nothing leaves your machine.
-
 ## Support Forge
 
 Forge is free, open source, and built one afternoon at a time. If it saves you one, **star the repo** — stars are how power users find it. Know a fellow engineer fighting SolidWorks? Send them this page. Found a bug or want a command? Open an [issue](https://github.com/kumar1441/forge_ai/issues) — report a bug or request a command using the issue templates.
