@@ -19,3 +19,6 @@ installer/FileComponents.wxs
 installer/bin/
 installer/obj/
 /dist/
+
+onshape/node_modules/
+onshape/dist/

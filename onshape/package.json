@@ -1,0 +1,16 @@
+{
+  "name": "forge-onshape",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Forge for Onshape — adapter #3 (canonical Forge.Cad model, TypeScript). See the multi-CAD spec for the program.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "vite": "^5.4.0"
+  }
+}
