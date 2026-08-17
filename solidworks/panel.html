@@ -77,6 +77,13 @@
   .step.done .glyph { color:var(--mint); }
   @keyframes pulse { 0%,100%{opacity:.35} 50%{opacity:1} }
 
+  /* FDL §8 a11y: visible focus ring on every interactive element */
+  :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  /* FDL §2 motion: reduce -> no pulse, no arrivals */
+  @media (prefers-reduced-motion: reduce) {
+    .step.run .glyph, .thinking .tdot { animation:none; }
+  }
+
   /* cycling mechanical gerund — the "thinking" word */
   .thinking { font-size:12.5px; color:var(--soft); display:flex; align-items:center; gap:8px; min-height:18px; }
   .thinking .tdot { color:var(--accent); animation:pulse 1s ease-in-out infinite; font-size:9px; }
@@ -163,6 +170,7 @@
   .onboard .obkey { width:100%; max-width:300px; background:var(--raised); border:1px solid var(--line);
     border-radius:14px; padding:12px 14px; font:inherit; font-size:13px; color:var(--ink); outline:none; }
   .onboard .obkey:focus { border-color:var(--accent); }
+  .onboard select.obkey { color-scheme:dark; -webkit-appearance:none; appearance:none; cursor:pointer; }
   .onboard .obskip { position:absolute; top:14px; right:16px; background:none; border:none; color:var(--faint);
     font:inherit; font-size:12px; cursor:pointer; }
   .onboard .obtrust { text-align:left; max-width:320px; display:flex; flex-direction:column; gap:10px; }
@@ -250,8 +258,10 @@
       </div>
       <div class="ssep"></div>
       <div class="srow"><label>Provider</label><span style="color:var(--faint);font-size:11.5px">BYOK · see README</span></div>
-      <div class="srow"><label>Telemetry</label><span style="color:var(--faint);font-size:11.5px">anonymous · on</span></div>
-      <div class="sfoot">settings pane — more controls coming with the signed installer</div>
+      <div class="srow"><label>Usage data</label>
+        <span class="toggle"><input type="checkbox" id="telmtgl" /><span class="tk"></span></span>
+      </div>
+      <div class="sfoot">usage data = anonymous hashes only · off = nothing leaves this machine</div>
     </div>
   </div>
 
@@ -270,7 +280,7 @@
     </div>
     <div class="ask">
       <textarea id="intent" rows="1"></textarea>
-      <div class="hint"><kbd>Enter</kbd> to run · <kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line</div>
+      <div class="hint"><kbd>Enter</kbd> to run · <kbd>Shift</kbd>+<kbd>Enter</kbd> new line · <kbd>Esc</kbd> cancels</div>
     </div>
     <div class="fb" id="fb">
       <span>Useful so far?</span>
@@ -313,7 +323,7 @@
   $("clearbtn").addEventListener("click", clearPanel);
 
   // ---- settings: gear open/close + theme toggle (persists; default = follow OS) ----
-  const settingsEl = $("settings"), themeTgl = $("themetgl");
+  const settingsEl = $("settings"), themeTgl = $("themetgl"), telmTgl = $("telmtgl");
   function applyTheme() {
     const saved = localStorage.getItem("forge_theme");            // "dark" | "light" | null = follow OS
     const osLight = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches;
@@ -324,8 +334,15 @@
   $("gearbtn").addEventListener("click", (e) => { e.stopPropagation(); settingsEl.style.display = settingsEl.style.display === "none" ? "flex" : "none"; });
   $("sclose").addEventListener("click", () => settingsEl.style.display = "none");
   document.addEventListener("click", (e) => { if (!e.target.closest("#settings") && !e.target.closest("#gearbtn")) settingsEl.style.display = "none"; });
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") settingsEl.style.display = "none"; });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      settingsEl.style.display = "none";
+      const nope = document.querySelector(".gate .nope");   // FDL 4.4: Esc = "Not yet"
+      if (nope) nope.click();
+    }
+  });
   themeTgl.addEventListener("change", () => { localStorage.setItem("forge_theme", themeTgl.checked ? "dark" : "light"); applyTheme(); });
+  telmTgl.addEventListener("change", () => post({ action: "telemetry", on: telmTgl.checked }));
   applyTheme();
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 
@@ -335,11 +352,16 @@
       const text = intent.value.trim();
       if (text) run(text);
     }
+    if (e.key === "ArrowUp" && !intent.value.trim()) {   // FDL §8: ↑ recalls the last prompt
+      e.preventDefault();
+      if (lastPrompt) { intent.value = lastPrompt; grow(); }
+    }
   });
 
   let working = false;
   let turn = null;          // { steps, thinking, result } DOM refs for the active Forge turn
   let wordTimer = null;
+  let lastPrompt = "";
 
   function nearBottom() { return transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 60; }
   function scroll() { transcript.scrollTop = transcript.scrollHeight; }
@@ -347,6 +369,7 @@
   function run(text) {
     if (working) return;
     working = true;
+    lastPrompt = text;
     const e = $("empty"); if (e) e.remove();
 
     // user bubble
@@ -403,12 +426,15 @@
     if (wasBottom) scroll();
   }
 
-  // finish the turn: stop the gerund, drop the thinking line, render the result card(s)
+  // finish the turn: stop the gerund, drop the thinking line, render the result card(s).
+  // System answers outside a turn (key saved, telemetry toggled, notices) render as system cards.
   function finish(html) {
     stopWords();
     if (turn) {
       turn.thinking.remove();
       if (html) turn.result.innerHTML = html;
+    } else if (html) {
+      systemCard(html);
     }
     working = false; turn = null;
     scroll();
@@ -540,6 +566,7 @@
     else if (m.type === "share") { finish(renderShare(m)); }
     else if (m.type === "presence") { renderPresence(m); }
     else if (m.type === "firstrun") { showOnboard(); }
+    else if (m.type === "telemetryState") { if (telmTgl) telmTgl.checked = m.on !== false; }
 
     // cross-tool / teammate notifications arrive any time — append as a system card
     else if (m.type === "bifrost") {
@@ -594,6 +621,13 @@
     const dots = () => `<div class="obdots">${[1,2,3].map(p=>`<div class="obdot ${p===page?"on":""}"></div>`).join("")}</div>`;
     const page1 = `<span class="obdiamond">◆</span><h1>Welcome to Forge</h1>
       <div class="obsub">Talk to SolidWorks in plain English. Get verified changes.</div>
+      <select class="obkey" id="obprov" aria-label="Provider">
+        <option value="deepseek">DeepSeek — free trial credit</option>
+        <option value="openrouter">OpenRouter — one key, every model</option>
+        <option value="openai">OpenAI</option>
+        <option value="anthropic">Anthropic</option>
+        <option value="ollama">Ollama — local, no key needed</option>
+      </select>
       <input class="obkey" id="obkey" placeholder="Paste a provider key (optional) — or get a free one" />
       <button class="obpill" id="obnext">Continue</button>
       <button class="obghost obpill" id="obskip">Skip for now — I'll stay keyless</button>`;
@@ -614,7 +648,8 @@
       const nxt = o.querySelector("#obnext");
       if (nxt) nxt.addEventListener("click", () => {
         const k = o.querySelector("#obkey");
-        if (k && k.value.trim()) post({ action: "saveKey", key: k.value.trim() });
+        const pr = o.querySelector("#obprov");
+        if (k && k.value.trim()) post({ action: "saveKey", provider: pr ? pr.value : "deepseek", key: k.value.trim() });
         page++; render();
       });
       const fin = o.querySelector("#obfinish");
