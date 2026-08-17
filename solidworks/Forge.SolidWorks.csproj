@@ -18,6 +18,10 @@
     <RootNamespace>Forge.SolidWorks</RootNamespace>
     <!-- COM add-ins must NOT be registered by the build; we run regasm /codebase manually. -->
     <RegisterForComInterop>false</RegisterForComInterop>
+    <!-- SolidWorks interop assemblies. Default = the local SW install's redist folder. CI overrides
+         with -p:SwInteropRoot=lib\sw-interop (the interop DLLs are committed there for clean-runner
+         builds, see installer/fetch-interop.ps1). Override on the command line always wins. -->
+    <SwInteropRoot>C:\Program Files\Dassault Systemes\SOLIDWORKS 3DEXPERIENCE R2026x\SOLIDWORKS\api\redist</SwInteropRoot>
   </PropertyGroup>
 
   <ItemGroup>
@@ -34,23 +38,24 @@
 
   <!--
     SolidWorks interop assemblies. These ship with every SolidWorks install.
-    Default path shown below — update the version folder if yours differs.
+    Path from $(SwInteropRoot) — the local SW redist folder by default, or lib\sw-interop on CI
+    (committed copies produced by installer/fetch-interop.ps1, so clean runners build without SW).
     Private=true: copy to output so regasm AND the runtime can load them (they are NOT in the
     GAC on a 3DEXPERIENCE Makers install; our AssemblyResolve also finds them in the output folder).
   -->
   <ItemGroup>
     <Reference Include="SolidWorks.Interop.sldworks">
-      <HintPath>C:\Program Files\Dassault Systemes\SOLIDWORKS 3DEXPERIENCE R2026x\SOLIDWORKS\api\redist\SolidWorks.Interop.sldworks.dll</HintPath>
+      <HintPath>$(SwInteropRoot)\SolidWorks.Interop.sldworks.dll</HintPath>
       <EmbedInteropTypes>false</EmbedInteropTypes>
       <Private>true</Private>
     </Reference>
     <Reference Include="SolidWorks.Interop.swconst">
-      <HintPath>C:\Program Files\Dassault Systemes\SOLIDWORKS 3DEXPERIENCE R2026x\SOLIDWORKS\api\redist\SolidWorks.Interop.swconst.dll</HintPath>
+      <HintPath>$(SwInteropRoot)\SolidWorks.Interop.swconst.dll</HintPath>
       <EmbedInteropTypes>false</EmbedInteropTypes>
       <Private>true</Private>
     </Reference>
     <Reference Include="SolidWorks.Interop.swpublished">
-      <HintPath>C:\Program Files\Dassault Systemes\SOLIDWORKS 3DEXPERIENCE R2026x\SOLIDWORKS\api\redist\SolidWorks.Interop.swpublished.dll</HintPath>
+      <HintPath>$(SwInteropRoot)\SolidWorks.Interop.swpublished.dll</HintPath>
       <EmbedInteropTypes>false</EmbedInteropTypes>
       <Private>true</Private>
     </Reference>
