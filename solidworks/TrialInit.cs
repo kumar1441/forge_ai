@@ -16,7 +16,7 @@ namespace Forge.SolidWorks
     {
         private const int UsageDays = 14;
         private const string RegPath = @"Software\Forge\Usage";
-        public const string ContactLine = "Usage ended — contact Ravi REDACTED";
+        public const string ContactLine = "Usage ended — contact support";
 
         public static string UsageId { get; private set; }
         public static DateTime FirstRunUtc { get; private set; }

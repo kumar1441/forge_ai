@@ -412,7 +412,7 @@ namespace Forge.SolidWorks
 
             // Enforce mode: once the operation cap is reached, every command is blocked.
             if (OpCounter.LimitReached)
-            { Telemetry.Log("limit_block", opsUsed: OpCounter.Count); Send(new { type = "error", message = "Usage limit reached â€” contact Ravi REDACTED" }); return; }
+            { Telemetry.Log("limit_block", opsUsed: OpCounter.Count); Send(new { type = "error", message = "Usage limit reached â€” contact support" }); return; }
 
             // A preview was shown last turn and is awaiting a "go" â€” resolve it before anything else.
             if (await ResolvePendingConfirm(intent)) return;
@@ -674,7 +674,7 @@ namespace Forge.SolidWorks
             {
                 Telemetry.Log("token_ceiling_hit", success: false, swVersion: SwVer(),
                     tokensIn: act.Meter.TokensIn, tokensOut: act.Meter.TokensOut, opsUsed: OpCounter.Count);
-                Send(new { type = "error", message = "This assembly is too large for the usage version â€” contact Ravi REDACTED" });
+                Send(new { type = "error", message = "This assembly is too large for the usage version â€” contact support" });
                 return;
             }
 
