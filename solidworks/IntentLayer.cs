@@ -83,19 +83,30 @@ namespace Forge.SolidWorks
         }
 
         // ---- plan JObject -> IntentPlan shaping, shared by the BYOK and hosted parse paths ----
+        // Labtec bug #2: re-parsing a terse clarify answer, a free-tier LLM can return "operations" as a bare
+        // scalar or an array of plain strings instead of objects. Indexing a child on that scalar JValue throws
+        // "Cannot access child value on Newtonsoft.Json.Linq.JValue" — every element is type-guarded below so a
+        // non-object element is skipped, never indexed.
         private static void ApplyPlan(IntentPlan plan, JObject p)
         {
             if (p == null) { plan.Error = "Empty plan."; return; }
             plan.Confidence = (double?)p["confidence"] ?? 0;
-            foreach (var a in (p["ambiguities"] as JArray) ?? new JArray()) { var s = (string)a; if (!string.IsNullOrEmpty(s)) plan.Ambiguities.Add(s); }
+            foreach (var a in (p["ambiguities"] as JArray) ?? new JArray())
+                if (a is JValue) { var s = (string)a; if (!string.IsNullOrEmpty(s)) plan.Ambiguities.Add(s); }
             foreach (var o in (p["operations"] as JArray) ?? new JArray())
             {
-                var op = new IntentOperation { Action = (string)o["action"] ?? "", Parameters = (o["parameters"] as JObject) ?? new JObject() };
+                var oj = o as JObject;
+                if (oj == null) continue;   // scalar op (e.g. a bare action name) can never carry action/params
+                var op = new IntentOperation { Action = (string)oj["action"] ?? "", Parameters = (oj["parameters"] as JObject) ?? new JObject() };
                 // some params are placed at top level for non-material ops
                 foreach (var key in new[] { "scope", "from", "to", "material", "target" })
-                    if (o[key] != null && op.Parameters[key] == null) op.Parameters[key] = o[key];
-                foreach (var t in (o["targets"] as JArray) ?? new JArray())
-                    op.Targets.Add(new IntentTarget { Selector = (string)t["selector"], Value = (string)t["value"], Kind = (string)t["kind"], Position = (string)t["position"] });
+                    if (oj[key] != null && op.Parameters[key] == null) op.Parameters[key] = oj[key];
+                foreach (var t in (oj["targets"] as JArray) ?? new JArray())
+                {
+                    var tj = t as JObject;
+                    if (tj == null) continue;   // scalar target can't be resolved
+                    op.Targets.Add(new IntentTarget { Selector = (string)tj["selector"], Value = (string)tj["value"], Kind = (string)tj["kind"], Position = (string)tj["position"] });
+                }
                 plan.Operations.Add(op);
             }
         }

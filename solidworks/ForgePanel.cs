@@ -28,6 +28,7 @@ namespace Forge.SolidWorks
     {
         private WebView2 _web;
         private string _pendingIntent; // the conversation so far when Forge has asked a question
+        private string _lastRelayedClarify; // the last cloud clarify the panel relayed (repeat dead-end guard)
         private string _attachedFile;  // a file the user handed Forge via the attach button (e.g. the 2nd version for Compare)
         private Timer _bifrost;        // polls the cross-tool feed for changes from other tools
         private string _bifrostSince;  // poll cursor (newest event seen)
@@ -634,7 +635,22 @@ namespace Forge.SolidWorks
                 return;
             }
 
-            var model = ActivePart();
+            // Document-aware fall-through (Labtec bug #1): a doc-generic / free-form ask must never die with a bare
+            // "must be a part" dead-end. No doc or drawing -> a written message. Part OR assembly -> let the router
+            // answer with real context; only the part-MUTATION actions below (edit / variant / share / apply)
+            // require a part, and those get a friendly message, never a raw throw.
+            var model = SwAddin.SwApp?.ActiveDoc as IModelDoc2;
+            if (model == null)
+            {
+                Send(new { type = "error", message = "Open a part or assembly first, then tell me what to do." });
+                return;
+            }
+            bool isPart = (int)model.GetType() == (int)swDocumentTypes_e.swDocPART;
+            if ((int)model.GetType() == (int)swDocumentTypes_e.swDocDRAWING)
+            {
+                Send(new { type = "error", message = "Forge edits parts and assemblies, not drawings - open a model and ask again." });
+                return;
+            }
             var dims = VariantGenerator.ReadDimensions(model);
             var deps = VariantGenerator.ReadDependencies(model);
 
@@ -644,18 +660,22 @@ namespace Forge.SolidWorks
             foreach (var d in dims) d.Selected = selected.Contains(d.Name);
             var selectedFeatures = GetSelectedFeatureNames(model);
 
-            // CAD git: share my version, or apply a teammate's pending change.
+            // CAD git: share my version, or apply a teammate's pending change. Part-only (dims-based).
             string cmd = (intent ?? "").Trim().ToLowerInvariant();
             if (cmd.Contains("share") && (cmd.Contains("version") || cmd.Contains("change") || cmd.Contains("part") || cmd.Contains("team") || cmd.Contains("my")))
             {
+                if (!isPart)
+                { Send(new { type = "error", message = "Sharing works on a part - open the part you want to share." }); return; }
                 string project = ProjectKey(model);
-                if (string.IsNullOrEmpty(project)) throw new Exception("Save the part before sharing.");
+                if (string.IsNullOrEmpty(project)) { Send(new { type = "error", message = "Save the part before sharing." }); return; }
                 await ForgeApi.PushModel(project, System.Environment.UserName, dims);
                 Send(new { type = "shared", count = dims.Count });
                 return;
             }
             if (_pendingIncoming != null && (cmd == "apply" || cmd.StartsWith("apply") || cmd == "accept" || cmd == "pull" || cmd.Contains("update my")))
             {
+                if (!isPart)
+                { Send(new { type = "error", message = "That applies a part change - open the part it belongs to." }); return; }
                 EditResult er = VariantGenerator.ApplyEdit(SwAddin.SwApp, model, _pendingIncoming, false);
                 _pendingIncoming = null;
                 Send(new { type = "edit", changed = er.Changed, healthy = er.Healthy, reverted = er.Reverted, issue = er.Issue, error = er.Error });
@@ -679,11 +699,23 @@ namespace Forge.SolidWorks
             }
 
             // Ambiguous: ask, and remember the thread for the engineer's next reply.
+            // Labtec bug #1: the router's "clarify" can be a CANNED dead-end ("didn't map that to one of my tools")
+            // or the same unanswerable question every turn. Never relay that back and forth - the user gets ONE
+            // concrete suggestion and the thread is dropped so it can't repeat.
             if (act.Action == "clarify")
             {
+                string cl = (act.Clarify ?? "").Trim();
+                bool repeated = _lastRelayedClarify != null && string.Equals(_lastRelayedClarify, cl, StringComparison.Ordinal);
+                if (IsCloudDeadEnd(cl) || repeated)
+                {
+                    Telemetry.Log("couldnt_map", success: false, swVersion: SwVer(), questionType: act.QuestionType, questionSummary: act.QuestionSummary);
+                    SendUnmappedSuggestion();
+                    return;
+                }
                 Telemetry.Log("couldnt_map", success: false, swVersion: SwVer(), questionType: act.QuestionType, questionSummary: act.QuestionSummary);
                 _pendingIntent = effective;
-                Send(new { type = "clarify", message = act.Clarify });
+                _lastRelayedClarify = cl;
+                Send(new { type = "clarify", message = cl });
                 return;
             }
             _pendingIntent = null; // a real action happened â€” the conversation thread is resolved
@@ -691,8 +723,11 @@ namespace Forge.SolidWorks
             // In-place dependency-aware edit: change the part, rebuild, report what (if anything) broke.
             if (act.Action == "edit")
             {
+                if (!isPart)
+                { Send(new { type = "error", message = "That change edits a part - open the part you want to change." }); return; }
                 if (act.EditChanges == null || act.EditChanges.Count == 0)
-                    throw new Exception("Forge could not map that to a change.");
+                { SendUnmappedSuggestion(); return; }   // dead-end: the router named "edit" but produced no change
+                _lastRelayedClarify = null;
                 Send(new { type = "status", message = "Applying your change on a safe copyâ€¦" });
                 OpCounter.Increment();
                 var swE = System.Diagnostics.Stopwatch.StartNew();
@@ -716,6 +751,7 @@ namespace Forge.SolidWorks
             // Reasoning, not a change: explain the impact AND light up the affected features in 3D. Read-only.
             if (act.Action == "change_impact")
             {
+                _lastRelayedClarify = null;
                 OpCounter.Increment();
                 HighlightFeatures(model, act.Affected);
                 CostLedger.Record("whatbreaks_query", 0, act.Meter.TokensIn, act.Meter.TokensOut, act.Meter.EstCostUsd, act.Meter.CacheHits, act.Meter.LlmCalls);
@@ -729,6 +765,8 @@ namespace Forge.SolidWorks
             // A direct, precise answer to a question (value/count/yes-no/short info). Crisp, not a paragraph.
             if (act.Action == "answer")
             {
+                if (IsCloudDeadEnd(act.Answer)) { SendUnmappedSuggestion(); return; }   // Labtec #1: never relay a dead-end "answer"
+                _lastRelayedClarify = null;
                 OpCounter.Increment();
                 HighlightFeatures(model, act.Affected);
                 CostLedger.Record("answer_query", 0, act.Meter.TokensIn, act.Meter.TokensOut, act.Meter.EstCostUsd, act.Meter.CacheHits, act.Meter.LlmCalls);
@@ -741,8 +779,11 @@ namespace Forge.SolidWorks
 
             // Otherwise it's a variant-generation request.
             VariantPlan plan = act.Variant;
+            if (!isPart)
+            { Send(new { type = "error", message = "Variants are part changes - open the part first." }); return; }
             if (plan == null || plan.Changes == null || plan.Changes.Count == 0 || plan.Count <= 0)
-                throw new Exception("Forge could not map that request to any dimensions.");
+            { SendUnmappedSuggestion(); return; }   // dead-end: no dimensions mapped to a real variant change
+            _lastRelayedClarify = null;
 
             string what = string.Join(" + ", plan.Changes.ConvertAll(c => c.Label));
             string drawNote = (plan.Drawings || plan.DrawOriginal) ? " + drawings" : "";

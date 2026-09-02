@@ -71,12 +71,15 @@ namespace Forge.SolidWorks
             return null;
         }
 
+        // Recover the plan JObject from raw LLM text. Free-tier models wrap JSON in markdown fences and pad it
+        // with chatter — SafeJsonExtractor strips those and returns the first balanced JSON object (arrays are
+        // wrapped or reduced to their first object). Null when nothing recoverable, so the caller falls back.
+        // Labtec bug #2: a scalar answer is never indexed here — the envelope is an object or null.
         private static JObject ExtractJson(string text)
         {
             if (string.IsNullOrWhiteSpace(text)) return null;
-            var m = Regex.Match(text, @"\{[\s\S]*\}");
-            if (!m.Success) return null;
-            try { return JObject.Parse(m.Value); } catch { return null; }
+            string err;
+            return SafeJsonExtractor.ExtractResponseEnvelope(text, out err);
         }
 
         private static string LoadSystemPrompt()

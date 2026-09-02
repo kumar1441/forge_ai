@@ -1115,6 +1115,39 @@ namespace Forge.SolidWorks
                         return new HOutcome { Verified = cp.Created, Items = cp.Created ? 1 : 0, Info = "Created " + (cp.Title ?? "new part") + " from " + System.IO.Path.GetFileName(cp.TemplatePath ?? "") };
                     }
                 },
+                // CreatePlate (WRITE): a real SOLID from scratch — a rectangular plate/block (blank part + centred
+                // rect + extrude). The "create a plate/block/cube" primitive CreatePart alone can't produce (a blank
+                // part has no solid). Same non-destructive new-doc convention as create_part above. Verified only when
+                // the plate was created AND the post-rebuild check is clean.
+                new HSpec {
+                    Name = "create_plate", Actions = new[] { "create_plate" }, AssemblyOnly = false, Destructive = false,
+                    Execute = async (doc, plan, op, intent, emit) => {
+                        var pl = await CreatePlate.Run(App, doc, intent, emit);
+                        if (pl.Error != null) return new HOutcome { Error = pl.Error };
+                        return new HOutcome { Verified = pl.Created && pl.RebuildClean, Items = pl.Created ? 1 : 0, Info = pl.Info };
+                    }
+                },
+                // CreateSphere (WRITE): a real SOLID sphere from scratch (blank part + half-circle revolve). Same
+                // new-doc convention. Verified only via the INDEPENDENT volume check ≈ (4/3)πr³ + clean rebuild
+                // (res.Verified — fail closed, never a fake green on an unmeasured solid).
+                new HSpec {
+                    Name = "create_sphere", Actions = new[] { "create_sphere" }, AssemblyOnly = false, Destructive = false,
+                    Execute = async (doc, plan, op, intent, emit) => {
+                        var sp = await CreateSphere.Run(App, doc, intent, emit);
+                        if (sp.Error != null) return new HOutcome { Error = sp.Error };
+                        return new HOutcome { Verified = sp.Verified, Items = sp.Created ? 1 : 0, Info = sp.Info };
+                    }
+                },
+                // CreateCylinder (WRITE): a real SOLID cylinder from scratch (blank part + circle extrude). Same
+                // new-doc convention. Verified only via the INDEPENDENT volume check ≈ πr²h + clean rebuild.
+                new HSpec {
+                    Name = "create_cylinder", Actions = new[] { "create_cylinder" }, AssemblyOnly = false, Destructive = false,
+                    Execute = async (doc, plan, op, intent, emit) => {
+                        var cy = await CreateCylinder.Run(App, doc, intent, emit);
+                        if (cy.Error != null) return new HOutcome { Error = cy.Error };
+                        return new HOutcome { Verified = cy.Verified, Items = cy.Created ? 1 : 0, Info = cy.Info };
+                    }
+                },
                 // CreateAssembly (tool 229, WRITE): brand-new blank assembly document, same shape as CreatePart above.
                 new HSpec {
                     Name = "create_assembly", Actions = new[] { "create_assembly" }, AssemblyOnly = false, Destructive = false,
@@ -4992,6 +5025,42 @@ namespace Forge.SolidWorks
                 return true;
             }
 
+            // BASIC-SOLID intercepts (WRITE, from scratch) — the same live-dispatch-gap class as create_part below:
+            // the cloud parser has no create_sphere/create_cylinder/create_plate action, so a bare "create a sphere"
+            // / "make a cylinder" / "create a rectangular block with a hole" would parse 0 ops and never reach the
+            // HSpecs. These run BEFORE the cloud parse so the basic solids route even when the cloud is unreachable.
+            // Specific-first: each fenced by its own noun, before the generic create_part. The plate cue uses the
+            // widened local net (IsOfflinePlateIntent) so plain block/cube/rectangular phrasing still lands.
+            if (CreateSphere.IsIntent(intent))
+            {
+                var spSpec = Specs().Find(s => s.Name == "create_sphere");
+                var spPlan = new IntentPlan { Confidence = 1.0 };
+                var spOp = new IntentOperation { Action = "create_sphere" };
+                spPlan.Operations.Add(spOp);
+                await ExecuteSpec(spSpec, doc, spPlan, spOp, intent);
+                return true;
+            }
+
+            if (CreateCylinder.IsIntent(intent))
+            {
+                var cySpec = Specs().Find(s => s.Name == "create_cylinder");
+                var cyPlan = new IntentPlan { Confidence = 1.0 };
+                var cyOp = new IntentOperation { Action = "create_cylinder" };
+                cyPlan.Operations.Add(cyOp);
+                await ExecuteSpec(cySpec, doc, cyPlan, cyOp, intent);
+                return true;
+            }
+
+            if (IsOfflinePlateIntent(intent))
+            {
+                var plSpec = Specs().Find(s => s.Name == "create_plate");
+                var plPlan = new IntentPlan { Confidence = 1.0 };
+                var plOp = new IntentOperation { Action = "create_plate" };
+                plPlan.Operations.Add(plOp);
+                await ExecuteSpec(plSpec, doc, plPlan, plOp, intent);
+                return true;
+            }
+
             if (CreatePart.IsIntent(intent))
             {
                 var cpSpec = Specs().Find(s => s.Name == "create_part");
@@ -5407,6 +5476,18 @@ namespace Forge.SolidWorks
             if (ImportModelDimensions.IsIntent(i)) return "import_model_dimensions";
             if (CreateDrawing.IsIntent(i)) return "create_drawing";
             if (InsertNewPartInContext.IsIntent(i)) return "insert_new_part_in_context";
+            // BASIC-SOLID family (WRITE, from scratch — create_part alone makes a BLANK part, no solid). Specific-first
+            // (plate/block/cube/sphere/cylinder BEFORE the generic create_part): each is fenced by its own noun, and
+            // plate/block/cube additionally needs the WIDER offline cue (Ravi 2026-09-02) so a plain "create a
+            // rectangular block" / "... block with a hole of 10mm" — no AxBxC mm size, no literal "plate" word —
+            // still lands on the from-scratch plate solid offline. The ported CreatePlate.IsIntent stays untouched.
+            if (CreateSphere.IsIntent(i)) return "create_sphere";
+            if (CreateCylinder.IsIntent(i)) return "create_cylinder";
+            if (IsOfflinePlateIntent(i)) return "create_plate";
+            // Reference-plane cue ("create/make a plane") — NOT a plate/block solid. Action value matches the
+            // create_reference_plane HSpec's Actions[] exactly (CreateRefPlane.IsCreateRefPlaneIntent already
+            // excludes remove/delete phrasing).
+            if (CreateRefPlane.IsCreateRefPlaneIntent(i)) return "create_reference_plane";
             if (CreatePart.IsIntent(i)) return "create_part";
             if (CreateAssembly.IsIntent(i)) return "create_assembly";
             if (CloseDocument.IsIntent(i)) return "close_document";               // before OpenDocument — see RunViaPipeline note
@@ -5612,6 +5693,23 @@ namespace Forge.SolidWorks
             return null;
         }
 
+        // Offline plate/block/cube cue — WIDER than the ported CreatePlate.IsIntent, which demands an AxBxC mm size
+        // or the literal word "plate" and would therefore strand a plain "create a rectangular block" or "... block
+        // with a hole of 10mm" offline (nothing runs today). Local-only: the ported matcher keeps its strict shape
+        // when it self-fires; this net only ADDS the verb + plate-family-noun (plate/panel/slab/blank/block/cube/
+        // rectangular) route, letting CreatePlate fill its sensible 100×60×8 defaults. Guarded so document/object
+        // nouns it must NOT claim stay on their own routes — "create a new blank part" (a part document, not a
+        // solid) still belongs to create_part / insert_new_part_in_context.
+        private static bool IsOfflinePlateIntent(string i)
+        {
+            if (string.IsNullOrEmpty(i)) return false;
+            if (CreatePlate.IsIntent(i)) return true;
+            if (Regex.IsMatch(i, @"\b(part|component|assembly|drawing|mate|sketch|pattern|configur|reference)\b")) return false;
+            bool noun = Regex.IsMatch(i, @"\b(plate|panel|slab|blank|block|cube|rectangular)\b");
+            bool verb = Regex.IsMatch(i, @"\b(create|make|build|new|start)\b");
+            return verb && noun;
+        }
+
         private static bool IsAffirmative(string s)
         {
             s = (s ?? "").Trim().ToLowerInvariant();
@@ -5652,6 +5750,46 @@ namespace Forge.SolidWorks
                 || name == "validate_props" || name == "find_duplicates" || name == "wall_thickness" || name == "arc_height" || name == "hole_spacing" || name == "mesh_openings" || name == "count_through_holes"
                 || name == "get_mass_properties" || name == "get_bounding_box" || name == "list_configurations" || name == "list_features"
                 || name == "list_equations";
+        }
+
+        // ---- GRACEFUL DEGRADATION (Labtec bug #1): when the cloud router answers a free-form / unrecognized ask
+        //      with a canned dead-end ("didn't map that to one of my tools"), an empty clarify/answer, or the SAME
+        //      dead-end twice in a row, the panel must NOT relay that back and forth — the user gets ONE concrete
+        //      suggestion with a real example command, then the thread is dropped so it can't repeat. A genuine
+        //      router question (which dimension / which component) never matches these patterns and relays normally.
+        private static readonly Regex[] CloudDeadEndPatterns =
+        {
+            new Regex(@"\b(map(ped|ping)?s?)\b.{0,40}\b(tool|command|action|operation)s?\b", RegexOptions.IgnoreCase),
+            new Regex(@"\b(tool|command|action|operation)s?\b.{0,40}\b(map(ped|ping)?s?)\b", RegexOptions.IgnoreCase),
+            new Regex(@"\b(no|not|n't|never|unable|can'?t|cannot|couldn't|didn't|isn't|doesn't)\b.{0,25}\b(map(ped|ping)?s?)\b", RegexOptions.IgnoreCase),
+            new Regex(@"\b(map(ped|ping)?s?)\b.{0,25}\b(no|not|n't|never|unable|can'?t|cannot|couldn't|didn't|isn't|doesn't)\b", RegexOptions.IgnoreCase),
+            new Regex(@"\bnot (one|any) of (my|our|the|these|those)\b", RegexOptions.IgnoreCase),
+            new Regex(@"\b(no|no\s*named|no\s*known|don't have|doesn't have|no handler|lack(s)?)\b.{0,25}\b(tool|handler|toolkit|capabilit|command|action|operation)s?\b", RegexOptions.IgnoreCase),
+            new Regex(@"\b(outside|beyond) (my|our|the)\b.{0,25}\b(capabilit|reach|tool|skill|expertise)\b", RegexOptions.IgnoreCase),
+            new Regex(@"\b(can'?t|cannot|unable to|don't know how|doesn't know how|not sure how|no way)\b.{0,30}\b(do|perform|act|map|interpret|figure)\b", RegexOptions.IgnoreCase),
+            new Regex(@"\bunclear (how|what|which) (to|i)\b", RegexOptions.IgnoreCase)
+        };
+
+        private bool IsCloudDeadEnd(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return true;   // an empty clarify/answer = the router had nothing to say
+            foreach (var re in CloudDeadEndPatterns)
+                if (re.IsMatch(text)) return true;
+            return false;
+        }
+
+        // The single, concrete, never-repeated fallback for an unrecognized/unmapped request. The message names a
+        // real example command for the CURRENT doc type so the user always has an action to take next.
+        private void SendUnmappedSuggestion()
+        {
+            _pendingIntent = null;        // drop the thread — never re-fold a request the router couldn't map
+            _lastRelayedClarify = null;   // and forget any prior relay so a fresh, real question can still be asked
+            var doc = SwAddin.SwApp?.ActiveDoc as IModelDoc2;
+            bool isAsm = false;
+            if (doc != null) { try { isAsm = (int)doc.GetType() == (int)swDocumentTypes_e.swDocASSEMBLY; } catch { } }
+            Send(new { type = "answer", answer = isAsm
+                ? "I couldn't map that to a real Forge action, so nothing was changed. Try one of these: \"mate the flange to the tube\", \"scan this assembly\", or \"what breaks if I change the top plate?\"."
+                : "I couldn't map that to a real Forge action, so nothing was changed. Try one of these: \"set the boss height to 80mm\", \"drill an 8mm hole\", or \"get the mass properties\"." });
         }
     }
 }

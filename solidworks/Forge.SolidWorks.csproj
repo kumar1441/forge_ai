@@ -83,7 +83,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="..\panel\panel.html">
+    <None Include="panel.html">
       <Link>panel.html</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>

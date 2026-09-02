@@ -84,6 +84,27 @@ namespace Forge.SolidWorks
             return c;
         }
 
+        // Labtec bug #2: the router is an LLM and can return a SCALAR where an object or array was expected
+        // (a terse clarify-answer re-parse). Indexing a child on a scalar JValue throws
+        // "Cannot access child value on Newtonsoft.Json.Linq.JValue" and would crash the add-in — these readers
+        // fail CLOSED (empty array / null / no children) so a malformed field can never take the panel down.
+        private static JArray Arr(JToken t) => t as JArray ?? new JArray();
+        private static string Str(JObject o, string key)
+        {
+            if (o == null) return null;
+            var t = o[key];
+            return t == null || t is JValue ? (string)t : null;   // an object/array value is never a string
+        }
+        private static double? Num(JObject o, string key)
+        {
+            if (o == null) return null;
+            var t = o[key] as JValue;
+            if (t == null) return null;
+            if (t.Type == JTokenType.Integer) return (long)t;
+            if (t.Type == JTokenType.Float) return (double)t;
+            return null;
+        }
+
         // The agentic entry point: send dimensions + dependency graph + intent to the router, which
         // classifies into an action (generate_variants / change_impact / clarify).
         public static async Task<ActResult> Act(string intent, List<DimInfo> dims, List<FeatureDep> deps, List<string> selectedFeatures, string boardChange)
@@ -116,17 +137,17 @@ namespace Forge.SolidWorks
             JObject j = JObject.Parse(text);
             var r = new ActResult { Action = (string)j["action"] ?? "", Description = (string)j["description"] ?? "" };
 
-            var m = j["meter"];
+            var m = j["meter"] as JObject;   // scalar "meter" (LLM slip) -> skip, never index it
             if (m != null)
             {
                 r.Meter = new ActMeter
                 {
-                    TokensIn = (long?)m["tokens_in"] ?? 0,
-                    TokensOut = (long?)m["tokens_out"] ?? 0,
-                    LlmCalls = (int?)m["llm_calls"] ?? 0,
-                    CacheHits = (int?)m["cache_hits"] ?? 0,
-                    EstCostUsd = (double?)m["est_cost_usd"] ?? 0,
-                    ModelName = (string)m["model_name"]
+                    TokensIn = (long?)Num(m, "tokens_in") ?? 0,
+                    TokensOut = (long?)Num(m, "tokens_out") ?? 0,
+                    LlmCalls = (int?)Num(m, "llm_calls") ?? 0,
+                    CacheHits = (int?)Num(m, "cache_hits") ?? 0,
+                    EstCostUsd = Num(m, "est_cost_usd") ?? 0,
+                    ModelName = Str(m, "model_name")
                 };
             }
 
@@ -139,34 +160,37 @@ namespace Forge.SolidWorks
             }
             else if (r.Action == "answer")
             {
-                r.Answer = (string)j["answer"] ?? "";
-                foreach (var a in (JArray)(j["affected"] ?? new JArray()))
-                { var name = (string)a; if (!string.IsNullOrEmpty(name)) r.Affected.Add(name); }
+                r.Answer = Str(j, "answer") ?? "";
+                foreach (var a in Arr(j["affected"]))   // affected: array of plain names (JValues)
+                    if (a is JValue) { var name = (string)a; if (!string.IsNullOrEmpty(name)) r.Affected.Add(name); }
             }
             else if (r.Action == "edit")
             {
                 r.Force = (bool?)j["force"] ?? false;
-                foreach (var c in (JArray)(j["changes"] ?? new JArray()))
+                foreach (var c in Arr(j["changes"]))   // each change must be an object; a scalar can never carry one
                 {
+                    var cj = c as JObject;
+                    if (cj == null) continue;
                     r.EditChanges.Add(new EditChange
                     {
-                        Name = (string)c["dimensionName"],
-                        Label = (string)c["label"] ?? (string)c["dimensionName"],
-                        Unit = (string)c["unit"] ?? "mm",
-                        Value = (double?)c["value"] ?? 0
+                        Name = Str(cj, "dimensionName"),
+                        Label = Str(cj, "label") ?? Str(cj, "dimensionName"),
+                        Unit = Str(cj, "unit") ?? "mm",
+                        Value = Num(cj, "value") ?? 0
                     });
                 }
             }
             else if (r.Action == "change_impact")
             {
-                r.Explanation = (string)j["explanation"] ?? "";
-                foreach (var a in (JArray)(j["affected"] ?? new JArray()))
+                r.Explanation = Str(j, "explanation") ?? "";
+                foreach (var a in Arr(j["affected"]))
                 {
+                    if (!(a is JValue)) continue;
                     var name = (string)a;
                     if (!string.IsNullOrEmpty(name)) r.Affected.Add(name);
                 }
             }
-            else r.Clarify = (string)j["clarify"] ?? "";
+            else r.Clarify = Str(j, "clarify") ?? "";
             return r;
         }
 
@@ -183,23 +207,32 @@ namespace Forge.SolidWorks
             string text = await resp.Content.ReadAsStringAsync();
 
             JObject j = JObject.Parse(text);
-            var events = (JArray)(j["events"] ?? new JArray());
-            for (int i = events.Count - 1; i >= 0; i--) // feed is newest-first; emit oldest-first
+            var events = Arr(j["events"]);   // feed is newest-first; emit oldest-first
+            for (int i = events.Count - 1; i >= 0; i--)
             {
-                var e = events[i];
+                var ej = events[i] as JObject;
+                if (ej == null) continue;   // scalar event (LLM slip) -> skip
                 var bev = new BifrostEvent
                 {
-                    Id = (string)e["id"],
-                    Source = (string)e["source"],
-                    Summary = (string)e["summary"],
-                    CreatedAt = (string)e["created_at"],
+                    Id = Str(ej, "id"),
+                    Source = Str(ej, "source"),
+                    Summary = Str(ej, "summary"),
+                    CreatedAt = Str(ej, "created_at"),
                 };
-                var dimsArr = e["payload"]?["dims"] as JArray;
-                if (dimsArr != null)
+                var payload = ej["payload"] as JObject;   // a scalar payload can never carry dims
+                if (payload != null)
                 {
-                    bev.Dims = new List<DimSnap>();
-                    foreach (var d in dimsArr)
-                        bev.Dims.Add(new DimSnap { Name = (string)d["name"], ValueMm = (double?)d["valueMm"] ?? 0 });
+                    var dimsArr = Arr(payload["dims"]);
+                    if (dimsArr.Count > 0)
+                    {
+                        bev.Dims = new List<DimSnap>();
+                        foreach (var d in dimsArr)
+                        {
+                            var dj = d as JObject;
+                            if (dj == null) continue;
+                            bev.Dims.Add(new DimSnap { Name = Str(dj, "name"), ValueMm = Num(dj, "valueMm") ?? 0 });
+                        }
+                    }
                 }
                 list.Add(bev);
             }
@@ -230,17 +263,24 @@ namespace Forge.SolidWorks
                 Description = (string)j["description"] ?? ""
             };
 
-            foreach (var c in (JArray)(j["changes"] ?? new JArray()))
+            foreach (var c in Arr(j["changes"]))
             {
+                var cj = c as JObject;
+                if (cj == null) continue;   // scalar change (LLM slip) carries no dimension
                 var vals = new List<double>();
-                foreach (var v in (JArray)(c["values"] ?? new JArray()))
-                    vals.Add(v.Value<double>());
+                foreach (var v in Arr(cj["values"]))
+                {
+                    var nv = v as JValue;
+                    if (nv == null) continue;
+                    if (nv.Type == JTokenType.Integer) { vals.Add((long)nv); continue; }
+                    if (nv.Type == JTokenType.Float) { vals.Add((double)nv); continue; }
+                }
 
                 plan.Changes.Add(new DimChange
                 {
-                    Name = (string)c["dimensionName"],
-                    Label = (string)c["label"] ?? (string)c["dimensionName"],
-                    Unit = (string)c["unit"] ?? "mm",
+                    Name = Str(cj, "dimensionName"),
+                    Label = Str(cj, "label") ?? Str(cj, "dimensionName"),
+                    Unit = Str(cj, "unit") ?? "mm",
                     Values = vals.ToArray()
                 });
             }
