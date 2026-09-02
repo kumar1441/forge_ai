@@ -1148,6 +1148,49 @@ namespace Forge.SolidWorks
                         return new HOutcome { Verified = cy.Verified, Items = cy.Created ? 1 : 0, Info = cy.Info };
                     }
                 },
+                // CreateFlange (WRITE): a real SOLID annulus/washer from scratch (blank part + two concentric circles
+                // + extrude). Same new-doc convention. Verified only via the INDEPENDENT volume check
+                // ≈ π(ro²−ri²)·h + clean rebuild (res.Verified — fail closed, never a fake green on an unmeasured solid).
+                new HSpec {
+                    Name = "create_flange", Actions = new[] { "create_flange" }, AssemblyOnly = false, Destructive = false,
+                    Execute = async (doc, plan, op, intent, emit) => {
+                        var fl = await CreateFlange.Run(App, doc, intent, emit);
+                        if (fl.Error != null) return new HOutcome { Error = fl.Error };
+                        return new HOutcome { Verified = fl.Verified, Items = fl.Created ? 1 : 0, Info = fl.Info };
+                    }
+                },
+                // CreateCone (WRITE): a real SOLID cone from scratch (blank part + right-triangle profile + 360° revolve).
+                // Same new-doc convention. Verified only via the INDEPENDENT volume check ≈ (1/3)πr²h + clean rebuild.
+                new HSpec {
+                    Name = "create_cone", Actions = new[] { "create_cone" }, AssemblyOnly = false, Destructive = false,
+                    Execute = async (doc, plan, op, intent, emit) => {
+                        var cn = await CreateCone.Run(App, doc, intent, emit);
+                        if (cn.Error != null) return new HOutcome { Error = cn.Error };
+                        return new HOutcome { Verified = cn.Verified, Items = cn.Created ? 1 : 0, Info = cn.Info };
+                    }
+                },
+                // CreateTorus (WRITE): a real SOLID ring torus from scratch (blank part + minor circle revolved around an
+                // offset axis). Same new-doc convention. Verified only via the INDEPENDENT volume check ≈ 2π²Rr² + clean
+                // rebuild (res.Verified — fail closed, never a fake green on an unmeasured solid).
+                new HSpec {
+                    Name = "create_torus", Actions = new[] { "create_torus" }, AssemblyOnly = false, Destructive = false,
+                    Execute = async (doc, plan, op, intent, emit) => {
+                        var to = await CreateTorus.Run(App, doc, intent, emit);
+                        if (to.Error != null) return new HOutcome { Error = to.Error };
+                        return new HOutcome { Verified = to.Verified, Items = to.Created ? 1 : 0, Info = to.Info };
+                    }
+                },
+                // CreateTube (WRITE): a real SOLID hollow cylinder/pipe from scratch (blank part + two concentric circles
+                // + extrude). Same new-doc convention. Verified only via the INDEPENDENT volume check ≈ π(ro²−ri²)·L +
+                // clean rebuild (res.Verified — fail closed, never a fake green on an unmeasured solid).
+                new HSpec {
+                    Name = "create_tube", Actions = new[] { "create_tube" }, AssemblyOnly = false, Destructive = false,
+                    Execute = async (doc, plan, op, intent, emit) => {
+                        var tu = await CreateTube.Run(App, doc, intent, emit);
+                        if (tu.Error != null) return new HOutcome { Error = tu.Error };
+                        return new HOutcome { Verified = tu.Verified, Items = tu.Created ? 1 : 0, Info = tu.Info };
+                    }
+                },
                 // CreateAssembly (tool 229, WRITE): brand-new blank assembly document, same shape as CreatePart above.
                 new HSpec {
                     Name = "create_assembly", Actions = new[] { "create_assembly" }, AssemblyOnly = false, Destructive = false,
@@ -5041,6 +5084,51 @@ namespace Forge.SolidWorks
                 return true;
             }
 
+            // The four new basic solids from 2026-09-02 (flange/cone/torus/tube) get the SAME pre-cloud intercept as
+            // sphere/cylinder/plate — the cloud parser has no create_flange/create_cone/create_torus/create_tube action
+            // either, so a bare "make a washer" / "create a cone" would otherwise parse 0 ops. Specific-first, each
+            // fenced by its own noun. tube/pipe MUST be claimed before the (widened) create_cylinder, whose matcher also
+            // fires on tube|pipe — so the tube family sits above the cylinder intercept below.
+            if (CreateFlange.IsIntent(intent))
+            {
+                var flSpec = Specs().Find(s => s.Name == "create_flange");
+                var flPlan = new IntentPlan { Confidence = 1.0 };
+                var flOp = new IntentOperation { Action = "create_flange" };
+                flPlan.Operations.Add(flOp);
+                await ExecuteSpec(flSpec, doc, flPlan, flOp, intent);
+                return true;
+            }
+
+            if (CreateCone.IsIntent(intent))
+            {
+                var cnSpec = Specs().Find(s => s.Name == "create_cone");
+                var cnPlan = new IntentPlan { Confidence = 1.0 };
+                var cnOp = new IntentOperation { Action = "create_cone" };
+                cnPlan.Operations.Add(cnOp);
+                await ExecuteSpec(cnSpec, doc, cnPlan, cnOp, intent);
+                return true;
+            }
+
+            if (CreateTorus.IsIntent(intent))
+            {
+                var toSpec = Specs().Find(s => s.Name == "create_torus");
+                var toPlan = new IntentPlan { Confidence = 1.0 };
+                var toOp = new IntentOperation { Action = "create_torus" };
+                toPlan.Operations.Add(toOp);
+                await ExecuteSpec(toSpec, doc, toPlan, toOp, intent);
+                return true;
+            }
+
+            if (CreateTube.IsIntent(intent))
+            {
+                var tuSpec = Specs().Find(s => s.Name == "create_tube");
+                var tuPlan = new IntentPlan { Confidence = 1.0 };
+                var tuOp = new IntentOperation { Action = "create_tube" };
+                tuPlan.Operations.Add(tuOp);
+                await ExecuteSpec(tuSpec, doc, tuPlan, tuOp, intent);
+                return true;
+            }
+
             if (CreateCylinder.IsIntent(intent))
             {
                 var cySpec = Specs().Find(s => s.Name == "create_cylinder");
@@ -5477,11 +5565,17 @@ namespace Forge.SolidWorks
             if (CreateDrawing.IsIntent(i)) return "create_drawing";
             if (InsertNewPartInContext.IsIntent(i)) return "insert_new_part_in_context";
             // BASIC-SOLID family (WRITE, from scratch — create_part alone makes a BLANK part, no solid). Specific-first
-            // (plate/block/cube/sphere/cylinder BEFORE the generic create_part): each is fenced by its own noun, and
-            // plate/block/cube additionally needs the WIDER offline cue (Ravi 2026-09-02) so a plain "create a
-            // rectangular block" / "... block with a hole of 10mm" — no AxBxC mm size, no literal "plate" word —
-            // still lands on the from-scratch plate solid offline. The ported CreatePlate.IsIntent stays untouched.
+            // (plate/block/cube/sphere/flange/cone/torus/tube/cylinder BEFORE the generic create_part): each is fenced
+            // by its own noun, and plate/block/cube additionally needs the WIDER offline cue (Ravi 2026-09-02) so a
+            // plain "create a rectangular block" / "... block with a hole of 10mm" — no AxBxC mm size, no literal
+            // "plate" word — still lands on the from-scratch plate solid offline. The ported CreatePlate.IsIntent stays
+            // untouched. tube/pipe is claimed by create_tube (the widened create_cylinder matcher also fires on
+            // tube|pipe), so the tube family MUST be tested before create_cylinder.
             if (CreateSphere.IsIntent(i)) return "create_sphere";
+            if (CreateFlange.IsIntent(i)) return "create_flange";
+            if (CreateCone.IsIntent(i)) return "create_cone";
+            if (CreateTorus.IsIntent(i)) return "create_torus";
+            if (CreateTube.IsIntent(i)) return "create_tube";
             if (CreateCylinder.IsIntent(i)) return "create_cylinder";
             if (IsOfflinePlateIntent(i)) return "create_plate";
             // Reference-plane cue ("create/make a plane") — NOT a plate/block solid. Action value matches the

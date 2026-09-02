@@ -184,6 +184,130 @@ namespace Forge.SolidWorks
                     return;
                 }
 
+                // ---- CREATE-FROM-SCRATCH mode: a request may carry a "createIntent" field INSTEAD of
+                //      assemblyPath/handlerIntent (the create-basic-solid test harness: no fixture model exists yet —
+                //      the tool under test must BUILD the solid from nothing). Do NOT open any assembly; clear the
+                //      session to a clean slate (same convention the create handlers themselves use) and route the
+                //      intent to the right create handler via its OWN IsIntent matcher (specific-first: sphere, flange,
+                //      cone, torus, tube, cylinder/shaft, plate/block — tube before the widened create_cylinder matcher,
+                //      which also fires on tube|pipe). Verification is the handler's fail-closed independent
+                //      mass-property volume check. resultPath semantics unchanged. ----
+                string createIntent = (string)req["createIntent"];
+                if (!string.IsNullOrEmpty(createIntent))
+                {
+                    resultPath = (string)req["resultPath"];
+                    res["createIntent"] = createIntent;
+                    var clog = new List<string>();
+                    var emitC = Collect(clog);
+                    string handler = null;
+                    bool created = false, verified = false, rebuildClean = false;
+                    double volumeMm3 = -1;
+                    string info = null, err = null;
+                    try
+                    {
+                        if (CreateSphere.IsIntent(createIntent)) handler = "create_sphere";
+                        else if (CreateFlange.IsIntent(createIntent)) handler = "create_flange";
+                        else if (CreateCone.IsIntent(createIntent)) handler = "create_cone";
+                        else if (CreateTorus.IsIntent(createIntent)) handler = "create_torus";
+                        else if (CreateTube.IsIntent(createIntent)) handler = "create_tube";
+                        else if (CreateCylinder.IsIntent(createIntent)) handler = "create_cylinder";
+                        else if (CreatePlate.IsIntent(createIntent)) handler = "create_plate";
+
+                        if (handler == null)
+                        {
+                            res["error"] = "no from-scratch create handler matched createIntent";
+                            res["ok"] = false;
+                            return;
+                        }
+
+                        // clean slate: close every open doc so the new part is the active one (no lock issues)
+                        try
+                        {
+                            var docs = app.GetDocuments() as object[];
+                            if (docs != null)
+                                foreach (var o in docs)
+                                {
+                                    var m = o as IModelDoc2; if (m == null) continue;
+                                    string t = null; try { t = m.GetTitle(); } catch { }
+                                    if (t != null) { try { app.CloseDoc(t); } catch { } }
+                                }
+                        }
+                        catch { }
+
+                        res["handler"] = handler;
+                        switch (handler)
+                        {
+                            case "create_sphere":
+                            {
+                                var r = await CreateSphere.Run(app, null, createIntent, emitC);
+                                created = r.Created; verified = r.Verified; rebuildClean = r.RebuildClean;
+                                volumeMm3 = r.VolumeMm3; info = r.Info; err = r.Error;
+                                break;
+                            }
+                            case "create_flange":
+                            {
+                                var r = await CreateFlange.Run(app, null, createIntent, emitC);
+                                created = r.Created; verified = r.Verified; rebuildClean = r.RebuildClean;
+                                volumeMm3 = r.VolumeMm3; info = r.Info; err = r.Error;
+                                break;
+                            }
+                            case "create_cone":
+                            {
+                                var r = await CreateCone.Run(app, null, createIntent, emitC);
+                                created = r.Created; verified = r.Verified; rebuildClean = r.RebuildClean;
+                                volumeMm3 = r.VolumeMm3; info = r.Info; err = r.Error;
+                                break;
+                            }
+                            case "create_torus":
+                            {
+                                var r = await CreateTorus.Run(app, null, createIntent, emitC);
+                                created = r.Created; verified = r.Verified; rebuildClean = r.RebuildClean;
+                                volumeMm3 = r.VolumeMm3; info = r.Info; err = r.Error;
+                                break;
+                            }
+                            case "create_tube":
+                            {
+                                var r = await CreateTube.Run(app, null, createIntent, emitC);
+                                created = r.Created; verified = r.Verified; rebuildClean = r.RebuildClean;
+                                volumeMm3 = r.VolumeMm3; info = r.Info; err = r.Error;
+                                break;
+                            }
+                            case "create_cylinder":
+                            {
+                                var r = await CreateCylinder.Run(app, null, createIntent, emitC);
+                                created = r.Created; verified = r.Verified; rebuildClean = r.RebuildClean;
+                                volumeMm3 = r.VolumeMm3; info = r.Info; err = r.Error;
+                                break;
+                            }
+                            case "create_plate":
+                            {
+                                var r = await CreatePlate.Run(app, null, createIntent, emitC);
+                                created = r.Created; rebuildClean = r.RebuildClean;
+                                verified = r.Created && r.RebuildClean;   // CreatePlateResult carries no Verified; fail closed on created+clean
+                                volumeMm3 = r.VolumeMm3; info = r.Info; err = r.Error;
+                                break;
+                            }
+                            default:
+                            {
+                                err = "unhandled create handler " + handler;
+                                break;
+                            }
+                        }
+                    }
+                    catch (Exception cex) { err = cex.GetType().Name + ": " + cex.Message; }
+
+                    res["handler"] = handler;
+                    res["created"] = created;
+                    res["verified"] = verified;
+                    res["rebuildClean"] = rebuildClean;
+                    res["volumeMm3"] = volumeMm3;
+                    res["info"] = info;
+                    res["error"] = err;
+                    res["createLog"] = new JArray(clog);
+                    res["ok"] = true;
+                    return;
+                }
+
                 string asmPath = (string)req["assemblyPath"];
                 string intent = (string)req["handlerIntent"] ?? "mate all the bolts";
                 resultPath = (string)req["resultPath"];
