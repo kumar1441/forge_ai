@@ -5068,6 +5068,14 @@ namespace Forge.SolidWorks
                 return true;
             }
 
+            // COMPOUND CREATE ("create X and add Y on top") — runs FIRST, before the per-shape intercepts below AND before
+            // the guardrail each shape's Run() carries: no single bare-primitive handler or CreateGuardrail refusal can
+            // honour a genuine two-step ask, so when CompoundCreate confidently splits the intent into a bare primary +
+            // a secondary feature, EXECUTE both (primary solid, then the feature fused onto its top face). Anything that
+            // isn't a confident compound — a single shape, or a parse that couldn't identify both shapes — falls through
+            // to the single-shape intercepts + guardrail below, exactly as before.
+            if (await TryRunCompoundCreate(intent)) return true;
+
             // BASIC-SOLID intercepts (WRITE, from scratch) — the same live-dispatch-gap class as create_part below:
             // the cloud parser has no create_sphere/create_cylinder/create_plate action, so a bare "create a sphere"
             // / "make a cylinder" / "create a rectangular block with a hole" would parse 0 ops and never reach the
@@ -5502,6 +5510,11 @@ namespace Forge.SolidWorks
         //      blocks / legacy path still handle it. Returns true iff this handled the command. ----
         private async Task<bool> TryLocalFallback(string intent, IModelDoc2 doc)
         {
+            // COMPOUND CREATE first — the cloud never parses a two-step "create X and add Y on top" ask into a runnable
+            // plan, so it lands here as a 0-op / unmatched-action fallback. Run the primary-then-secondary flow before
+            // LocalActionFor can hand it to a single-shape handler (which would then guardrail-refuse on "and"/"on top").
+            if (await TryRunCompoundCreate(intent)) return true;
+
             string action = LocalActionFor(intent);
             if (action == null) return false;
             var spec = Specs().Find(s => Array.IndexOf(s.Actions, action) >= 0);
@@ -5528,6 +5541,56 @@ namespace Forge.SolidWorks
                 }
             }
             await ExecuteSpec(spec, doc, plan, op, intent);
+            return true;
+        }
+
+        // ---- COMPOUND CREATE ("create X and add Y on top"): run the primary solid through its normal spec, then fuse the
+        //      secondary feature onto the freshly-created part's top face. Returns true iff this command was a confident
+        //      compound (handled, or reported honestly); false lets the single-shape paths + guardrail keep their behaviour.
+        private async Task<bool> TryRunCompoundCreate(string intent)
+        {
+            var comp = CompoundCreate.Parse(intent);
+            if (comp == null || !comp.IsCompound || comp.Error != null) return false;
+
+            string action = CompoundCreate.RoutePrimaryAction(comp.PrimaryIntent);
+            var spec = action == null ? null : Specs().Find(s => Array.IndexOf(s.Actions, action) >= 0);
+            if (spec == null)
+            {
+                Send(new { type = "error", message = "I couldn't route the first step of \"" + comp.PrimaryIntent + "\" to a create handler." });
+                return true;
+            }
+
+            try { PanelCapture.Log("parse", new { intent, action, confidence = 1.0, routed = spec.Name, source = "compound-create" }); } catch { }
+            var plan = new IntentPlan { Confidence = 1.0 };
+            var op = new IntentOperation { Action = action };
+            plan.Operations.Add(op);
+
+            var o = await ExecuteSpec(spec, App?.ActiveDoc as IModelDoc2, plan, op, comp.PrimaryIntent);
+            // Only attempt the secondary when the primary spec actually created a document/solid (Items>0) and didn't
+            // error or ask — otherwise the active doc may still be the user's pre-existing model, which we must not touch.
+            if (o == null || o.Error != null || o.AskedConfirm || o.Items <= 0) return true;
+
+            var part = App?.ActiveDoc as IModelDoc2;
+            if (part == null)
+            {
+                Send(new { type = "answer", answer = "The primary was created but no part document is open to add the " + comp.SecondaryShape + " to — check the model.", runId = _currentRunId, handler = spec.Name + "+on_top" });
+                return true;
+            }
+
+            Func<string, string, string, string, Task> emitS = async (a, g, s, r) =>
+            { Send(new { type = "step", agent = a, gloss = g, state = s, result = r }); await Task.Delay(60); };
+            var so = await CreateOnTop.AddOnTopFace(App, part, comp.SecondaryShape, comp.SecondaryIntent, emitS);
+            bool secCreated = false, secVerified = false;
+            string secErr = null;
+            try { secCreated = so["created"] != null && so["created"].Value<bool>(); } catch { }
+            try { secVerified = so["verified"] != null && so["verified"].Value<bool>(); } catch { }
+            try { secErr = so["error"] != null ? so["error"].Value<string>() : null; } catch { }
+
+            string first = (o.Verified && o.Info != null) ? o.Info : "the primary create ran but couldn't be verified";
+            string second = secCreated && secVerified
+                ? (so["info"] != null ? so["info"].Value<string>() : "added a " + comp.SecondaryShape + " on top")
+                : (secErr ?? "the " + comp.SecondaryShape + " on top couldn't be verified");
+            Send(new { type = "answer", answer = "Done in two steps — " + first + " Then " + second, runId = _currentRunId, handler = spec.Name + "+on_top" });
             return true;
         }
 

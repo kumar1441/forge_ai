@@ -1,7 +1,0 @@
-{
-  "startedUtc": "2026-09-02T16:47:52.3699615Z",
-  "createIntent": "create a block 100x50x20 then drill 4 holes in the corners",
-  "error": "no from-scratch create handler matched createIntent",
-  "ok": false,
-  "finishedUtc": "2026-09-02T16:47:52.3709779Z"
-}

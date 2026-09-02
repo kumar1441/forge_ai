@@ -199,11 +199,20 @@ namespace Forge.SolidWorks
                     res["createIntent"] = createIntent;
                     var clog = new List<string>();
                     var emitC = Collect(clog);
+                    // COMPOUND CREATE runs FIRST, BEFORE the single-shape guardrail: "create X and add Y on top" parses
+                    // into a bare PRIMARY clause (routed to ONE existing create handler) + a SECONDARY clause (fused onto
+                    // the primary's top face by CreateOnTop). A genuine two-step ask is EXECUTED, not refused. Only a
+                    // NON-compound single shape — and a compound parse that couldn't identify both shapes (its Error) —
+                    // falls through to the guardrail below, exactly as before.
+                    var compoundParse = CompoundCreate.Parse(createIntent);
+                    bool isCompound = compoundParse != null && compoundParse.IsCompound && compoundParse.Error == null;
+                    string runIntent = isCompound ? compoundParse.PrimaryIntent : createIntent;
                     // honest-refusal guardrail: a compound/positional/feature intent ("create a cylinder with a 10mm
                     // hole", "create a flange on top of the sphere") is more than a single bare-primitive handler can
-                    // honour — report the refusal instead of silently creating the truncated shape (fail closed).
-                    string cue = CreateGuardrail.UnsupportedCue(createIntent);
-                    if (cue != null)
+                    // honour — report the refusal instead of silently creating the truncated shape (fail closed). The
+                    // compound path above already claims every split-able two-step intent, so only the rest is refused.
+                    string cue = isCompound ? null : CreateGuardrail.UnsupportedCue(createIntent);
+                    if (!isCompound && cue != null)
                     {
                         res["handler"] = null;
                         res["created"] = false;
@@ -222,17 +231,23 @@ namespace Forge.SolidWorks
                     string info = null, err = null;
                     try
                     {
-                        if (CreateSphere.IsIntent(createIntent)) handler = "create_sphere";
-                        else if (CreateFlange.IsIntent(createIntent)) handler = "create_flange";
-                        else if (CreateCone.IsIntent(createIntent)) handler = "create_cone";
-                        else if (CreateTorus.IsIntent(createIntent)) handler = "create_torus";
-                        else if (CreateTube.IsIntent(createIntent)) handler = "create_tube";
-                        else if (CreateCylinder.IsIntent(createIntent)) handler = "create_cylinder";
-                        else if (CreatePlate.IsIntent(createIntent)) handler = "create_plate";
+                        // route the PRIMARY: a compound flow resolves its bare primary clause via the shared router (so a
+                        // "create a block 50x50x50" cube primary reaches create_plate); a single-shape flow keeps the same
+                        // per-handler IsIntent dispatch as before (specific-first: sphere, flange, cone, torus, tube,
+                        // cylinder/shaft, plate/block — tube before the widened create_cylinder matcher, which also fires
+                        // on tube|pipe).
+                        if (isCompound) handler = CompoundCreate.RoutePrimaryAction(runIntent);
+                        else if (CreateSphere.IsIntent(runIntent)) handler = "create_sphere";
+                        else if (CreateFlange.IsIntent(runIntent)) handler = "create_flange";
+                        else if (CreateCone.IsIntent(runIntent)) handler = "create_cone";
+                        else if (CreateTorus.IsIntent(runIntent)) handler = "create_torus";
+                        else if (CreateTube.IsIntent(runIntent)) handler = "create_tube";
+                        else if (CreateCylinder.IsIntent(runIntent)) handler = "create_cylinder";
+                        else if (CreatePlate.IsIntent(runIntent)) handler = "create_plate";
 
                         if (handler == null)
                         {
-                            res["error"] = "no from-scratch create handler matched createIntent";
+                            res["error"] = "no from-scratch create handler matched \"" + runIntent + "\"";
                             res["ok"] = false;
                             return;
                         }
@@ -256,49 +271,49 @@ namespace Forge.SolidWorks
                         {
                             case "create_sphere":
                             {
-                                var r = await CreateSphere.Run(app, null, createIntent, emitC);
+                                var r = await CreateSphere.Run(app, null, runIntent, emitC);
                                 created = r.Created; verified = r.Verified; rebuildClean = r.RebuildClean;
                                 volumeMm3 = r.VolumeMm3; info = r.Info; err = r.Error;
                                 break;
                             }
                             case "create_flange":
                             {
-                                var r = await CreateFlange.Run(app, null, createIntent, emitC);
+                                var r = await CreateFlange.Run(app, null, runIntent, emitC);
                                 created = r.Created; verified = r.Verified; rebuildClean = r.RebuildClean;
                                 volumeMm3 = r.VolumeMm3; info = r.Info; err = r.Error;
                                 break;
                             }
                             case "create_cone":
                             {
-                                var r = await CreateCone.Run(app, null, createIntent, emitC);
+                                var r = await CreateCone.Run(app, null, runIntent, emitC);
                                 created = r.Created; verified = r.Verified; rebuildClean = r.RebuildClean;
                                 volumeMm3 = r.VolumeMm3; info = r.Info; err = r.Error;
                                 break;
                             }
                             case "create_torus":
                             {
-                                var r = await CreateTorus.Run(app, null, createIntent, emitC);
+                                var r = await CreateTorus.Run(app, null, runIntent, emitC);
                                 created = r.Created; verified = r.Verified; rebuildClean = r.RebuildClean;
                                 volumeMm3 = r.VolumeMm3; info = r.Info; err = r.Error;
                                 break;
                             }
                             case "create_tube":
                             {
-                                var r = await CreateTube.Run(app, null, createIntent, emitC);
+                                var r = await CreateTube.Run(app, null, runIntent, emitC);
                                 created = r.Created; verified = r.Verified; rebuildClean = r.RebuildClean;
                                 volumeMm3 = r.VolumeMm3; info = r.Info; err = r.Error;
                                 break;
                             }
                             case "create_cylinder":
                             {
-                                var r = await CreateCylinder.Run(app, null, createIntent, emitC);
+                                var r = await CreateCylinder.Run(app, null, runIntent, emitC);
                                 created = r.Created; verified = r.Verified; rebuildClean = r.RebuildClean;
                                 volumeMm3 = r.VolumeMm3; info = r.Info; err = r.Error;
                                 break;
                             }
                             case "create_plate":
                             {
-                                var r = await CreatePlate.Run(app, null, createIntent, emitC);
+                                var r = await CreatePlate.Run(app, null, runIntent, emitC);
                                 created = r.Created; rebuildClean = r.RebuildClean;
                                 verified = r.Created && r.RebuildClean;   // CreatePlateResult carries no Verified; fail closed on created+clean
                                 volumeMm3 = r.VolumeMm3; info = r.Info; err = r.Error;
@@ -320,6 +335,48 @@ namespace Forge.SolidWorks
                     res["volumeMm3"] = volumeMm3;
                     res["info"] = info;
                     res["error"] = err;
+
+                    // ---- COMPOUND SECOND STEP: fuse the secondary feature onto the freshly-created primary's top face ----
+                    if (isCompound)
+                    {
+                        bool secCreated = false, secVerified = false;
+                        string secErr = null;
+                        if (created)
+                        {
+                            var part = app.ActiveDoc as IModelDoc2;
+                            if (part == null)
+                            {
+                                secErr = "The primary solid reported created but no part document is active to build the " +
+                                         compoundParse.SecondaryShape + " on.";
+                            }
+                            else
+                            {
+                                var so = await CreateOnTop.AddOnTopFace(app, part, compoundParse.SecondaryShape,
+                                    compoundParse.SecondaryIntent, emitC);
+                                try { secCreated = so["created"] != null && so["created"].Value<bool>(); } catch { }
+                                try { secVerified = so["verified"] != null && so["verified"].Value<bool>(); } catch { }
+                                try { secErr = so["error"] != null ? so["error"].Value<string>() : null; } catch { }
+                                if (!secCreated && secErr == null) secErr = "the " + compoundParse.SecondaryShape + " step didn't report success";
+                            }
+                        }
+                        else
+                        {
+                            secErr = "the primary solid wasn't created" + (string.IsNullOrEmpty(err) ? "." : " — " + err) +
+                                     " There's no part to add a " + compoundParse.SecondaryShape + " to.";
+                        }
+                        res["compound"] = true;
+                        res["primaryIntent"] = compoundParse.PrimaryIntent;
+                        res["secondaryIntent"] = compoundParse.SecondaryIntent;
+                        res["secondary"] = new JObject
+                        {
+                            ["shape"] = compoundParse.SecondaryShape,
+                            ["position"] = compoundParse.Position,
+                            ["created"] = secCreated,
+                            ["verified"] = secVerified,
+                            ["error"] = secErr
+                        };
+                    }
+
                     res["createLog"] = new JArray(clog);
                     res["ok"] = true;
                     return;
