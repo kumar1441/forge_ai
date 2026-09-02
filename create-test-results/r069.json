@@ -1,0 +1,17 @@
+{
+  "startedUtc": "2026-09-02T16:27:45.0561100Z",
+  "createIntent": "create a flange 50mm outer 20mm bore 10mm thick",
+  "handler": "create_flange",
+  "created": true,
+  "verified": true,
+  "rebuildClean": true,
+  "volumeMm3": 2356.1944901923453,
+  "info": "Created a 20 mm outer × 10 mm bore × 10 mm flange — 2,356 mm³ (expected ≈ 2,356), rebuild clean. One Ctrl+Z removes it; Forge didn't save.",
+  "error": null,
+  "createLog": [
+    "Builder | run | creating a 20 mm outer × 10 mm bore × 10 mm thick flange",
+    "Sentinel | done | flange 20 mm outer × 10 mm bore × 10 mm, 2,356 mm³ (expected ≈ 2,356 mm³), rebuild clean"
+  ],
+  "ok": true,
+  "finishedUtc": "2026-09-02T16:27:49.6325209Z"
+}

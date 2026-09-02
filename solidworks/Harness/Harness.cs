@@ -199,6 +199,23 @@ namespace Forge.SolidWorks
                     res["createIntent"] = createIntent;
                     var clog = new List<string>();
                     var emitC = Collect(clog);
+                    // honest-refusal guardrail: a compound/positional/feature intent ("create a cylinder with a 10mm
+                    // hole", "create a flange on top of the sphere") is more than a single bare-primitive handler can
+                    // honour — report the refusal instead of silently creating the truncated shape (fail closed).
+                    string cue = CreateGuardrail.UnsupportedCue(createIntent);
+                    if (cue != null)
+                    {
+                        res["handler"] = null;
+                        res["created"] = false;
+                        res["verified"] = false;
+                        res["rebuildClean"] = false;
+                        res["volumeMm3"] = -1;
+                        res["info"] = null;
+                        res["error"] = "unsupported cue: " + cue;
+                        res["createLog"] = new JArray(clog);
+                        res["ok"] = true;
+                        return;
+                    }
                     string handler = null;
                     bool created = false, verified = false, rebuildClean = false;
                     double volumeMm3 = -1;

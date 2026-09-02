@@ -1,0 +1,17 @@
+{
+  "startedUtc": "2026-09-02T16:30:17.2221215Z",
+  "createIntent": "create a torus 30mm major 10mm tube",
+  "handler": "create_torus",
+  "created": true,
+  "verified": true,
+  "rebuildClean": true,
+  "volumeMm3": 59217.626406536154,
+  "info": "Created a 30 mm major × 10 mm tube torus — 59,218 mm³ (expected ≈ 59,218), rebuild clean. One Ctrl+Z removes it; Forge didn't save.",
+  "error": null,
+  "createLog": [
+    "Builder | run | creating a torus 30 mm major × 10 mm tube",
+    "Sentinel | done | torus 30 mm major × 10 mm tube, 59,218 mm³ (expected ≈ 59,218 mm³), rebuild clean"
+  ],
+  "ok": true,
+  "finishedUtc": "2026-09-02T16:30:21.3917514Z"
+}

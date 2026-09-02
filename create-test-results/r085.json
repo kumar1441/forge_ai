@@ -1,0 +1,17 @@
+{
+  "startedUtc": "2026-09-02T16:29:33.1859558Z",
+  "createIntent": "create a cone 50mm base 40mm tall",
+  "handler": "create_cone",
+  "created": true,
+  "verified": true,
+  "rebuildClean": true,
+  "volumeMm3": 26179.938779914959,
+  "info": "Created a 50 mm base × 40 mm tall cone — 26,180 mm³ (expected ≈ 26,180), rebuild clean. One Ctrl+Z removes it; Forge didn't save.",
+  "error": null,
+  "createLog": [
+    "Builder | run | creating a 50 mm base × 40 mm tall cone",
+    "Sentinel | done | cone 50 mm base dia × 40 mm, 26,180 mm³ (expected ≈ 26,180 mm³), rebuild clean"
+  ],
+  "ok": true,
+  "finishedUtc": "2026-09-02T16:29:37.1730138Z"
+}

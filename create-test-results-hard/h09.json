@@ -1,0 +1,17 @@
+{
+  "startedUtc": "2026-09-02T16:48:16.4477756Z",
+  "createIntent": "create a shaft with a keyway",
+  "handler": "create_cylinder",
+  "created": true,
+  "verified": true,
+  "rebuildClean": true,
+  "volumeMm3": 75398.223686155034,
+  "info": "Created a 40 mm diameter × 60 mm tall cylinder — 75,398 mm³ (expected ≈ 75,398), rebuild clean. One Ctrl+Z removes it; Forge didn't save.",
+  "error": null,
+  "createLog": [
+    "Builder | run | creating a 40 mm diameter × 60 mm tall cylinder",
+    "Sentinel | done | cylinder 40 mm dia × 60 mm, 75,398 mm³ (expected ≈ 75,398 mm³), rebuild clean"
+  ],
+  "ok": true,
+  "finishedUtc": "2026-09-02T16:48:20.1110969Z"
+}

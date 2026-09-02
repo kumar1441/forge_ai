@@ -1,0 +1,16 @@
+{
+  "startedUtc": "2026-09-02T16:48:59.1920039Z",
+  "createIntent": "create a 50mm sphere then a flange on the top face",
+  "handler": "create_sphere",
+  "created": false,
+  "verified": false,
+  "rebuildClean": false,
+  "volumeMm3": -1.0,
+  "info": null,
+  "error": "SolidWorks refused the revolve — the half-circle profile may need attention headless. Nothing was left behind except an empty new part.",
+  "createLog": [
+    "Builder | run | creating a 50 mm sphere"
+  ],
+  "ok": true,
+  "finishedUtc": "2026-09-02T16:49:02.3072576Z"
+}

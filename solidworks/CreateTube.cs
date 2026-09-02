@@ -49,6 +49,9 @@ namespace Forge.SolidWorks
         {
             var res = new CreateTubeResult();
 
+            string cue = CreateGuardrail.UnsupportedCue(intent);
+            if (cue != null) { res.Error = "I can only create a plain tube from scratch — \"" + cue + "\" (compound/positional/feature requests) isn't supported yet. Ask for a bare shape like \"create a 50mm tube\"."; return res; }
+
             double dMm = DefaultOuterMm, iMm = DefaultInnerMm, lMm = DefaultLengthMm;
             ParseDims(intent ?? "", ref dMm, ref iMm, ref lMm);
             res.OuterMm = dMm;

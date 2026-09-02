@@ -1,0 +1,17 @@
+{
+  "startedUtc": "2026-09-02T16:22:26.5550868Z",
+  "createIntent": "create a 130mm diameter 50mm tall cylinder",
+  "handler": "create_cylinder",
+  "created": true,
+  "verified": true,
+  "rebuildClean": true,
+  "volumeMm3": 117809.72450961726,
+  "info": "Created a 50 mm diameter × 60 mm tall cylinder — 117,810 mm³ (expected ≈ 117,810), rebuild clean. One Ctrl+Z removes it; Forge didn't save.",
+  "error": null,
+  "createLog": [
+    "Builder | run | creating a 50 mm diameter × 60 mm tall cylinder",
+    "Sentinel | done | cylinder 50 mm dia × 60 mm, 117,810 mm³ (expected ≈ 117,810 mm³), rebuild clean"
+  ],
+  "ok": true,
+  "finishedUtc": "2026-09-02T16:22:30.1357668Z"
+}

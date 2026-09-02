@@ -22,10 +22,11 @@ namespace Forge.SolidWorks
     /// CreateSphere — tool: create a SOLID SPHERE part FROM SCRATCH (blank part + half-circle profile on the
     /// Front plane + 360° revolve). The "create a sphere" / "make a sphere of 50mm" basic-solid primitive —
     /// CreatePart alone makes a BLANK part (no solid), so a from-scratch revolved ball is its own tool.
-    /// Sketch construction: a centreline along the X axis (the revolve axis) + a half-circle arc above it, closed
-    /// by a straight diameter line coincident with the axis — the classic hemisphere profile. Revolving it 360°
+    /// Sketch construction: a single clean centreline along the X axis (the revolve axis) + one half-circle arc whose
+    /// endpoints sit ON the axis — NO separate diameter line overlapping the centreline (the old duplicate/overlapping
+    /// entity made the profile ambiguous and SolidWorks refused the revolve headless). Revolving the half-circle 360°
     /// sweeps a sphere of radius r = D/2. The revolve call mirrors the PROVEN AddRevolve FeatureRevolve2 usage
-    /// (auto-select profile + the single centreline axis). Never saves.
+    /// (auto-select profile + the single centreline axis), the same spine CONE and TORUS use. Never saves.
     /// </summary>
     public static class CreateSphere
     {
@@ -44,6 +45,9 @@ namespace Forge.SolidWorks
         public static async Task<CreateSphereResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new CreateSphereResult();
+
+            string cue = CreateGuardrail.UnsupportedCue(intent);
+            if (cue != null) { res.Error = "I can only create a plain sphere from scratch — \"" + cue + "\" (compound/positional/feature requests) isn't supported yet. Ask for a bare shape like \"create a 50mm sphere\"."; return res; }
 
             double dMm = DefaultDiameterMm;
             var m = Regex.Match(intent ?? "", @"(\d+(?:\.\d+)?)\s*mm");
@@ -67,12 +71,12 @@ namespace Forge.SolidWorks
                 try { sel = part.Extension.SelectByID2("Front Plane", "PLANE", 0, 0, 0, false, 0, null, 0); } catch { }
                 if (!sel) { res.Error = "could not select the Front Plane"; return res; }
 
-                // half-circle profile: centreline along the X axis (revolve axis) + arc above it + diameter line
+                // clean hemisphere profile: one centreline (axis of revolution) + a single half-circle arc above it,
+                // endpoints ON the axis. The proven CONE/TORUS revolve-sketch spine — no duplicate line over the axis.
                 var sm = part.SketchManager;
                 sm.InsertSketch(true);
-                sm.CreateCenterLine(-r, 0, 0, r, 0, 0);          // axis of revolution (X)
-                sm.CreateArc(0, 0, 0, r, 0, 0, -r, 0, 0, 1);     // upper half circle
-                sm.CreateLine(-r, 0, 0, r, 0, 0);                // close the profile along the axis
+                sm.CreateCenterLine(-r, 0, 0, r, 0, 0);          // axis of revolution (X), spans the full diameter
+                sm.CreateArc(0, 0, 0, r, 0, 0, -r, 0, 0, 1);     // single clean upper half-circle, endpoints on the axis
                 sm.InsertSketch(true);                           // exit the sketch
                 part.ClearSelection2(true);
 

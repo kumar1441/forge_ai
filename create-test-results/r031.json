@@ -1,0 +1,17 @@
+{
+  "startedUtc": "2026-09-02T16:23:08.6334322Z",
+  "createIntent": "create a 25mm shaft 60mm long",
+  "handler": "create_cylinder",
+  "created": true,
+  "verified": true,
+  "rebuildClean": true,
+  "volumeMm3": 29452.431127404314,
+  "info": "Created a 25 mm diameter × 60 mm tall cylinder — 29,452 mm³ (expected ≈ 29,452), rebuild clean. One Ctrl+Z removes it; Forge didn't save.",
+  "error": null,
+  "createLog": [
+    "Builder | run | creating a 25 mm diameter × 60 mm tall cylinder",
+    "Sentinel | done | cylinder 25 mm dia × 60 mm, 29,452 mm³ (expected ≈ 29,452 mm³), rebuild clean"
+  ],
+  "ok": true,
+  "finishedUtc": "2026-09-02T16:23:12.3461245Z"
+}

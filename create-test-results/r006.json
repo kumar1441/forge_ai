@@ -1,0 +1,16 @@
+{
+  "startedUtc": "2026-09-02T16:20:26.4208251Z",
+  "createIntent": "create a 70mm sphere",
+  "handler": "create_sphere",
+  "created": false,
+  "verified": false,
+  "rebuildClean": false,
+  "volumeMm3": -1.0,
+  "info": null,
+  "error": "SolidWorks refused the revolve — the half-circle profile may need attention headless. Nothing was left behind except an empty new part.",
+  "createLog": [
+    "Builder | run | creating a 70 mm sphere"
+  ],
+  "ok": true,
+  "finishedUtc": "2026-09-02T16:20:29.6779599Z"
+}

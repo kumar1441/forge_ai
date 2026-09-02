@@ -47,6 +47,9 @@ namespace Forge.SolidWorks
         {
             var res = new CreateTorusResult();
 
+            string cue = CreateGuardrail.UnsupportedCue(intent);
+            if (cue != null) { res.Error = "I can only create a plain torus from scratch — \"" + cue + "\" (compound/positional/feature requests) isn't supported yet. Ask for a bare shape like \"create a 50mm torus\"."; return res; }
+
             double RMm = DefaultMajorMm, rMm = DefaultMinorMm;
             ParseDims(intent ?? "", ref RMm, ref rMm);
             res.MajorRadiusMm = RMm;

@@ -1,0 +1,17 @@
+{
+  "startedUtc": "2026-09-02T16:47:38.3595300Z",
+  "createIntent": "create a cylinder with a 10mm hole in the middle",
+  "handler": "create_cylinder",
+  "created": true,
+  "verified": true,
+  "rebuildClean": true,
+  "volumeMm3": 4712.38898038469,
+  "info": "Created a 10 mm diameter × 60 mm tall cylinder — 4,712 mm³ (expected ≈ 4,712), rebuild clean. One Ctrl+Z removes it; Forge didn't save.",
+  "error": null,
+  "createLog": [
+    "Builder | run | creating a 10 mm diameter × 60 mm tall cylinder",
+    "Sentinel | done | cylinder 10 mm dia × 60 mm, 4,712 mm³ (expected ≈ 4,712 mm³), rebuild clean"
+  ],
+  "ok": true,
+  "finishedUtc": "2026-09-02T16:47:42.4750343Z"
+}

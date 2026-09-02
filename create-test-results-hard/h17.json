@@ -1,0 +1,7 @@
+{
+  "startedUtc": "2026-09-02T16:49:06.4765969Z",
+  "createIntent": "make a block with rounded corners",
+  "error": "no from-scratch create handler matched createIntent",
+  "ok": false,
+  "finishedUtc": "2026-09-02T16:49:06.4775824Z"
+}

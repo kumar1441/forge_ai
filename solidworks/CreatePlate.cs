@@ -38,6 +38,8 @@ namespace Forge.SolidWorks
         public static async Task<CreatePlateResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new CreatePlateResult();
+            string cue = CreateGuardrail.UnsupportedCue(intent);
+            if (cue != null) { res.Error = "I can only create a plain plate from scratch — \"" + cue + "\" (compound/positional/feature requests) isn't supported yet. Ask for a bare shape like \"create a 50mm plate\"."; return res; }
             double L = 100, W = 60, T = 8;
             var m = Regex.Match(intent ?? "", @"(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)");
             if (m.Success)

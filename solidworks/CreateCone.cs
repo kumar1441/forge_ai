@@ -47,6 +47,9 @@ namespace Forge.SolidWorks
         {
             var res = new CreateConeResult();
 
+            string cue = CreateGuardrail.UnsupportedCue(intent);
+            if (cue != null) { res.Error = "I can only create a plain cone from scratch — \"" + cue + "\" (compound/positional/feature requests) isn't supported yet. Ask for a bare shape like \"create a 50mm cone\"."; return res; }
+
             double dMm = DefaultDiameterMm, hMm = DefaultHeightMm;
             ParseDims(intent ?? "", ref dMm, ref hMm);
             res.DiameterMm = dMm;

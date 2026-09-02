@@ -49,6 +49,9 @@ namespace Forge.SolidWorks
         {
             var res = new CreateFlangeResult();
 
+            string cue = CreateGuardrail.UnsupportedCue(intent);
+            if (cue != null) { res.Error = "I can only create a plain flange from scratch — \"" + cue + "\" (compound/positional/feature requests) isn't supported yet. Ask for a bare shape like \"create a 50mm flange\"."; return res; }
+
             double dMm = DefaultOuterMm, bMm = DefaultBoreMm, hMm = DefaultThicknessMm;
             ParseDims(intent ?? "", ref dMm, ref bMm, ref hMm);
             res.OuterMm = dMm;
