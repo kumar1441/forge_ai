@@ -12,7 +12,7 @@ namespace Forge.SolidWorks
     /// <summary>
     /// Forge data foundation (per the data contract in docs/DATA.md). Anonymous install ID that survives add-in
     /// updates (%APPDATA%, not the DLL folder), name-masking enforced BEFORE anything is stored, opt-in settings
-    /// (default ON), assembly-class bucketing, per-run time-saved heuristic, and ONE append-only event log that
+    /// (default OFF), assembly-class bucketing, per-run time-saved heuristic, and ONE append-only event log that
     /// feeds telemetry + Layer 3 replay + the failures file. HARD EXCLUSIONS are enforced here in code: no geometry,
     /// no dimensions, no file names, no feature tree, no raw component names, no screenshots, no BOM.
     /// </summary>
@@ -62,10 +62,10 @@ namespace Forge.SolidWorks
             }
         }
 
-        // ---- opt-in (default ON). OFF => zero events leave the machine. ----
+        // ---- opt-in (default OFF). OFF => zero events leave the machine. ----
         public static bool ShareUsage
         {
-            get { try { var f = P("settings.json"); if (File.Exists(f)) return (bool?)(JObject.Parse(File.ReadAllText(f))["shareUsage"]) ?? true; } catch { } return true; }
+            get { try { var f = P("settings.json"); if (File.Exists(f)) return (bool?)(JObject.Parse(File.ReadAllText(f))["shareUsage"]) ?? false; } catch { } return false; }
             set { try { Directory.CreateDirectory(Dir); File.WriteAllText(P("settings.json"), new JObject { ["shareUsage"] = value }.ToString()); } catch { } }
         }
 

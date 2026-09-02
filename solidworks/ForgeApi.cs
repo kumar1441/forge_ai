@@ -115,14 +115,7 @@ namespace Forge.SolidWorks
                 dimensions = dims.ConvertAll(d => new { name = d.Name, valueMm = Math.Round(d.ValueMm, 4), feature = d.Feature, type = d.Type, selected = d.Selected }),
                 dependencies = deps.ConvertAll(f => new { feature = f.Name, type = f.Type, affects = f.Affects }),
                 selectedFeatures,
-                boardChange,
-                usage = new
-                {
-                    mode = UsageConfig.Mode,
-                    model_light = UsageConfig.ModelLight,
-                    model_primary = UsageConfig.ModelPrimary,
-                    max_tokens_per_op = UsageConfig.MaxTokensPerOp
-                }
+                boardChange
             };
 
             var content = new StringContent(JsonConvert.SerializeObject(body), Encoding.UTF8, "application/json");

@@ -207,7 +207,7 @@
   .chip .x { cursor:pointer; border:none; background:none; color:var(--accent-ink); font-size:13px; padding:0 2px; opacity:.7; }
   .chip .x:hover { opacity:1; }
 
-  /* slim usage feedback footer */
+  /* slim feedback footer */
   .fb { margin-top:8px; display:flex; align-items:center; gap:7px; flex-wrap:wrap; font-size:11.5px; color:var(--faint); }
   .fbbtn { background:var(--raised); border:1px solid var(--line); border-radius:8px; padding:1px 7px; cursor:pointer; font-size:13px; }
   .fbbtn:hover { border-color:var(--accent); }
@@ -622,7 +622,7 @@
     const page1 = `<span class="obdiamond">◆</span><h1>Welcome to Forge</h1>
       <div class="obsub">Talk to SolidWorks in plain English. Get verified changes.</div>
       <select class="obkey" id="obprov" aria-label="Provider">
-        <option value="deepseek">DeepSeek — free usage credit</option>
+        <option value="deepseek">DeepSeek — free starter credit</option>
         <option value="openrouter">OpenRouter — one key, every model</option>
         <option value="openai">OpenAI</option>
         <option value="anthropic">Anthropic</option>
@@ -754,7 +754,7 @@
   function hideChip() { const chip = $("chip"); chip.style.display = "none"; chip.innerHTML = ""; }
   $("attach").addEventListener("click", () => post({ action: "attach" }));
 
-  // usage feedback
+  // feedback
   function fbThanks() { $("fbthx").textContent = "thanks!"; }
   $("fbup").addEventListener("click", () => { post({ action:"feedback", sentiment:1 }); fbThanks(); });
   $("fbdown").addEventListener("click", () => { post({ action:"feedback", sentiment:0 }); fbThanks(); });

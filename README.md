@@ -38,6 +38,26 @@
 - **Bring your own key.** Forge calls *your* LLM provider directly — Anthropic, OpenAI, DeepSeek, OpenRouter, or a local model via Ollama. Your key never leaves your machine (DPAPI-encrypted, current-user scope). No account, no subscription, no middleman.
 - **Works with zero LLM.** A large part of the catalog routes through deterministic local parsing — free, offline, instant.
 
+## Data & privacy
+
+Forge is free and open source. The short version: nothing about your models or identity ever leaves your machine unless you switch it on.
+
+### Two things to know
+
+**1. Services that do the job.** Some commands use Forge's cloud service to interpret them — that's how those commands work, the same as any cloud feature. **Never personal details — zero.** Always aggregated and anonymized.
+
+**2. Optional usage analytics — off by default.** A Settings → Usage data toggle that helps Forge improve. Off means off.
+
+### What "anonymous" actually means
+
+- **Never collected:** your files, geometry, dimensions, feature tree, file names, paths, part names, screenshots, or BOM.
+- **Never collected:** your name, email, or account.
+- **Only when you opt in:** counts, error codes, tool names, part-vs-assembly, durations — and commands with real names masked to `<part>` / `<file>` before they leave your machine.
+- **Install identity is a random GUID**, not your device — it can't be reversed to you.
+- **Values are bucketed** so no single row can be re-identified.
+
+Verify it yourself: [`solidworks/Telemetry.cs`](solidworks/Telemetry.cs) and [`solidworks/ForgeData.cs`](solidworks/ForgeData.cs).
+
 ## Quickstart
 
 1. **Prereqs:** Windows, SolidWorks 2022+, .NET Framework 4.8, Visual Studio 2022 (or Build Tools).
@@ -49,7 +69,7 @@ Signed one-command installer coming.
 
 ## Get a free key
 
-**DeepSeek** — the cheapest route to try Forge; new accounts get usage credit.
+**DeepSeek** — the cheapest route to try Forge; new accounts get free starter credit.
 1. Sign up at `platform.deepseek.com`, then **API Keys → Create** and copy the key.
 2. In `config.json` set `provider` = `openai-compatible`, `baseUrl` = `https://api.deepseek.com/v1`, `model` = `deepseek-chat`.
 3. Set the key: `setx FORGE_PROVIDER_KEY "sk-..."` (then restart SolidWorks).

@@ -7,14 +7,24 @@ using Newtonsoft.Json;
 namespace Forge.SolidWorks
 {
     /// <summary>
-    /// Usage telemetry — the "ton of information" the usage exists to generate. Fire-and-forget:
+    /// Anonymous usage data — strictly opt-in and OFF by default (privacy-first). Fire-and-forget:
     /// it NEVER blocks or delays an operation, NEVER throws, and NEVER sends anything from the user's
     /// documents (no file names, paths, part names, or geometry — only counts, codes, versions,
-    /// durations, and the user's own feedback words). Silent if offline.
+    /// durations, and the user's own feedback words). Silent if offline or when sharing is OFF.
+    /// The Settings "Usage data" toggle (or saying "share data on/off") flips <see cref="Enabled"/>,
+    /// which is persisted in %APPDATA%\Forge\settings.json so the choice sticks across sessions.
     /// </summary>
     internal static class Telemetry
     {
         private const string Url = "https://www.getforge.build/api/usage/event";
+
+        /// <summary>Opt-in switch, persisted. OFF by default — Log() is a no-op until the user enables it.</summary>
+        public static bool Enabled
+        {
+            get { return ForgeData.ShareUsage; }
+            set { ForgeData.ShareUsage = value; }
+        }
+
         private static readonly HttpClient Http = MakeClient();
         private static HttpClient MakeClient()
         {
@@ -45,9 +55,10 @@ namespace Forge.SolidWorks
         {
             try
             {
+                if (!Enabled) return;   // usage sharing OFF — nothing leaves this machine
+
                 var payload = new
                 {
-                    usage_id = UsageInit.UsageId ?? "uninit",
                     event_type = eventType,
                     success,
                     parts_count = partsCount,
@@ -57,7 +68,6 @@ namespace Forge.SolidWorks
                     error_code = errorCode,
                     sentiment,
                     feedback,
-                    days_left = UsageInit.DaysLeft(),
                     tokens_in = tokensIn,
                     tokens_out = tokensOut,
                     model_name = modelName,

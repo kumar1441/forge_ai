@@ -55,11 +55,8 @@ namespace Forge.SolidWorks
             // Session memory is per-doc and never touches disk — clear a doc's memory when it closes.
             try { ((SldWorks)SwApp).FileCloseNotify += OnFileClose; } catch { }
 
-            // Usage: stamp first-run / machine id and verify the sandbox is writable before anything runs.
-            UsageInit.Init();
             string ver = null; try { ver = SwApp.RevisionNumber(); } catch { }
-            Telemetry.Log(UsageInit.Ready ? "session_start" : "crash", success: UsageInit.Ready,
-                swVersion: ver, errorCode: UsageInit.Ready ? null : "usage_init_failed");
+            Telemetry.Log("session_start", success: true, swVersion: ver);
 
             CreateTaskPane();
             return true;

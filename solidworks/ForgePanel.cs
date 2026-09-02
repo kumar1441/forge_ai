@@ -60,12 +60,11 @@ namespace Forge.SolidWorks
             string html = Path.Combine(dir, "panel.html");
             _web.CoreWebView2.Navigate(new Uri(html).AbsoluteUri);
 
-            // Tell the panel what's real once the page is up: first-run onboarding (trap.md 2b/2c â€” the
-            // panel gating on its own localStorage so this is harmless every session) + the current usage-data
-            // state so the Settings toggle reflects ForgeData.ShareUsage (host = source of truth).
+            // Tell the panel what's real once the page is up: first-run onboarding + the current usage-data
+            // state so the Settings toggle reflects Telemetry.Enabled (host = source of truth, persisted).
             _web.CoreWebView2.NavigationCompleted += (s, e) =>
             {
-                Send(new { type = "telemetryState", on = ForgeData.ShareUsage });
+                Send(new { type = "telemetryState", on = Telemetry.Enabled });
                 if (!_firstrunShown) { _firstrunShown = true; Send(new { type = "firstrun" }); }
             };
 
@@ -263,12 +262,13 @@ namespace Forge.SolidWorks
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't save the key: " + ex.Message }); }
                 }
 
-                // Settings usage-data toggle (trap.md item 2: off switch easy to find). Host = source of truth.
+                // Settings usage-data toggle (trap.md item 2: off switch easy to find). Host = source of truth:
+                // persists the choice and pushes it into Telemetry.Enabled so Telemetry.Log honors it.
                 else if (action == "telemetry")
                 {
-                    bool on = true;
+                    bool on = false;
                     try { on = (bool)msg.on; } catch { }
-                    ForgeData.ShareUsage = on;
+                    Telemetry.Enabled = on;
                     Send(new { type = "answer", answer = "Anonymous usage sharing is now " + (on ? "ON" : "OFF") + "." });
                 }
             }
@@ -377,15 +377,6 @@ namespace Forge.SolidWorks
         private async Task Generate(string intent)
         {
             _currentRunId = Guid.NewGuid().ToString("N").Substring(0, 12);   // tags this run for thumbs feedback + correction capture
-            // Usage gates â€” run nothing if we couldn't set up safely, or the usage has ended.
-            if (!UsageInit.Ready)
-            { Send(new { type = "error", message = "Forge couldn't set up its safe workspace â€” nothing was run." }); return; }
-            if (UsageInit.IsExpired())
-            { Telemetry.Log("expiry_block"); Send(new { type = "error", message = UsageInit.ContactLine }); return; }
-
-            // Hidden dev command: usage cost/usage diagnostics (no operation, no model needed).
-            if ((intent ?? "").Trim().ToLowerInvariant() == "usage diagnostics")
-            { Send(new { type = "impact", explanation = CostLedger.Diagnostics(), affected = new string[0] }); return; }
 
             // DEMO ROUTE â€” authoritative, and BEFORE anything that can `await`/yield (the one-time UpdateNotice
             // below does a network call). flat-pattern-DXF / drawing-package / interference route here so (a) a
@@ -406,14 +397,10 @@ namespace Forge.SolidWorks
             string _lc = (intent ?? "").Trim().ToLowerInvariant();
             if (System.Text.RegularExpressions.Regex.IsMatch(_lc, @"\b(share data|usage data|privacy|telemetry|what do you collect|data sharing)\b"))
             {
-                if (System.Text.RegularExpressions.Regex.IsMatch(_lc, @"\b(off|stop|disable|don't|dont)\b")) ForgeData.ShareUsage = false;
-                else if (System.Text.RegularExpressions.Regex.IsMatch(_lc, @"\b(on|start|enable)\b")) ForgeData.ShareUsage = true;
+                if (System.Text.RegularExpressions.Regex.IsMatch(_lc, @"\b(off|stop|disable|don't|dont)\b")) Telemetry.Enabled = false;
+                else if (System.Text.RegularExpressions.Regex.IsMatch(_lc, @"\b(on|start|enable)\b")) Telemetry.Enabled = true;
                 Send(new { type = "answer", answer = ForgeData.PrivacySummary() }); return;
             }
-
-            // Enforce mode: once the operation cap is reached, every command is blocked.
-            if (OpCounter.LimitReached)
-            { Telemetry.Log("limit_block", opsUsed: OpCounter.Count); Send(new { type = "error", message = "Usage limit reached â€” contact support" }); return; }
 
             // A preview was shown last turn and is awaiting a "go" â€” resolve it before anything else.
             if (await ResolvePendingConfirm(intent)) return;
@@ -689,12 +676,12 @@ namespace Forge.SolidWorks
             Send(new { type = "status", message = "Thinkingâ€¦" });
             ActResult act = await ForgeApi.Act(effective, dims, deps, selectedFeatures, _lastBoardChange);
 
-            // Enforce mode: the server hit the per-operation token ceiling (assembly too large).
+            // The server hit the per-operation token ceiling (the model is too large for one pass).
             if (act.Action == "ceiling")
             {
                 Telemetry.Log("token_ceiling_hit", success: false, swVersion: SwVer(),
                     tokensIn: act.Meter.TokensIn, tokensOut: act.Meter.TokensOut, opsUsed: OpCounter.Count);
-                Send(new { type = "error", message = "This assembly is too large for the usage version â€” contact support" });
+                Send(new { type = "error", message = "That model is too large for one operation - simplify the part or split the request into smaller steps." });
                 return;
             }
 
@@ -738,7 +725,6 @@ namespace Forge.SolidWorks
                 if (!guardE.AllIntact())
                 { Telemetry.Log("guardrail_violation", success: false, swVersion: SwVer()); Send(new { type = "error", message = "Forge stopped: a safety check flagged a change to an original. Your files are untouched â€” please tell Ravi." }); return; }
 
-                CostLedger.Record("edit_run", 1, act.Meter.TokensIn, act.Meter.TokensOut, act.Meter.EstCostUsd, act.Meter.CacheHits, act.Meter.LlmCalls);
                 Telemetry.Log("edit_run", success: er.Error == null, featuresCount: act.EditChanges.Count, durationMs: swE.ElapsedMilliseconds, swVersion: SwVer(), errorCode: er.Error == null ? null : "edit_error",
                     tokensIn: act.Meter.TokensIn, tokensOut: act.Meter.TokensOut, modelName: act.Meter.ModelName, llmCalls: act.Meter.LlmCalls, cacheHits: act.Meter.CacheHits, estCostUsd: act.Meter.EstCostUsd, opsUsed: OpCounter.Count,
                     questionType: act.QuestionType, questionSummary: act.QuestionSummary);
@@ -754,7 +740,6 @@ namespace Forge.SolidWorks
                 _lastRelayedClarify = null;
                 OpCounter.Increment();
                 HighlightFeatures(model, act.Affected);
-                CostLedger.Record("whatbreaks_query", 0, act.Meter.TokensIn, act.Meter.TokensOut, act.Meter.EstCostUsd, act.Meter.CacheHits, act.Meter.LlmCalls);
                 Telemetry.Log("whatbreaks_query", success: true, featuresCount: act.Affected != null ? act.Affected.Count : 0, swVersion: SwVer(),
                     tokensIn: act.Meter.TokensIn, tokensOut: act.Meter.TokensOut, modelName: act.Meter.ModelName, llmCalls: act.Meter.LlmCalls, cacheHits: act.Meter.CacheHits, estCostUsd: act.Meter.EstCostUsd, opsUsed: OpCounter.Count,
                     questionType: act.QuestionType, questionSummary: act.QuestionSummary);
@@ -769,7 +754,6 @@ namespace Forge.SolidWorks
                 _lastRelayedClarify = null;
                 OpCounter.Increment();
                 HighlightFeatures(model, act.Affected);
-                CostLedger.Record("answer_query", 0, act.Meter.TokensIn, act.Meter.TokensOut, act.Meter.EstCostUsd, act.Meter.CacheHits, act.Meter.LlmCalls);
                 Telemetry.Log("answer_query", success: true, swVersion: SwVer(),
                     tokensIn: act.Meter.TokensIn, tokensOut: act.Meter.TokensOut, modelName: act.Meter.ModelName, llmCalls: act.Meter.LlmCalls, cacheHits: act.Meter.CacheHits, estCostUsd: act.Meter.EstCostUsd, opsUsed: OpCounter.Count,
                     questionType: act.QuestionType, questionSummary: act.QuestionSummary);
@@ -800,7 +784,6 @@ namespace Forge.SolidWorks
             { Telemetry.Log("guardrail_violation", success: false, swVersion: SwVer()); Send(new { type = "error", message = "Forge stopped: a safety check flagged a change to an original. Your files are untouched â€” please tell Ravi." }); return; }
 
             int cleanV = summary.Variants.FindAll(v => v.Success).Count;
-            CostLedger.Record("variant_run", plan.Count, act.Meter.TokensIn, act.Meter.TokensOut, act.Meter.EstCostUsd, act.Meter.CacheHits, act.Meter.LlmCalls);
             Telemetry.Log("variant_run", success: cleanV > 0, partsCount: plan.Count, featuresCount: plan.Changes.Count, durationMs: swV.ElapsedMilliseconds, swVersion: SwVer(),
                 tokensIn: act.Meter.TokensIn, tokensOut: act.Meter.TokensOut, modelName: act.Meter.ModelName, llmCalls: act.Meter.LlmCalls, cacheHits: act.Meter.CacheHits, estCostUsd: act.Meter.EstCostUsd, opsUsed: OpCounter.Count,
                 questionType: act.QuestionType, questionSummary: act.QuestionSummary);
