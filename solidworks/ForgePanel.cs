@@ -621,6 +621,13 @@ namespace Forge.SolidWorks
             // instead of re-asking. Only fires when we have a remembered impact AND the reply is anaphoric.
             if (TryImpactFollowup(intent)) return;
 
+            // FROM-SCRATCH CREATE — before every edit-oriented matcher (resizer/mate/mirror/...): an
+            // enriched build spec is full of fastener callouts (M3/M4/M5) and mate words ("mount") that
+            // those matchers would otherwise claim with no doc open ("Open your assembly first"). Verb-gated
+            // (create/make/build/...), so edit flows keep theirs. Needs no open document.
+            if (await TryRunMcpBuild(intent)) return;
+            if (await TryRunCreateRecipe(intent)) return;
+
             // Bulk resize fasteners (Demo #6, M6â†’M8) â€” route AUTHORITATIVELY before the cloud parse. A clear
             // "replace all the M6 bolts with M8" must ACT, never fall to the parser's spurious "bolt sizes not
             // stated" ambiguity + the destructive-write hedge (RULE #2). Gated on 2 M-tokens so it's specific.

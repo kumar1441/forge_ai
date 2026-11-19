@@ -621,7 +621,7 @@
     else if (m.type === "attachCleared") { hideChip(); }
 
     else if (m.type === "error") {
-      if (typeof ebReset === "function") ebReset();
+      if (enhanceActive) ebReset(); // only an in-flight enhance owns the button
       finish(`<div class="err">${(m.message || "").replace(/</g,"&lt;")}</div>`);
     }
 
@@ -902,13 +902,20 @@
   $("attach").addEventListener("click", () => post({ action: "attach" }));
 
   // ---- prompt enrichment (Kilo "Enhance Prompt" port) ----
-  let preEnhance = null;
+  let preEnhance = null, enhanceActive = false, enhanceTimer = null, enhanceT0 = 0;
   const ebReset = () => {
     const eb = $("enhance");
+    enhanceActive = false;
+    if (enhanceTimer) { clearInterval(enhanceTimer); enhanceTimer = null; }
     eb.classList.remove("busy"); eb.style.minWidth = ""; eb.disabled = false; eb.textContent = "✨ Enhance";
   };
+  const ebTick = () => {
+    const eb = $("enhance");
+    const s = Math.floor((Date.now() - enhanceT0) / 1000);
+    eb.innerHTML = `✨ <span class="wdot">●</span> <span class="wdot">●</span> <span class="wdot">●</span> ${s}s`;
+  };
   $("enhance").addEventListener("click", () => {
-    if (!hasBridge) return;
+    if (!hasBridge || enhanceActive) return;
     const eb = $("enhance");
     const draft = intent.value.trim();
     if (!draft) {
@@ -917,11 +924,13 @@
       return;
     }
     preEnhance = null; $("enhanceUndo").style.display = "none";
+    enhanceActive = true;
     eb.style.minWidth = eb.offsetWidth + "px"; // lock width: no contraction while busy
     eb.classList.add("busy"); eb.disabled = true;
-    eb.innerHTML = '✨ <span class="wdot">●</span> <span class="wdot">●</span> <span class="wdot">●</span>';
+    enhanceT0 = Date.now(); ebTick();
+    enhanceTimer = setInterval(ebTick, 1000);
     post({ action: "enhance", text: draft });
-    setTimeout(() => { if (eb.classList.contains("busy")) ebReset(); }, 60000); // safety: never stuck waving
+    setTimeout(() => { if (enhanceActive) ebReset(); }, 300000); // safety: never stuck waving
   });
   $("enhanceUndo").addEventListener("click", () => {
     if (preEnhance !== null) { intent.value = preEnhance; grow(); intent.focus(); }
