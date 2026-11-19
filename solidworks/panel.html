@@ -360,6 +360,7 @@
     transcript.innerHTML = '<div class="empty" id="empty">Forge <b>knows</b> your part.<br>' +
       'Forge <b>understands</b> what you mean.<br>Forge <b>gets it done.</b></div>';
     hideChip();
+    hIdx = -1; draftStash = null;
     intent.value = ""; grow();
     post({ action: "reset" });
     intent.focus();
@@ -397,13 +398,35 @@
       const text = intent.value.trim();
       if (text) run(text);
     }
-    if (e.key === "ArrowUp" && !intent.value.trim()) {   // FDL §8: ↑ recalls the last prompt
+    // Kilo-style history: ↑ older, ↓ newer. Only hijacks at the first/last line so multiline
+    // editing keeps caret movement. The unsent draft is stashed on first ↑ and restored on ↓
+    // past the newest — an enhanced prompt can never be lost to a stray keypress.
+    const caret = () => {
+      const pos = intent.selectionStart || 0, v = intent.value;
+      return { first: !v.slice(0, pos).includes("\n"), last: !v.slice(pos).includes("\n") };
+    };
+    const toEnd = () => intent.setSelectionRange(intent.value.length, intent.value.length);
+    if (e.key === "ArrowUp" && caret().first && histList.length) {
       e.preventDefault();
-      if (lastPrompt) { intent.value = lastPrompt; grow(); }
+      if (hIdx === -1) draftStash = intent.value;
+      hIdx = hIdx === -1 ? histList.length - 1 : Math.max(0, hIdx - 1);
+      intent.value = histList[hIdx]; grow(); toEnd();
+    } else if (e.key === "ArrowDown" && caret().last && hIdx !== -1) {
+      e.preventDefault();
+      hIdx++;
+      if (hIdx >= histList.length) { hIdx = -1; intent.value = draftStash !== null ? draftStash : ""; draftStash = null; }
+      else intent.value = histList[hIdx];
+      grow(); toEnd();
     }
   });
 
   let working = false;
+
+  // prompt history (persists; unsent draft stashed while browsing)
+  let histList = [];
+  try { histList = JSON.parse(localStorage.getItem("forge_history")) || []; } catch (e) { histList = []; }
+  let hIdx = -1, draftStash = null;
+  const histSave = () => { try { localStorage.setItem("forge_history", JSON.stringify(histList.slice(-100))); } catch (e) {} };
   let turn = null;          // { steps, thinking, result } DOM refs for the active Forge turn
   let wordTimer = null;
   let lastPrompt = "";
@@ -415,6 +438,7 @@
     if (working) return;
     working = true;
     lastPrompt = text;
+    histList.push(text); histSave(); hIdx = -1; draftStash = null;
     const e = $("empty"); if (e) e.remove();
 
     // user bubble
