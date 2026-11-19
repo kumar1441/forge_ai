@@ -37,8 +37,12 @@ namespace Forge.SolidWorks
         /// <summary>
         /// Build + verify a recipe. Returns what was built even on failure (fail-closed): Verified is true ONLY when
         /// the build ran, the rebuild is clean, the tree is native, and the requested verify dims measured OK.
+        /// keepOpen (chat path): skip the SaveAs artifact AND leave the document open in SolidWorks so the user
+        /// keeps working on it — the test-loop path (keepOpen=false) still saves + closes as before.
         /// </summary>
-        public static RecipeResult Execute(ISldWorks app, Recipe recipe, string outDir)
+        public static RecipeResult Execute(ISldWorks app, Recipe recipe, string outDir) => Execute(app, recipe, outDir, false);
+
+        public static RecipeResult Execute(ISldWorks app, Recipe recipe, string outDir, bool keepOpen)
         {
             var result = new RecipeResult();
             if (app == null) { result.Error = "no SW app"; return result; }
@@ -86,13 +90,18 @@ namespace Forge.SolidWorks
                 Verify(ctx);
 
                 // ---- save the artifact (even on failure, so the corpus keeps the model + path) ----
-                string ext = asm ? ".SLDASM" : ".SLDPRT";
-                string path = Path.Combine(outDir, SafeName(recipe.Name) + ext);
-                int se = 0, sw = 0;
-                bool saved = doc.Extension.SaveAs(path, (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
-                    (int)swSaveAsOptions_e.swSaveAsOptions_Silent, null, ref se, ref sw);
-                if (saved) { result.Path = path; result.Built = result.Built && string.IsNullOrEmpty(result.FailedOp); }
-                result.Step("save", "IModelDocExtension::SaveAs", saved, saved ? path : ("errno=" + se));
+                // Chat (keepOpen) skips the file entirely: like every other create handler, Forge never saves by
+                // default — the fresh document just stays open in SolidWorks.
+                if (!keepOpen)
+                {
+                    string ext = asm ? ".SLDASM" : ".SLDPRT";
+                    string path = Path.Combine(outDir, SafeName(recipe.Name) + ext);
+                    int se = 0, sw = 0;
+                    bool saved = doc.Extension.SaveAs(path, (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
+                        (int)swSaveAsOptions_e.swSaveAsOptions_Silent, null, ref se, ref sw);
+                    if (saved) { result.Path = path; result.Built = result.Built && string.IsNullOrEmpty(result.FailedOp); }
+                    result.Step("save", "IModelDocExtension::SaveAs", saved, saved ? path : ("errno=" + se));
+                }
             }
             catch (Exception ex)
             {
@@ -100,7 +109,7 @@ namespace Forge.SolidWorks
             }
             finally
             {
-                try { if (doc != null) app.CloseDoc(doc.GetTitle()); } catch { }
+                if (!keepOpen) { try { if (doc != null) app.CloseDoc(doc.GetTitle()); } catch { } }
             }
             return result;
         }

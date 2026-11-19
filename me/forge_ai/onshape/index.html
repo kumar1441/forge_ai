@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Forge for Onshape</title>
+    <style>
+      /* Minimal dark shell matching the Forge panel's look; the shared bundle
+         (panel/panel.html) takes over once the bridge is wired. */
+      :root { color-scheme: dark; }
+      body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: #0f1113; color: #e8e8e8; }
+      main { max-width: 560px; margin: 40px auto; padding: 0 20px; }
+      h1 { font-size: 20px; } h1 span { color: #ff7a45; }
+      label { display: block; margin: 14px 0 4px; color: #9aa0a6; font-size: 12px; }
+      input { width: 100%; box-sizing: border-box; padding: 8px 10px; border-radius: 8px;
+              border: 1px solid #2a2e33; background: #17191c; color: #e8e8e8; }
+      button { margin-top: 16px; padding: 9px 18px; border: 0; border-radius: 8px; cursor: pointer;
+               background: linear-gradient(135deg, #ff7a45, #e6492d); color: #fff; font-weight: 600; }
+      .card { margin-top: 20px; padding: 14px 16px; border: 1px solid #2a2e33; border-radius: 12px; background: #17191c; }
+      .err { color: #ff6b5e; } .ok { color: #4ecb71; } .dim { color: #9aa0a6; font-size: 12px; }
+      ul { margin: 6px 0 0; padding-left: 18px; }
+    </style>
+  </head>
+  <body>
+    <main id="app"></main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

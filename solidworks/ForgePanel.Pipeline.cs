@@ -5068,6 +5068,17 @@ namespace Forge.SolidWorks
                 return true;
             }
 
+            // MCP BUILD (multi-part / assembly from scratch) — runs BEFORE recipe: tangled creates the
+            // deterministic paths can't split go to the SolidWorks-MCP server (its own COM session against the
+            // running SolidWorks). Explicit "mcp" asks, assembly builds, and 3+-step compounds land here.
+            if (await TryRunMcpBuild(intent)) return true;
+
+            // RECIPE CREATE (multi-feature from scratch) — runs BEFORE compound: a refused-class create
+            // ("bracket with 4 holes and filleted edges") becomes an LLM-authored feature recipe executed by
+            // RecipeExecutor (native tree, fail-closed verify, doc stays open). Bare primitives and confident
+            // two-step compounds keep their deterministic paths; keyless chat falls through to the honest refusal.
+            if (await TryRunCreateRecipe(intent)) return true;
+
             // COMPOUND CREATE ("create X and add Y on top") — runs FIRST, before the per-shape intercepts below AND before
             // the guardrail each shape's Run() carries: no single bare-primitive handler or CreateGuardrail refusal can
             // honour a genuine two-step ask, so when CompoundCreate confidently splits the intent into a bare primary +
@@ -5591,6 +5602,57 @@ namespace Forge.SolidWorks
                 ? (so["info"] != null ? so["info"].Value<string>() : "added a " + comp.SecondaryShape + " on top")
                 : (secErr ?? "the " + comp.SecondaryShape + " on top couldn't be verified");
             Send(new { type = "answer", answer = "Done in two steps — " + first + " Then " + second, runId = _currentRunId, handler = spec.Name + "+on_top" });
+            return true;
+        }
+
+        // RECIPE CREATE runner: refused-class creates (guardrail cue present, not a confident 2-step
+        // compound) are authored into a feature recipe by the user's own provider and built natively.
+        // Returns true when claimed (success OR honest error); false falls through to the existing
+        // deterministic create paths + guardrail refusal (bare primitives, keyless chat).
+        private async Task<bool> TryRunCreateRecipe(string intent)
+        {
+            if (!CreateFromRecipe.IsRecipeCreate(intent)) return false;
+            if (ProviderFactoryAvailable() == false) return false;
+
+            try { PanelCapture.Log("parse", new { intent, action = "create_recipe", confidence = 1.0, routed = "create_recipe", source = "recipe-create" }); } catch { }
+            Func<string, string, string, string, Task> emitR = async (a, g, s, r) =>
+            { Send(new { type = "step", agent = a, gloss = g, state = s, result = r }); await Task.Delay(60); };
+            var rc = await CreateFromRecipe.Run(App, intent, emitR);
+            if (rc == null || !rc.Attempted) return false; // no provider / not claimable: existing paths keep behaviour
+            if (!string.IsNullOrEmpty(rc.Error))
+            {
+                Send(new { type = "answer", answer = rc.Error, runId = _currentRunId, handler = "create_recipe" });
+                return true;
+            }
+            Send(new { type = "answer", answer = rc.Summary, runId = _currentRunId, handler = "create_recipe" });
+            return true;
+        }
+
+        private static bool ProviderFactoryAvailable()
+        {
+            try { return Forge.Providers.ProviderFactory.Resolve() != null; }
+            catch { return false; }
+        }
+
+        // MCP BUILD runner: explicit "mcp" asks, assembly from-scratch builds, and 3+-step compounds
+        // execute as LLM-authored tool plans against the SolidWorks-MCP server. True when claimed
+        // (success OR honest error); false falls through (bare/single-part -> recipe/deterministic paths).
+        private async Task<bool> TryRunMcpBuild(string intent)
+        {
+            if (!McpBuild.IsMcpCreate(intent)) return false;
+            if (ProviderFactoryAvailable() == false) return false;
+
+            try { PanelCapture.Log("parse", new { intent, action = "mcp_build", confidence = 1.0, routed = "mcp_build", source = "mcp-build" }); } catch { }
+            Func<string, string, string, string, Task> emitM = async (a, g, s, r) =>
+            { Send(new { type = "step", agent = a, gloss = g, state = s, result = r }); await Task.Delay(60); };
+            var mc = await McpBuild.Run(intent, emitM);
+            if (mc == null || !mc.Attempted) return false; // no provider: existing paths keep behaviour
+            if (!string.IsNullOrEmpty(mc.Error))
+            {
+                Send(new { type = "answer", answer = mc.Error, runId = _currentRunId, handler = "mcp_build" });
+                return true;
+            }
+            Send(new { type = "answer", answer = mc.Summary, runId = _currentRunId, handler = "mcp_build" });
             return true;
         }
 

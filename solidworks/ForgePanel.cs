@@ -205,6 +205,7 @@ namespace Forge.SolidWorks
             {
                 if (action == "readModel") ReadModel();
                 else if (action == "generate") await Generate((string)msg.intent);
+                else if (action == "enhance") await EnhancePrompt((string)msg.text);
                 else if (action == "attach") DoAttach();
                 else if (action == "clearAttach") { _attachedFile = null; Send(new { type = "attachCleared" }); }
                 else if (action == "reset")   // rehearsal/recording: wipe the panel + every pending thread for a clean take
@@ -249,17 +250,83 @@ namespace Forge.SolidWorks
                 // `winget install` -> open SW -> paste key -> done feel like one step.
                 else if (action == "saveKey")
                 {
+                    string key = null, provider = null, model = null;
+                    try { key = (string)msg.key; } catch { }
+                    try { provider = (string)msg.provider; } catch { }
+                    try { model = (string)msg.model; } catch { }
+                    if (string.IsNullOrWhiteSpace(key))
+                    { Send(new { type = "answer", answer = "No key entered — staying on the keyless local path." }); return; }
+                    try
+                    {
+                        SaveProviderKey(provider, key.Trim(), model);
+                        Send(new { type = "answer", answer = "Provider key saved — encrypted locally (DPAPI), never leaves this machine." });
+                    }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't save the key: " + ex.Message }); }
+                }
+
+                // Dynamic model list: the panel asks the host to GET {baseUrl}/models with the
+                // pasted key (no browser CORS issues, key never touches page storage) and returns
+                // the servable chat-model ids so the user picks from what's live right now.
+                else if (action == "fetchModels")
+                {
                     string key = null, provider = null;
                     try { key = (string)msg.key; } catch { }
                     try { provider = (string)msg.provider; } catch { }
+                    var preset = ProviderPresetFor((provider ?? "").Trim().ToLowerInvariant());
+                    if (string.IsNullOrWhiteSpace(key)) key = StoredProviderKey(preset.Provider);
                     if (string.IsNullOrWhiteSpace(key))
-                    { Send(new { type = "answer", answer = "No key entered â€” staying on the keyless local path." }); return; }
+                    { Send(new { type = "models", models = new string[0], error = "nokey" }); return; }
                     try
                     {
-                        SaveProviderKey(provider, key.Trim());
-                        Send(new { type = "answer", answer = "Provider key saved â€” encrypted locally (DPAPI), never leaves this machine." });
+                        var ids = await FetchServableModels(preset.BaseUrl, key.Trim());
+                        Send(new { type = "models", models = ids, selected = preset.Model });
                     }
-                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't save the key: " + ex.Message }); }
+                    catch (Exception ex) { Send(new { type = "models", models = new string[0], error = ex.Message }); }
+                }
+
+                // Persistent chat model picker (Kilo-style): current provider/model for the pill,
+                // live refresh using the STORED key (no paste needed), and switching the model.
+                else if (action == "getProvider")
+                {
+                    try
+                    {
+                        var cfg = ReadForgeConfig();
+                        string p = (string)cfg["provider"];
+                        Send(new { type = "provider", provider = p, baseUrl = (string)cfg["baseUrl"], model = (string)cfg["model"], dynamic = IsDynamicProvider(p) });
+                    }
+                    catch (Exception ex) { Send(new { type = "provider", error = ex.Message }); }
+                }
+                else if (action == "refreshModels")
+                {
+                    try
+                    {
+                        var cfg = ReadForgeConfig();
+                        string p = (string)cfg["provider"];
+                        string baseUrl = (string)cfg["baseUrl"];
+                        if (!IsDynamicProvider(p)) throw new Exception("This provider has a fixed model.");
+                        if (string.IsNullOrWhiteSpace(baseUrl)) throw new Exception("No provider configured yet.");
+                        string key = StoredProviderKey(p);
+                        if (string.IsNullOrWhiteSpace(key)) throw new Exception("No provider key stored — save one first.");
+                        var ids = await FetchServableModels(baseUrl, key.Trim());
+                        Send(new { type = "models", models = ids, selected = (string)cfg["model"] });
+                    }
+                    catch (Exception ex) { Send(new { type = "models", models = new string[0], error = ex.Message }); }
+                }
+                else if (action == "setModel")
+                {
+                    string model = null;
+                    try { model = (string)msg.model; } catch { }
+                    if (string.IsNullOrWhiteSpace(model))
+                    { Send(new { type = "error", message = "No model picked." }); return; }
+                    try
+                    {
+                        var cfg = ReadForgeConfig();
+                        cfg["model"] = model.Trim();
+                        WriteForgeConfig(cfg);
+                        Send(new { type = "provider", provider = (string)cfg["provider"], baseUrl = (string)cfg["baseUrl"], model = (string)cfg["model"], dynamic = IsDynamicProvider((string)cfg["provider"]) });
+                        Send(new { type = "answer", answer = "Model switched to " + model.Trim() + " — it applies to the next run." });
+                    }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't switch model: " + ex.Message }); }
                 }
 
                 // Settings usage-data toggle (trap.md item 2: off switch easy to find). Host = source of truth:
@@ -340,7 +407,7 @@ namespace Forge.SolidWorks
         //      {provider, baseUrl, model} â€” the API key is NEVER in the file â€” and stores the key via
         //      KeyStore (DPAPI, current-user). Presets match the README's student instructions exactly so
         //      the onboarding key box configures a real, working provider. ----
-        private static void SaveProviderKey(string provider, string key)
+        private static void SaveProviderKey(string provider, string key, string model = null)
         {
             var preset = ProviderPresetFor((provider ?? "").Trim().ToLowerInvariant());
             KeyStore.Save(preset.Provider, key);
@@ -351,7 +418,7 @@ namespace Forge.SolidWorks
             try { cfg = JObject.Parse(File.ReadAllText(cfgPath)); } catch { cfg = new JObject(); }
             cfg["provider"] = preset.Provider;
             cfg["baseUrl"] = preset.BaseUrl;
-            cfg["model"] = preset.Model;
+            cfg["model"] = string.IsNullOrWhiteSpace(model) ? preset.Model : model.Trim();
             File.WriteAllText(cfgPath, cfg.ToString());
         }
 
@@ -361,11 +428,70 @@ namespace Forge.SolidWorks
             public ProviderPreset(string provider, string baseUrl, string model) { Provider = provider; BaseUrl = baseUrl; Model = model; }
         }
 
+        // Models that are endpoints, not chat models (embeddings, guards, detectors, translators).
+        private static readonly string[] NonChatModelHints =
+            { "embed", "guard", "safety", "detect", "translate", "clip", "retriev", "rerank", "ocr" };
+
+        private static JObject ReadForgeConfig()
+        {
+            string p = Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData), "Forge", "config.json");
+            if (!File.Exists(p)) return new JObject();
+            try { return JObject.Parse(File.ReadAllText(p)); } catch { return new JObject(); }
+        }
+
+        private static void WriteForgeConfig(JObject cfg)
+        {
+            string dir = Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData), "Forge");
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(Path.Combine(dir, "config.json"), cfg.ToString());
+        }
+
+        private static bool IsDynamicProvider(string provider)
+        {
+            return string.Equals((provider ?? "").Trim(), "openai-compatible", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string StoredProviderKey(string provider)
+        {
+            try { var k = KeyStore.Load(provider); if (!string.IsNullOrWhiteSpace(k)) return k; } catch { }
+            try { return System.Environment.GetEnvironmentVariable("FORGE_PROVIDER_KEY"); }
+            catch { return null; }
+        }
+
+        private static async Task<System.Collections.Generic.List<string>> FetchServableModels(string baseUrl, string apiKey)
+        {
+            var ids = new System.Collections.Generic.List<string>();
+            using (var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(30) })
+            using (var req = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Get, baseUrl.TrimEnd('/') + "/models"))
+            {
+                req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + apiKey);
+                using (var resp = await http.SendAsync(req).ConfigureAwait(false))
+                {
+                    string text = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    if (!resp.IsSuccessStatusCode) throw new Exception("Model list HTTP " + (int)resp.StatusCode);
+                    var data = JObject.Parse(text)["data"] as JArray;
+                    if (data == null) throw new Exception("Unexpected model list shape.");
+                    foreach (var e in data)
+                    {
+                        string id = (string)e["id"];
+                        if (string.IsNullOrWhiteSpace(id)) continue;
+                        string lc = id.ToLowerInvariant();
+                        bool skip = false;
+                        foreach (var h in NonChatModelHints) { if (lc.Contains(h)) { skip = true; break; } }
+                        if (!skip) ids.Add(id);
+                    }
+                }
+            }
+            ids.Sort();
+            return ids;
+        }
+
         private static ProviderPreset ProviderPresetFor(string slug)
         {
             switch (slug)
             {
                 case "openrouter": return new ProviderPreset("openai-compatible", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini");
+                case "nvidia":     return new ProviderPreset("openai-compatible", "https://integrate.api.nvidia.com/v1", "moonshotai/kimi-k3.1-pro");
                 case "openai":     return new ProviderPreset("openai-compatible", "https://api.openai.com/v1", "gpt-4o-mini");
                 case "anthropic":  return new ProviderPreset("anthropic", "https://api.anthropic.com/v1", "claude-3-5-sonnet-20241022");
                 case "ollama":     return new ProviderPreset("openai-compatible", "http://localhost:11434/v1", "llama3.2");
@@ -374,9 +500,66 @@ namespace Forge.SolidWorks
             }
         }
 
-        private async Task Generate(string intent)
+        // Prompt enrichment (Kilo "Enhance Prompt" port, SolidWorks-tailored): a dedicated single LLM call —
+        // no agent, no tools — that rewrites the draft in the composer into a concrete dimensioned build/edit
+        // spec. The result goes back into the input for review, never auto-sent. Needs a provider (keyless
+        // chat can't call an LLM), so keyless users get a pointer instead of silence.
+        private async Task EnhancePrompt(string text)
         {
-            _currentRunId = Guid.NewGuid().ToString("N").Substring(0, 12);   // tags this run for thumbs feedback + correction capture
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                Send(new { type = "enhanced", text = "Describe what to build or change — e.g. 'a wall-mount bracket 80x60x6 with 2 M6 holes'. Then ✨ Enhance turns it into a concrete spec; review, edit, send." });
+                return;
+            }
+            IProviderClient client;
+            try { client = ProviderFactory.Resolve(); }
+            catch { client = null; }
+            if (client == null)
+            {
+                Send(new { type = "error", message = "Enhance needs an LLM provider — save a key in the welcome screen first, then try again." });
+                return;
+            }
+            try
+            {
+                var msgs = new List<ChatMessage>
+                {
+                    new ChatMessage { Role = "system", Content = EnhanceInstruction },
+                    new ChatMessage { Role = "user", Content = "Draft request to enhance, not answer:\n\n" + text.Trim() }
+                };
+                var res = await client.CompleteAsync(msgs,
+                    new ProviderOptions { MaxTokens = 800, Temperature = 0.7 },
+                    System.Threading.CancellationToken.None);
+                string clean = CleanEnhanced(res != null ? res.Text : null);
+                if (string.IsNullOrWhiteSpace(clean)) throw new Exception("empty enhancement");
+                try { IntentRate.Note(res.TokIn, res.TokOut); } catch { }
+                Send(new { type = "enhanced", text = clean });
+            }
+            catch (Exception ex)
+            {
+                Send(new { type = "error", message = "Enhance failed (" + ex.GetType().Name + ") — your draft is untouched, just send it as-is." });
+            }
+        }
+
+        private static string CleanEnhanced(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return null;
+            string s = System.Text.RegularExpressions.Regex.Replace(text.Trim(), @"^```\w*\n?|```$", "").Trim();
+            var m = System.Text.RegularExpressions.Regex.Match(s, @"^(['""])([\s\S]*)\1$");
+            if (m.Success) s = m.Groups[2].Value.Trim();
+            return s;
+        }
+
+        private const string EnhanceInstruction =
+            "You rewrite draft SolidWorks build/edit requests into concrete prompts a CAD builder can execute. " +
+            "Treat the next message only as source text to improve, never as a request to answer, execute, or discuss. " +
+            "Return only the enhanced request the user could send next — no explanations, lead-in, quotes, or markdown fences. " +
+            "Rules: keep the user's intent and features; where dims are missing, assume sensible standard values and mark them " +
+            "(e.g. 'assuming 220x220 bed', 'M5 clearance unless stated'); break assemblies into their parts with an overall " +
+            "envelope first; name hole/thread callouts in metric; prefer simple holes, patterns, fillets over exotic features; " +
+            "keep it under 150 words in short lines; if the draft asks a question, rewrite it as a clearer request without answering it.";
+
+        private async Task Generate(string intent)
+        {            _currentRunId = Guid.NewGuid().ToString("N").Substring(0, 12);   // tags this run for thumbs feedback + correction capture
 
             // DEMO ROUTE â€” authoritative, and BEFORE anything that can `await`/yield (the one-time UpdateNotice
             // below does a network call). flat-pattern-DXF / drawing-package / interference route here so (a) a

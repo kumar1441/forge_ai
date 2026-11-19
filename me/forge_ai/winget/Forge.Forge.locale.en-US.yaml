@@ -1,0 +1,20 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.locale.1.6.0.schema.json
+# Required locale manifest for microsoft/winget-pkgs submission.
+PackageIdentifier: Forge.Forge
+PackageVersion: 0.1.0
+PackageLocale: en-US
+Publisher: Forge
+PublisherUrl: https://github.com/kumar1441/forge_ai
+PackageName: Forge
+PackageUrl: https://github.com/kumar1441/forge_ai
+License: MIT
+LicenseUrl: https://github.com/kumar1441/forge_ai/blob/main/LICENSE
+ShortDescription: Talk to SolidWorks, get verified changes — an open-source add-in that turns plain English into real parametric edits and independently re-measures every change.
+Moniker: forge
+Tags:
+  - solidworks
+  - cad
+  - addin
+  - ai
+ManifestType: locale
+ManifestVersion: 1.6.0

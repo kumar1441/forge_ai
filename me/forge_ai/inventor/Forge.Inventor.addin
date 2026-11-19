@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Forge Inventor .addin manifest (TEMPLATE). Inventor discovers add-ins from manifests in:
+    all-users:  %ALLUSERSPROFILE%\Autodesk\Inventor Addins\
+    per-user:   %APPDATA%\Autodesk\Inventor <version>\Addins\
+  The MSI (installer/Product.Inventor.wxs) drops this manifest + the DLL side by side in the
+  all-users folder, so <Assembly> is the bare DLL filename (resolved relative to the manifest).
+  For dev: copy this file + the built output into the per-user Addins folder above.
+  ClassId/ClientId MUST match InventorAddin.cs's [Guid]. SupportedSoftwareVersion* set for the
+  installed Inventor major version (verify on the HP box after install).
+-->
+<Addin Type="Standard">
+  <ClassId>{5B1E4A7C-2D9F-4C8A-B6E3-1F7D9C2A8E4B}</ClassId>
+  <ClientId>{5B1E4A7C-2D9F-4C8A-B6E3-1F7D9C2A8E4B}</ClientId>
+  <DisplayName>Forge</DisplayName>
+  <Description>Forge — talk to Inventor, get verified changes</Description>
+  <Assembly>Forge.Inventor.dll</Assembly>
+  <LoadOnStartUp>1</LoadOnStartUp>
+  <UserUnloadable>1</UserUnloadable>
+  <Hidden>0</Hidden>
+  <SupportedSoftwareVersionGreaterThan>29..</SupportedSoftwareVersionGreaterThan>
+</Addin>

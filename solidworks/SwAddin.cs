@@ -65,6 +65,7 @@ namespace Forge.SolidWorks
         public bool DisconnectFromSW()
         {
             Telemetry.Log("session_end");
+            try { McpBridge.Stop(); } catch { } // drop the MCP server child process with the session
             Forge.Cad.CadHost.Unregister(_cadAdapter);
             _cadAdapter = null;
             if (_taskpaneView != null)

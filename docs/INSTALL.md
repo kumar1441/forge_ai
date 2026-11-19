@@ -71,7 +71,24 @@ Forge reads settings from environment variables first, then `%APPDATA%\Forge\con
 | OpenAI | `openai-compatible` | `https://api.openai.com/v1` |
 | DeepSeek | `openai-compatible` | `https://api.deepseek.com/v1` |
 | OpenRouter | `openai-compatible` | `https://openrouter.ai/api/v1` |
+| NVIDIA NIM | `openai-compatible` | `https://integrate.api.nvidia.com/v1` |
 | Ollama (local) | `openai-compatible` | `http://localhost:11434/v1` |
+
+## Multi-part builds via the SolidWorks-MCP server (optional)
+
+Chat routes assembly and 3+-step from-scratch builds to the
+[SolidWorks-MCP](https://github.com/hjbaard/SolidWorks-MCP) server, which Forge launches itself —
+no extra setup beyond what the server needs:
+
+1. Install uv from `astral.sh/uv` (you already need Python 3.11+).
+2. With SolidWorks open, run `uvx solidworks-mcp --selftest` once to verify your install.
+3. Ask Forge to build something multi-part — it starts the server on first use.
+
+Override the launch in `%APPDATA%\Forge\mcp.json` if needed:
+
+```json
+{ "command": "uvx", "args": ["solidworks-mcp"], "startTimeoutMs": 300000 }
+```
 
 ## Keyless mode
 

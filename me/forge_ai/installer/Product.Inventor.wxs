@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Forge for Inventor — MSI (WiX v4) DRAFT SCAFFOLD (2026-08-17). Sibling of Product.wxs (SW).
+  KEY DIFFERENCE from the SW package: NO RegAsm custom actions — Inventor add-ins register via the
+  .addin manifest, not COM registration. The manifest + DLL land side by side in the all-users
+  Inventor Addins folder; the manifest's <Assembly> is the bare DLL name (resolved relative to
+  the manifest), so no absolute-path templating is needed at install time.
+
+  Harvest the add-in output into InventorFileComponents.wxs (gitignored, absolute paths) with the
+  same wix-harvest step build-msi.ps1 uses for the SW output — pointed at inventor\bin instead.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <!-- ProductCode: PINNED once the winget manifest for Forge.Inventor exists (same rule as SW —
+       keep in sync with winget/Forge.Inventor.installer.yaml when that's authored). Placeholder
+       below is a fresh GUID for this package; replace-with-real is NOT needed (it IS real), just
+       never regenerate it after first ship. -->
+  <Package
+      Name="Forge for Inventor"
+      Manufacturer="Forge"
+      Version="0.1.0"
+      ProductCode="9C2E5B71-4A8D-4F3C-A7E1-6D0B8F4C2A5E"
+      UpgradeCode="4E8A1C5D-7B2F-4A6E-8C3D-1F9A5E7B0D4C"
+      Language="1033"
+      Scope="perMachine"
+      Platform="x64">
+    <SummaryInformation Description="Forge — talk to Inventor, get verified changes" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Forge for Inventor is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- All-users Inventor add-in discovery folder. Everything lands here (DLL payload + manifest
+         side by side): the manifest's <Assembly> is the bare DLL name, resolved relative to the
+         manifest, and Inventor loads add-ins fine from this folder — Program Files separation buys
+         nothing for a manifest-discovered add-in.
+         Harvest: wix harvest dir inventor\bin\Release -directoryref INSTALLFOLDER -o installer\InventorFileComponents.wxs -g InventorAddinFiles -->
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="AutodeskFolder" Name="Autodesk">
+        <Directory Id="InventorAddinsFolder" Name="Inventor Addins">
+          <Directory Id="INSTALLFOLDER" Name="Forge" />
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="ForgeInventorAddin" Title="Forge for Inventor" Description="Forge — AI for Inventor" Level="1">
+      <ComponentGroupRef Id="InventorAddinFiles" />
+      <ComponentRef Id="ForgeInventorManifest" />
+    </Feature>
+
+    <!-- The manifest ships as a SOURCE file (inventor/Forge.Inventor.addin) — ClassId/ClientId match
+         InventorAddin.cs's [Guid]. Harvest picks up the DLL payload; the manifest is authored here
+         explicitly so its install location is obvious. Path below is relative to this .wxs. -->
+    <Component Id="ForgeInventorManifest" Directory="INSTALLFOLDER" Guid="6F1D3A9B-2C4E-4B8A-9D5F-7E0C3A6B1D2F">
+      <File Source="..\inventor\Forge.Inventor.addin" KeyPath="yes" />
+    </Component>
+  </Package>
+</Wix>

@@ -207,6 +207,35 @@
   .chip .x { cursor:pointer; border:none; background:none; color:var(--accent-ink); font-size:13px; padding:0 2px; opacity:.7; }
   .chip .x:hover { opacity:1; }
 
+  /* model picker popover (Kilo-style: search on top, grouped rows, opens upward) */
+  .attachrow { position:relative; }
+  .modelpick .chev { color:var(--faint); font-size:10px; margin-right:2px; }
+  .modelpop { position:absolute; bottom:calc(100% + 8px); left:0; z-index:70; width:300px; max-width:92vw;
+    background:var(--raised); border:1px solid var(--line); border-radius:12px;
+    display:flex; flex-direction:column; overflow:hidden; box-shadow:0 12px 40px rgba(0,0,0,.5); }
+  .modelpop .msearch { margin:8px; background:var(--bg); border:1px solid var(--line); border-radius:9px;
+    padding:8px 10px; font:inherit; font-size:12.5px; color:var(--ink); outline:none; }
+  .modelpop .msearch:focus { border-color:var(--accent); }
+  .modelpop .mlist { overflow-y:auto; max-height:300px; padding:0 4px 4px; }
+  .modelpop .mgroup { font-size:10.5px; color:var(--faint); padding:8px 10px 3px;
+    text-transform:uppercase; letter-spacing:.7px; }
+  .modelpop .mrow { display:flex; align-items:center; gap:8px; padding:8px 10px; border-radius:8px;
+    cursor:pointer; font-size:13px; color:var(--ink); }
+  .modelpop .mrow:hover { background:rgba(255,255,255,.05); }
+  .modelpop .mrow.kb { background:rgba(255,255,255,.05); outline:1px solid var(--accent); }
+  .modelpop .mrow.active { background:var(--accent-soft); }
+  .modelpop .mrow .mcheck { color:var(--accent); font-size:12px; width:14px; flex:none; }
+  .modelpop .mrow .mname { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .modelpop .mrow .mname small { display:block; color:var(--faint); font-size:10.5px; }
+  .modelpop .mstar { background:none; border:none; color:var(--faint); cursor:pointer; font-size:14px; padding:0 2px; flex:none; }
+  .modelpop .mstar.on { color:var(--accent); }
+  .modelpop .mfoot { display:flex; align-items:center; justify-content:space-between; gap:8px;
+    padding:8px 10px; border-top:1px solid var(--line); font-size:11.5px; color:var(--faint); }
+  .modelpop .mrefresh { background:none; border:1px solid var(--line); border-radius:7px; color:var(--soft);
+    font:inherit; font-size:11.5px; padding:3px 9px; cursor:pointer; }
+  .modelpop .mrefresh:hover { border-color:var(--accent); color:var(--ink); }
+  .modelpop .mempty { padding:18px 12px; text-align:center; color:var(--faint); font-size:12.5px; }
+
   /* slim feedback footer */
   .fb { margin-top:8px; display:flex; align-items:center; gap:7px; flex-wrap:wrap; font-size:11.5px; color:var(--faint); }
   .fbbtn { background:var(--raised); border:1px solid var(--line); border-radius:8px; padding:1px 7px; cursor:pointer; font-size:13px; }
@@ -276,6 +305,14 @@
   <div class="composer">
     <div class="attachrow">
       <button class="attachbtn" id="attach" title="Attach a file — e.g. the other version to compare against">📎 Attach a file</button>
+      <button class="attachbtn modelpick" id="modelpick" title="Switch model"><span class="chev">▲</span><span id="modelname">model</span></button>
+      <button class="attachbtn" id="enhance" title="Enhance prompt — rewrite this draft into a concrete build spec">✨ Enhance</button>
+      <button class="attachbtn" id="enhanceUndo" title="Restore the draft from before enhancing" style="display:none">↩</button>
+      <div class="modelpop" id="modelpop" style="display:none">
+        <input class="msearch" id="msearch" placeholder="Search models…" autocomplete="off" />
+        <div class="mlist" id="mlist"></div>
+        <div class="mfoot"><span id="mcount"></span><button class="mrefresh" id="mrefresh" title="Reload the live model list">↻ Refresh</button></div>
+      </div>
       <span class="chip" id="chip" style="display:none"></span>
     </div>
     <div class="ask">
@@ -306,7 +343,7 @@
   const grow = () => { intent.style.height = "auto"; intent.style.height = Math.min(intent.scrollHeight,160) + "px"; };
   intent.addEventListener("input", grow);
 
-  function refresh() { post({ action: "readModel" }); }
+  function refresh() { post({ action: "readModel" }); post({ action: "getProvider" }); }
   window.addEventListener("DOMContentLoaded", refresh);
 
   // Clear the panel for a fresh recording take: wipe the transcript + reset Forge's pending threads.
@@ -337,6 +374,7 @@
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       settingsEl.style.display = "none";
+      if ($("modelpop")) closeModels(false);
       const nope = document.querySelector(".gate .nope");   // FDL 4.4: Esc = "Not yet"
       if (nope) nope.click();
     }
@@ -391,6 +429,7 @@
 
     // CLEAR the input — like any chat
     intent.value = ""; grow();
+    preEnhance = null; $("enhanceUndo").style.display = "none";
 
     post({ action: "generate", intent: text });
     if (!hasBridge) demoRun(text);   // standalone browser preview
@@ -499,6 +538,43 @@
       }
     }
 
+    else if (m.type === "enhanced") {
+      if (preEnhance === null) preEnhance = intent.value;
+      intent.value = m.text || ""; grow();
+      $("enhanceUndo").style.display = "";
+      const eb = $("enhance"); eb.disabled = false; eb.textContent = "✨ Enhance";
+      intent.focus();
+    }
+
+    else if (m.type === "models") {
+      chatModels = (m.models || []).slice();
+      renderModelList($("msearch") ? $("msearch").value : "");
+      const sel = document.querySelector("#obmodel");
+      if (sel) {
+        const st = document.querySelector("#obmstat");
+        sel.innerHTML = "";
+        if (m.error || !m.models || !m.models.length) {
+          if (st) st.textContent = m.error === "nokey" ? "Paste a key first, then reload." : "Couldn't load models — saving with the default.";
+          const d = document.createElement("option"); d.value = ""; d.textContent = "Default model"; sel.appendChild(d);
+        } else {
+          m.models.forEach(id => { const op = document.createElement("option"); op.value = id; op.textContent = id; sel.appendChild(op); });
+          if (m.selected) sel.value = m.selected;
+          if (st) st.textContent = m.models.length + " models served right now — pick one.";
+        }
+      } else if (m.error && m.error !== "nokey") {
+        $("mcount").textContent = "Couldn't load models.";
+      }
+    }
+
+    else if (m.type === "provider") {
+      if (!m.error) {
+        curModel = m.model || null; curDynamic = !!m.dynamic;
+        renderPill();
+        $("mrefresh").style.display = curDynamic ? "" : "none";
+        if (curDynamic && !chatModels.length) post({ action: "refreshModels" });
+      }
+    }
+
     else if (m.type === "step") { stepLine(m.agent, m.gloss, m.state, m.result); }
     else if (m.type === "status") { stepLine(null, m.message, "run"); }
 
@@ -506,6 +582,7 @@
     else if (m.type === "attachCleared") { hideChip(); }
 
     else if (m.type === "error") {
+      const eb = $("enhance"); if (eb) { eb.disabled = false; eb.textContent = "✨ Enhance"; }
       finish(`<div class="err">${(m.message || "").replace(/</g,"&lt;")}</div>`);
     }
 
@@ -624,11 +701,15 @@
       <select class="obkey" id="obprov" aria-label="Provider">
         <option value="deepseek">DeepSeek — free starter credit</option>
         <option value="openrouter">OpenRouter — one key, every model</option>
+        <option value="nvidia">NVIDIA NIM — free models API</option>
         <option value="openai">OpenAI</option>
         <option value="anthropic">Anthropic</option>
         <option value="ollama">Ollama — local, no key needed</option>
       </select>
       <input class="obkey" id="obkey" placeholder="Paste a provider key (optional) — or get a free one" />
+      <select class="obkey" id="obmodel" aria-label="Model" style="display:none"></select>
+      <button class="obghost obpill" id="obreload" style="display:none">↻ Load models served right now</button>
+      <div class="obsub" id="obmstat" style="display:none;font-size:12px"></div>
       <button class="obpill" id="obnext">Continue</button>
       <button class="obghost obpill" id="obskip">Skip for now — I'll stay keyless</button>`;
     const page2 = `<span class="obdiamond">◆</span><h1>Your data stays yours</h1>
@@ -645,20 +726,47 @@
       <button class="obpill" id="obfinish">Start using Forge</button>`;
     const render = () => {
       o.innerHTML = `<button class="obskip" id="obskipall">Skip</button>${page===1?page1:page===2?page2:page3}${dots()}`;
-      const nxt = o.querySelector("#obnext");
-      if (nxt) nxt.addEventListener("click", () => {
+      const doSave = () => {
         const k = o.querySelector("#obkey");
         const pr = o.querySelector("#obprov");
-        if (k && k.value.trim()) post({ action: "saveKey", provider: pr ? pr.value : "deepseek", key: k.value.trim() });
-        page++; render();
-      });
+        const md = o.querySelector("#obmodel");
+        if (k && k.value.trim()) {
+          const msg = { action: "saveKey", provider: pr ? pr.value : "deepseek", key: k.value.trim() };
+          if (pr && pr.value === "nvidia" && md && md.style.display !== "none" && md.value) msg.model = md.value;
+          post(msg);
+        }
+      };
+      const tryFetch = () => {
+        const pr = o.querySelector("#obprov"), kv = o.querySelector("#obkey"), st = o.querySelector("#obmstat");
+        if (!pr || pr.value !== "nvidia" || !kv || !kv.value.trim()) return;
+        if (st) st.textContent = "Loading models…";
+        post({ action: "fetchModels", provider: "nvidia", key: kv.value.trim() });
+      };
+      const syncProv = () => {
+        const pr = o.querySelector("#obprov"), md = o.querySelector("#obmodel"),
+              rl = o.querySelector("#obreload"), st = o.querySelector("#obmstat");
+        const isNv = pr && pr.value === "nvidia";
+        if (md) md.style.display = isNv ? "" : "none";
+        if (rl) rl.style.display = isNv ? "" : "none";
+        if (st) st.style.display = isNv ? "" : "none";
+        if (isNv) tryFetch();
+      };
+      const nxt = o.querySelector("#obnext");
+      if (nxt) nxt.addEventListener("click", () => { doSave(); page++; render(); });
+      const prv = o.querySelector("#obprov");
+      if (prv) prv.addEventListener("change", syncProv);
+      const kk = o.querySelector("#obkey");
+      if (kk) kk.addEventListener("input", () => { clearTimeout(kk._t); kk._t = setTimeout(tryFetch, 700); });
+      const rel = o.querySelector("#obreload");
+      if (rel) rel.addEventListener("click", (e) => { e.preventDefault(); tryFetch(); });
+      syncProv();
       const fin = o.querySelector("#obfinish");
       if (fin) fin.addEventListener("click", done);
       const sk = o.querySelector("#obskip"), sa = o.querySelector("#obskipall");
       if (sk) sk.addEventListener("click", done);
       if (sa) sa.addEventListener("click", done);
       const k = o.querySelector("#obkey");
-      if (k) k.addEventListener("keydown", (e) => { if (e.key === "Enter") { page++; render(); } });
+      if (k) k.addEventListener("keydown", (e) => { if (e.key === "Enter") { doSave(); page++; render(); } });
     };
     const done = () => { localStorage.setItem("forge_onboarded","1"); o.remove(); intent.focus(); };
     render();
@@ -753,6 +861,129 @@
   }
   function hideChip() { const chip = $("chip"); chip.style.display = "none"; chip.innerHTML = ""; }
   $("attach").addEventListener("click", () => post({ action: "attach" }));
+
+  // ---- prompt enrichment (Kilo "Enhance Prompt" port) ----
+  let preEnhance = null;
+  $("enhance").addEventListener("click", () => {
+    if (!hasBridge) return;
+    const eb = $("enhance");
+    const draft = intent.value.trim();
+    if (!draft) {
+      intent.value = "Describe what to build or change — e.g. 'a wall-mount bracket 80x60x6 with 2 M6 holes'. Then ✨ Enhance turns it into a concrete spec; review, edit, send.";
+      intent.focus();
+      return;
+    }
+    preEnhance = null; $("enhanceUndo").style.display = "none";
+    eb.disabled = true; eb.textContent = "✨…";
+    post({ action: "enhance", text: draft });
+    setTimeout(() => { eb.disabled = false; eb.textContent = "✨ Enhance"; }, 30000); // safety: never stuck spinning
+  });
+  $("enhanceUndo").addEventListener("click", () => {
+    if (preEnhance !== null) { intent.value = preEnhance; grow(); intent.focus(); }
+    preEnhance = null; $("enhanceUndo").style.display = "none";
+  });
+
+  // ---- model picker (Kilo-style popover next to Attach) ----
+  let curModel = null, curDynamic = false, chatModels = [];
+  const favKey = "forge_fav_models";
+  const getFavs = () => { try { return JSON.parse(localStorage.getItem(favKey)) || []; } catch (e) { return []; } };
+  const setFavs = (a) => { try { localStorage.setItem(favKey, JSON.stringify(a)); } catch (e) {} };
+  const shortName = (id) => String(id || "").split("/").pop();
+  function renderPill() {
+    $("modelname").textContent = curModel ? shortName(curModel) : "model";
+    $("modelpick").title = curModel ? "Model: " + curModel + " — click to switch" : "Switch model";
+  }
+  function openModels() {
+    if (!hasBridge) return;
+    if (!chatModels.length && curDynamic) post({ action: "refreshModels" });
+    $("modelpop").style.display = "flex";
+    $("msearch").value = "";
+    renderModelList("");
+    requestAnimationFrame(() => {
+      $("msearch").focus();
+      const act = $("mlist").querySelector(".mrow.active");
+      if (act) act.scrollIntoView({ block: "center" });
+    });
+  }
+  function closeModels(refocus) {
+    $("modelpop").style.display = "none";
+    if (refocus !== false) intent.focus();
+  }
+  function renderModelList(q) {
+    const list = $("mlist"); list.innerHTML = "";
+    const query = String(q || "").toLowerCase();
+    const match = (id) => !query || shortName(id).toLowerCase().includes(query) || String(id).toLowerCase().includes(query);
+    const favs = getFavs();
+    const items = chatModels.filter(match);
+    const showFavs = !query && items.some(id => favs.includes(id));
+    const groups = [];
+    if (showFavs) groups.push({ label: "★ Favorites", rows: items.filter(id => favs.includes(id)) });
+    groups.push({ label: "Models", rows: query ? items : items.filter(id => !favs.includes(id)) });
+    let shown = 0;
+    groups.forEach(g => {
+      if (!g.rows.length) return;
+      const gl = document.createElement("div"); gl.className = "mgroup"; gl.textContent = g.label; list.appendChild(gl);
+      g.rows.forEach(id => {
+        shown++;
+        const row = document.createElement("div");
+        row.className = "mrow" + (id === curModel ? " active" : "");
+        row.setAttribute("data-id", id);
+        const starred = favs.includes(id);
+        row.innerHTML = `<span class="mcheck">${id === curModel ? "✓" : ""}</span>` +
+          `<span class="mname">${shortName(id).replace(/</g,"&lt;")}<small>${String(id).replace(/</g,"&lt;")}</small></span>` +
+          `<button class="mstar${starred ? " on" : ""}" title="${starred ? "Unfavorite" : "Favorite"}">${starred ? "★" : "☆"}</button>`;
+        row.addEventListener("click", (e) => {
+          const st = e.target.closest(".mstar");
+          if (st) {
+            e.stopPropagation();
+            const f = getFavs();
+            setFavs(starred ? f.filter(x => x !== id) : [...f, id]);
+            renderModelList($("msearch").value);
+            return;
+          }
+          post({ action: "setModel", model: id });
+          closeModels();
+        });
+        list.appendChild(row);
+      });
+    });
+    if (!shown) {
+      const em = document.createElement("div"); em.className = "mempty";
+      em.textContent = chatModels.length ? "No models match." : "No models loaded yet — hit Refresh.";
+      list.appendChild(em);
+    }
+    $("mcount").textContent = chatModels.length ? chatModels.length + " models" : "";
+  }
+  $("modelpick").addEventListener("click", (e) => {
+    e.stopPropagation();
+    $("modelpop").style.display === "none" ? openModels() : closeModels(false);
+  });
+  $("msearch").addEventListener("input", () => renderModelList($("msearch").value));
+  $("msearch").addEventListener("keydown", (e) => {
+    const rows = [...$("mlist").querySelectorAll(".mrow")];
+    if (e.key === "Escape") { e.stopPropagation(); closeModels(); return; }
+    if (!rows.length) return;
+    let i = rows.findIndex(r => r.classList.contains("kb"));
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      i = e.key === "ArrowDown" ? Math.min(rows.length - 1, i + 1) : Math.max(0, i - 1);
+      rows.forEach(r => r.classList.remove("kb"));
+      rows[i].classList.add("kb"); rows[i].scrollIntoView({ block: "nearest" });
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const pick = rows[i >= 0 ? i : 0] || rows.find(r => r.classList.contains("active"));
+      if (pick) { post({ action: "setModel", model: pick.getAttribute("data-id") }); closeModels(); }
+    }
+  });
+  $("mrefresh").addEventListener("click", (e) => {
+    e.stopPropagation();
+    $("mcount").textContent = "Loading…";
+    post({ action: "refreshModels" });
+  });
+  document.addEventListener("click", (e) => {
+    if ($("modelpop").style.display !== "none" && !e.target.closest("#modelpop") && !e.target.closest("#modelpick")) closeModels(false);
+  });
+  renderPill();
 
   // feedback
   function fbThanks() { $("fbthx").textContent = "thanks!"; }

@@ -1,0 +1,5 @@
+{
+  "provider": "openai-compatible",
+  "baseUrl": "https://api.deepseek.com/v1",
+  "model": "deepseek-chat"
+}

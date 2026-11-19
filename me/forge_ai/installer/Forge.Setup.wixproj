@@ -1,0 +1,16 @@
+<Project Sdk="WixToolset.Sdk/4.0.4">
+
+  <!--
+    Forge MSI (WiX v4). Product.wxs + the generated FileComponents.wxs (harvested from the
+    add-in Release output by installer/build-msi.ps1) are compiled here. Build:
+      dotnet build installer\Forge.Setup.wixproj -c Release
+    The produced single-file MSI is under installer\bin\.
+  -->
+
+  <PropertyGroup>
+    <OutputName>Forge-Setup</OutputName>
+    <OutputType>Package</OutputType>
+    <Platform>x64</Platform>
+  </PropertyGroup>
+
+</Project>

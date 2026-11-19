@@ -1,0 +1,16 @@
+<Project Sdk="WixToolset.Sdk/4.0.4">
+
+  <!--
+    Forge for Inventor MSI (WiX v4) — DRAFT SCAFFOLD (2026-08-17). Product.Inventor.wxs + the
+    harvested InventorFileComponents.wxs (harvest inventor\bin output once the add-in builds green
+    on the HP box — mirror installer/build-msi.ps1's harvest step). Same signing pipeline as the
+    SW MSI (msi.yml sign-msi job) once SignPath lands.
+  -->
+
+  <PropertyGroup>
+    <OutputName>Forge-Inventor-Setup</OutputName>
+    <OutputType>Package</OutputType>
+    <Platform>x64</Platform>
+  </PropertyGroup>
+
+</Project>
