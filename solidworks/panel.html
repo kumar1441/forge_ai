@@ -349,7 +349,7 @@
     "Ratcheting","Whirring","Clanking","Cranking","Sprocketing","Kerchunking"];
 
   const grow = () => { intent.style.height = "auto"; intent.style.height = Math.min(intent.scrollHeight,200) + "px"; };
-  intent.addEventListener("input", grow);
+  intent.addEventListener("input", () => { grow(); preEnhance = null; $("enhanceUndo").style.display = "none"; });
 
   function refresh() { post({ action: "readModel" }); post({ action: "getProvider" }); }
   window.addEventListener("DOMContentLoaded", refresh);
@@ -398,6 +398,13 @@
       e.preventDefault();
       const text = intent.value.trim();
       if (text) run(text);
+    }
+    // Kilo parity: Ctrl/Cmd+Z right after an enhance restores the pre-enhance draft.
+    if ((e.key === "z" || e.key === "Z") && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && preEnhance !== null) {
+      e.preventDefault();
+      intent.value = preEnhance; grow(); intent.focus();
+      preEnhance = null; $("enhanceUndo").style.display = "none";
+      return;
     }
     // Kilo-style history: ↑ older, ↓ newer. Only hijacks at the first/last line so multiline
     // editing keeps caret movement. The unsent draft is stashed on first ↑ and restored on ↓
