@@ -187,7 +187,8 @@
   .composer { border-top:1px solid var(--line); padding:12px 14px 8px; background:var(--bg); }
   .ask { position:relative; }
   textarea {
-    width:100%; resize:none; overflow:hidden; min-height:48px; max-height:160px;
+    width:100%; resize:none; overflow-x:hidden; overflow-y:auto; min-height:48px; max-height:200px;
+    white-space:pre-wrap; word-wrap:break-word;
     background:var(--raised); border:1px solid var(--line); border-radius:14px;
     padding:13px 15px; font:inherit; color:var(--ink); outline:none;
     transition:border-color .15s, background .15s;
@@ -347,7 +348,7 @@
     "Aligning","Meshing","Tightening","Riveting","Forging","Combobulating",
     "Ratcheting","Whirring","Clanking","Cranking","Sprocketing","Kerchunking"];
 
-  const grow = () => { intent.style.height = "auto"; intent.style.height = Math.min(intent.scrollHeight,160) + "px"; };
+  const grow = () => { intent.style.height = "auto"; intent.style.height = Math.min(intent.scrollHeight,200) + "px"; };
   intent.addEventListener("input", grow);
 
   function refresh() { post({ action: "readModel" }); post({ action: "getProvider" }); }
