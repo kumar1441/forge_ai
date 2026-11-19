@@ -105,8 +105,18 @@ namespace Forge.Providers
 
             var choices = j["choices"] as JArray;
             var choice = choices != null && choices.Count > 0 ? choices[0] : null;
-            string content = choice != null ? (string)choice["message"]?["content"] : null;
-            if (string.IsNullOrEmpty(content))
+            // NIM serves chat, reasoning, and legacy shapes. Accept any of them so every listed
+            // model is usable: standard content, DeepSeek-style reasoning_content, alternate
+            // reasoning field, then legacy text. Reasoning-only output is still a real answer.
+            string content = null;
+            if (choice != null)
+            {
+                content = (string)choice["message"]?["content"];
+                if (string.IsNullOrWhiteSpace(content)) content = (string)choice["message"]?["reasoning_content"];
+                if (string.IsNullOrWhiteSpace(content)) content = (string)choice["message"]?["reasoning"];
+                if (string.IsNullOrWhiteSpace(content)) content = (string)choice["text"];
+            }
+            if (string.IsNullOrWhiteSpace(content))
                 throw new ProviderException("Provider returned no content.");
 
             long tokIn = (long?)(j["usage"]?["prompt_tokens"]) ?? 0;

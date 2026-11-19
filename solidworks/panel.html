@@ -236,6 +236,13 @@
   .modelpop .mrefresh:hover { border-color:var(--accent); color:var(--ink); }
   .modelpop .mempty { padding:18px 12px; text-align:center; color:var(--faint); font-size:12.5px; }
 
+  /* enhance busy state: pill keeps its width, dots wave left-to-right */
+  #enhance.busy { color:var(--soft); }
+  #enhance .wdot { display:inline-block; font-size:9px; vertical-align:2px; animation:ewave 1.15s infinite; }
+  #enhance .wdot:nth-of-type(2) { animation-delay:.18s; }
+  #enhance .wdot:nth-of-type(3) { animation-delay:.36s; }
+  @keyframes ewave { 0%,55%,100% { opacity:.25; transform:translateY(0); } 28% { opacity:1; transform:translateY(-3px); } }
+
   /* slim feedback footer */
   .fb { margin-top:8px; display:flex; align-items:center; gap:7px; flex-wrap:wrap; font-size:11.5px; color:var(--faint); }
   .fbbtn { background:var(--raised); border:1px solid var(--line); border-radius:8px; padding:1px 7px; cursor:pointer; font-size:13px; }
@@ -542,7 +549,7 @@
       if (preEnhance === null) preEnhance = intent.value;
       intent.value = m.text || ""; grow();
       $("enhanceUndo").style.display = "";
-      const eb = $("enhance"); eb.disabled = false; eb.textContent = "✨ Enhance";
+      ebReset();
       intent.focus();
     }
 
@@ -582,7 +589,7 @@
     else if (m.type === "attachCleared") { hideChip(); }
 
     else if (m.type === "error") {
-      const eb = $("enhance"); if (eb) { eb.disabled = false; eb.textContent = "✨ Enhance"; }
+      if (typeof ebReset === "function") ebReset();
       finish(`<div class="err">${(m.message || "").replace(/</g,"&lt;")}</div>`);
     }
 
@@ -864,6 +871,10 @@
 
   // ---- prompt enrichment (Kilo "Enhance Prompt" port) ----
   let preEnhance = null;
+  const ebReset = () => {
+    const eb = $("enhance");
+    eb.classList.remove("busy"); eb.style.minWidth = ""; eb.disabled = false; eb.textContent = "✨ Enhance";
+  };
   $("enhance").addEventListener("click", () => {
     if (!hasBridge) return;
     const eb = $("enhance");
@@ -874,9 +885,11 @@
       return;
     }
     preEnhance = null; $("enhanceUndo").style.display = "none";
-    eb.disabled = true; eb.textContent = "✨…";
+    eb.style.minWidth = eb.offsetWidth + "px"; // lock width: no contraction while busy
+    eb.classList.add("busy"); eb.disabled = true;
+    eb.innerHTML = '✨ <span class="wdot">●</span> <span class="wdot">●</span> <span class="wdot">●</span>';
     post({ action: "enhance", text: draft });
-    setTimeout(() => { eb.disabled = false; eb.textContent = "✨ Enhance"; }, 30000); // safety: never stuck spinning
+    setTimeout(() => { if (eb.classList.contains("busy")) ebReset(); }, 60000); // safety: never stuck waving
   });
   $("enhanceUndo").addEventListener("click", () => {
     if (preEnhance !== null) { intent.value = preEnhance; grow(); intent.focus(); }

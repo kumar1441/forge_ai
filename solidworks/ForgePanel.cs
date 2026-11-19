@@ -536,7 +536,7 @@ namespace Forge.SolidWorks
             }
             catch (Exception ex)
             {
-                Send(new { type = "error", message = "Enhance failed (" + ex.GetType().Name + ") — your draft is untouched, just send it as-is." });
+                Send(new { type = "error", message = "Enhance failed: " + ex.Message + " — your draft is untouched, just send it as-is." });
             }
         }
 
