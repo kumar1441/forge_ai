@@ -180,12 +180,14 @@ namespace Forge.SolidWorks
         {
             try
             {
+                string safeReason = Mask(reason ?? "", null);
+                if (safeReason.Length > 24) safeReason = safeReason.Substring(0, 24);
+                string safeText = string.IsNullOrEmpty(text) ? null : Mask(text.Length > 300 ? text.Substring(0, 300) : text, null);
                 var ev = new JObject
                 {
                     ["schema_version"] = SchemaVersion, ["ts"] = DateTime.UtcNow.ToString("o"), ["install_id"] = InstallId,
                     ["type"] = "feedback", ["run_id"] = runId, ["handler"] = handler,
-                    ["rating"] = rating, ["reason"] = (reason ?? "").Length > 24 ? reason.Substring(0, 24) : reason,
-                    ["text"] = string.IsNullOrEmpty(text) ? null : (text.Length > 300 ? text.Substring(0, 300) : text)
+                    ["rating"] = rating, ["reason"] = safeReason, ["text"] = safeText
                 };
                 Append("events.jsonl", ev);
                 if (rating < 0) Append("failures.jsonl", ev);  // thumbs-down feeds the improvement backlog

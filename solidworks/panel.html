@@ -533,8 +533,11 @@
   </div>
 
 <script>
-  const hasBridge = !!(window.chrome && window.chrome.webview);
-  const post = (o) => { if (hasBridge) window.chrome.webview.postMessage(JSON.stringify(o)); };
+  const hasBridge = !!(window.chrome && window.chrome.webview && typeof window.chrome.webview.postMessage === "function");
+  const post = (o) => { if (!hasBridge) return false; try { window.chrome.webview.postMessage(JSON.stringify(o)); return true; } catch (e) { return false; } };
+  const needBridgeMsg = (what) => `${what} needs SolidWorks — you're in preview mode, so nothing was sent. Your draft is kept. Open SolidWorks to use it for real.`;
+  let lastHasKey = null; // set by provider messages; null = unknown yet
+  const needsKey = () => curSlug && curSlug !== "ollama" && lastHasKey === false;
   const $ = (id) => document.getElementById(id);
   const transcript = $("transcript");
   const intent = $("intent");
@@ -778,21 +781,26 @@
     if (!sel) return;
     if (m.slug && sel.querySelector(`option[value="${m.slug}"]`)) sel.value = m.slug;
     curSlug = m.slug || sel.value;
-    const needsKey = !m.hasKey && sel.value !== "ollama";
-    if (row) row.style.display = needsKey ? "" : "none";
+    lastHasKey = (m.slug === "ollama") ? true : (!!m.hasKey || lastHasKey);
+    const needKeyRow = !m.hasKey && sel.value !== "ollama";
+    if (row) row.style.display = needKeyRow ? "" : "none";
     if (sub) sub.textContent = (m.baseUrl || "") + (m.model ? " · " + m.model : "") + (m.hasKey ? " · key saved ✓" : " · no key");
   }
   $("setprov").addEventListener("change", () => {
     $("setkey").value = "";
     curSlug = $("setprov").value; // optimistic: pill/ctx stop showing the previous provider
+    lastHasKey = curSlug === "ollama" ? true : null;
     curModel = null; renderPill(); renderCtx();
     chatModels = []; renderModelList($("msearch") ? $("msearch").value : "");
-    if ($("mcount")) $("mcount").textContent = "Loading…";
+    if ($("mcount")) $("mcount").textContent = hasBridge ? "Loading…" : "Preview mode — model list needs SolidWorks.";
+    if (!hasBridge) { systemCard(needBridgeMsg("Switching providers")); return; }
+    if (needsKey()) { systemCard(`No key saved for <b>${curSlug}</b> — paste it in Settings → API key, hit Save, then pick a model.`); settingsEl.style.display = "flex"; }
     post({ action: "setProvider", provider: $("setprov").value });
   });
   $("setkeysave").addEventListener("click", () => {
     const k = $("setkey").value.trim();
     if (!k) return;
+    if (!hasBridge) { systemCard(needBridgeMsg("Saving keys") + " Keys are stored by the SolidWorks host (DPAPI) — reconnect there to save."); return; }
     post({ action: "saveKey", provider: $("setprov").value, key: k });
     post({ action: "getProvider" }); // refresh key state + model list immediately after save
     $("setkey").value = "";
@@ -924,7 +932,7 @@
       const em = document.createElement("div"); em.className = "mempty";
       em.textContent = "No matching files — click to 📎 attach one instead.";
       em.style.cursor = "pointer"; em.title = "Attach a file instead";
-      em.addEventListener("click", () => { menClose(); post({ action: "attach" }); intent.focus(); });
+      em.addEventListener("click", () => { menClose(); if (!hasBridge) { systemCard(needBridgeMsg("Attaching files")); return; } post({ action: "attach" }); intent.focus(); });
       list.appendChild(em);
     }
     menItems.forEach((it, i) => {
@@ -966,9 +974,18 @@
     });
   }
   function menCheck() {
-    if (!hasBridge) return;
     const q = menQuery();
     if (!q) { if (menOpen) menClose(); return; }
+    if (!hasBridge) {
+      menStart = q.start; menItems = []; menIdx = 0; menOpen = true;
+      $("menlist").innerHTML = "";
+      const em = document.createElement("div"); em.className = "mempty";
+      em.textContent = "Preview mode — file search needs SolidWorks. Your @text is kept; attach works once reconnected.";
+      $("menlist").appendChild(em);
+      $("mencount").textContent = "";
+      $("menpop").style.display = "flex";
+      return;
+    }
     menStart = q.start;
     clearTimeout(menTimer);
     menTimer = setTimeout(() => post({ action: "files", q: q.q }), 250);
@@ -1112,6 +1129,7 @@
       return !nm || text.includes(nm);
     });
     mentionPaths.length = 0; renderChips(); menClose();
+    if (hasBridge && needsKey()) systemCard(`No key saved for <b>${curSlug}</b> — sending anyway, but add one in Settings → API key and hit Save so the next run succeeds. Your prompt is kept.`);
     post({ action: "generate", intent: text, sid: sessionId, paths: mpaths });
     if (!hasBridge) demoRun(text);   // standalone browser preview
   }
@@ -1135,6 +1153,8 @@
           if ($("setprov").querySelector(`option[value="${pv}"]`)) $("setprov").value = pv;
           curSlug = pv; curModel = null; renderPill(); renderCtx();
           chatModels = []; renderModelList($("msearch") ? $("msearch").value : "");
+          if (!hasBridge) { systemCard(needBridgeMsg("Switching providers")); break; }
+          if (needsKey()) { systemCard(`No key saved for <b>${pv}</b> — paste it in Settings → API key, hit Save, then pick a model.`); settingsEl.style.display = "flex"; }
           post({ action: "setProvider", provider: pv });
         }
         else { settingsEl.style.display = "flex"; }
@@ -1219,11 +1239,13 @@
     }).join("\n---\n");
     const { block, sum, body } = buildCompactBlock(old, hasBridge ? "Summarizing…" : null);
     transcript.insertBefore(block, turns[turns.length - keep]);
-    if (hasBridge) {
+    if (hasBridge && !needsKey()) {
       pendingCompact = { sum, body };
       post({ action: "compact", text: digest.slice(0, 12000) });
+      setTimeout(() => { if (pendingCompact && pendingCompact.sum === sum) compactFallback(); }, 10000);
     } else {
       sum.textContent = titlesDigest(body);
+      if (hasBridge && needsKey()) systemCard(`Compacted locally — add a provider key in Settings for AI summaries. <b>${curSlug}</b> has no key yet.`);
     }
     scroll();
   }
@@ -1478,6 +1500,7 @@
 
     else if (m.type === "models") {
       chatModels = (m.models || []).slice();
+      if (m.error === "nokey") lastHasKey = false;
       renderModelList($("msearch") ? $("msearch").value : "");
       const sel = document.querySelector("#obmodel");
       if (sel) {
@@ -1507,11 +1530,14 @@
     else if (m.type === "provider") {
       if (!m.error) {
         curModel = m.model || null; curDynamic = !!m.dynamic; curSlug = m.slug || null;
+        lastHasKey = (m.slug === "ollama") ? true : !!m.hasKey;
         renderPill();
         renderSettings(m);
         renderCtx();
         $("mrefresh").style.display = curDynamic ? "" : "none";
         if (curDynamic && !chatModels.length) post({ action: "refreshModels" });
+      } else if (m.error === "nokey") {
+        lastHasKey = false; renderCtx();
       }
     }
 
@@ -1666,25 +1692,43 @@
       <div class="obsub">"make the bore 25mm"</div>
       <div class="obsub" style="color:var(--faint)">Forge reads, edits, and independently re-measures — it never claims a change it didn't verify.</div>
       <button class="obpill" id="obfinish">Start using Forge</button>`;
+    const applyLocalProvider = (slug, model) => {
+      if (slug && $("setprov").querySelector(`option[value="${slug}"]`)) $("setprov").value = slug;
+      curSlug = slug || curSlug || $("setprov").value;
+      if (model) curModel = model;
+      lastHasKey = curSlug === "ollama" ? true : lastHasKey;
+      renderPill(); renderCtx(); renderSettings({ slug: curSlug, hasKey: lastHasKey === true });
+    };
     const render = () => {
       o.innerHTML = `<button class="obskip" id="obskipall">Skip</button>${page===1?page1:page===2?page2:page3}${dots()}`;
       const doSave = () => {
         const k = o.querySelector("#obkey");
         const pr = o.querySelector("#obprov");
         const md = o.querySelector("#obmodel");
+        const slug = pr ? pr.value : (o.dataset.prov || "deepseek");
+        if (slug) o.dataset.prov = slug;
         if (k && k.value.trim()) {
-          const msg = { action: "saveKey", provider: pr ? pr.value : "deepseek", key: k.value.trim() };
+          const msg = { action: "saveKey", provider: slug, key: k.value.trim() };
           if (pr && pr.value === "nvidia" && md && md.style.display !== "none" && md.value) msg.model = md.value;
+          if (!hasBridge) systemCard("Preview mode — keys are stored by the SolidWorks host, so this key wasn't saved. Your provider pick is kept locally; reconnect to save it for real.");
           post(msg);
           try { post({ action: "getProvider" }); } catch (e) {} // key state + pill refresh before first chat
           o.dataset.saved = "1";
+          applyLocalProvider(slug, msg.model || null);
         } else if (pr) {
           try { post({ action: "setProvider", provider: pr.value }); } catch (e) {}
+          applyLocalProvider(pr.value, null);
         }
       };
       const tryFetch = () => {
         const pr = o.querySelector("#obprov"), kv = o.querySelector("#obkey"), st = o.querySelector("#obmstat");
+        const md = o.querySelector("#obmodel");
         if (!pr || pr.value !== "nvidia" || !kv || !kv.value.trim()) return;
+        if (!hasBridge) {
+          if (st) st.textContent = "Preview mode — model list needs SolidWorks. Save and Continue; you can pick a model after reconnecting.";
+          if (md) { md.innerHTML = ""; const d = document.createElement("option"); d.value = ""; d.textContent = "Default model (preview)"; md.appendChild(d); }
+          return;
+        }
         if (st) st.textContent = "Loading models…";
         post({ action: "fetchModels", provider: "nvidia", key: kv.value.trim() });
       };
@@ -1714,14 +1758,17 @@
       const k = o.querySelector("#obkey");
       if (k) k.addEventListener("keydown", (e) => { if (e.key === "Enter") { doSave(); page++; render(); } });
     };
-    const done = () => { try { localStorage.setItem("forge_onboarded","1"); } catch (e) {} try { if (o.dataset.saved) post({ action: "getProvider" }); } catch (e2) {} o.remove(); refresh(); intent.focus(); };
+    const done = () => {
+        const pr = o.querySelector("#obprov");
+        applyLocalProvider((pr && pr.value) || o.dataset.prov || null, null);
+        try { localStorage.setItem("forge_onboarded","1"); } catch (e) {} try { if (o.dataset.saved) post({ action: "getProvider" }); } catch (e2) {} o.remove(); refresh(); intent.focus(); };
     render();
     transcript.appendChild(o);
   }
   // the host tells us it's a fresh run; until it does, the standalone preview still shows onboarding once
   if (!hasBridge && !localStorage.getItem("forge_onboarded")) showOnboard();
 
-  if (hasBridge) window.chrome.webview.addEventListener("message", (e) => handle(JSON.parse(e.data)));
+  if (hasBridge) try { window.chrome.webview.addEventListener("message", (e) => handle(JSON.parse(e.data))); } catch (e) {}
 
   function renderVariants(m) {
     const clean = m.variants.filter(v => v.success && v.healthy !== false).length;
@@ -1806,9 +1853,15 @@
     $("chipx").addEventListener("click", () => post({ action: "clearAttach" }));
   }
   function hideChip() { const chip = $("chip"); chip.style.display = "none"; chip.innerHTML = ""; }
-  $("attach").addEventListener("click", () => post({ action: "attach" }));
+  $("attach").addEventListener("click", () => {
+    if (!hasBridge) { systemCard(needBridgeMsg("Attaching files")); return; }
+    post({ action: "attach" });
+  });
   $("regen").addEventListener("click", () => {
-    if (!hasBridge || working || !lastPrompt || lastPrompt.startsWith("/")) return;
+    if (working || !lastPrompt || lastPrompt.startsWith("/")) {
+      if (!lastPrompt || lastPrompt.startsWith("/")) systemCard("Nothing to regenerate yet — send a prompt first, then ↻ or /regen re-runs it.");
+      return;
+    }
     run(lastPrompt);
   });
 
@@ -1865,7 +1918,9 @@
     eb.innerHTML = `✨ <span class="wdot">●</span> <span class="wdot">●</span> <span class="wdot">●</span> ${s}s`;
   };
   $("enhance").addEventListener("click", () => {
-    if (!hasBridge || enhanceActive) return;
+    if (enhanceActive) return;
+    if (!hasBridge) { systemCard(needBridgeMsg("✨ Enhance") + " Tip: open Settings (⚙) to add a provider key first."); return; }
+    if (needsKey()) { systemCard(`✨ Enhance needs a provider key — paste it in Settings → API key for <b>${curSlug}</b>, hit Save, then Enhance again. Your draft is kept.`); settingsEl.style.display = "flex"; return; }
     const eb = $("enhance");
     const draft = intent.value.trim();
     if (!draft) {
@@ -1917,7 +1972,8 @@
     $("modelpick").title = curModel ? "Model: " + curModel + " — click to switch" : "Switch model";
   }
   function openModels() {
-    if (!hasBridge) return;
+    if (!hasBridge) { systemCard(needBridgeMsg("The model picker")); return; }
+    if (needsKey()) { systemCard(`No key saved for <b>${curSlug || "this provider"}</b> — paste it in Settings → API key, hit Save, then Refresh.`); settingsEl.style.display = "flex"; }
     if (!chatModels.length && curDynamic) post({ action: "refreshModels" });
     $("modelpop").style.display = "flex";
     $("msearch").value = "";
@@ -1986,7 +2042,7 @@
         em.style.cursor = "pointer"; em.title = "Clear the search";
         em.addEventListener("click", () => { $("msearch").value = ""; renderModelList(""); $("msearch").focus(); });
       } else {
-        em.textContent = curDynamic ? "No models loaded yet — hit Refresh." : "One fixed model on this provider — nothing to load.";
+        em.textContent = !hasBridge ? "Preview mode — model list needs SolidWorks." : curDynamic ? "No models loaded yet — hit Refresh." : "One fixed model on this provider — nothing to load.";
       }
       list.appendChild(em);
     }
@@ -2020,8 +2076,11 @@
   });
   $("mrefresh").addEventListener("click", (e) => {
     e.stopPropagation();
+    if (!hasBridge) { $("mcount").textContent = "Preview mode — needs SolidWorks."; systemCard(needBridgeMsg("Refreshing models")); return; }
+    if (needsKey()) { $("mcount").textContent = "Needs a key — see Settings."; systemCard(`Can't refresh models without a key — paste it in Settings → API key for <b>${curSlug}</b>, hit Save, then Refresh.`); settingsEl.style.display = "flex"; return; }
     $("mcount").textContent = "Loading…";
     post({ action: "refreshModels" });
+    setTimeout(() => { if ($("mcount").textContent === "Loading…") { $("mcount").textContent = "Couldn't load models."; $("mcount").title = "No reply — check the key, then hit Refresh."; } }, 8000);
   });
   document.addEventListener("click", (e) => {
     if ($("modelpop").style.display !== "none" && !e.target.closest("#modelpop") && !e.target.closest("#modelpick")) closeModels(false);

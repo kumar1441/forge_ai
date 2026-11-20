@@ -9,13 +9,19 @@ Forge is a .NET Framework 4.8 C# COM add-in hosted inside SolidWorks as a WebVie
 - **.NET Framework 4.8 developer pack** (target framework is `net48`).
 - **SolidWorks 2022 or later (x64)** installed. Forge talks to SolidWorks through the COM interop assemblies that ship with every install.
 
-  The interop references use a hardcoded `HintPath` in `solidworks/Forge.SolidWorks.csproj`:
+  The interop references resolve through the `SwInteropRoot` MSBuild property in `solidworks/Forge.SolidWorks.csproj`:
 
   ```
   C:\Program Files\Dassault Systemes\SOLIDWORKS 3DEXPERIENCE R2026x\SOLIDWORKS\api\redist\SolidWorks.Interop.*.dll
   ```
 
-  **You will very likely need to edit that path** to match your local SolidWorks install (the interop DLLs live under `<install>\SOLIDWORKS\api\redist\` for every supported version).
+  **If your SolidWorks install lives elsewhere, do NOT edit the csproj** — override the property on the command line (command-line wins):
+
+  ```powershell
+  dotnet build solidworks/Forge.SolidWorks.csproj -c Release -p:SwInteropRoot="D:\Path\To\SOLIDWORKS\api\redist"
+  ```
+
+  (The interop DLLs live under `<install>\SOLIDWORKS\api\redist\` for every supported version. CI uses `-p:SwInteropRoot=lib\sw-interop`, committed copies produced by `installer/fetch-interop.ps1`.)
 
 - **WebView2 Runtime** — ships with Windows 11 and most Windows 10 installs; the NuGet reference pulls the native loader automatically.
 

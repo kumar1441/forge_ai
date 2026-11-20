@@ -31,6 +31,8 @@ dotnet build solidworks/Forge.SolidWorks.csproj -c Release -p:Platform=x64
 
 Close SolidWorks before every rebuild — the DLL is locked while SW is open (error MSB3027).
 
+If your SolidWorks install is not under the default path, add `-p:SwInteropRoot="<install>\SOLIDWORKS\api\redist"` to the build (see `docs/BUILD.md`).
+
 ## Install
 
 1. Register the add-in with regasm (admin PowerShell):
@@ -47,7 +49,7 @@ The Forge panel appears as a task pane inside SolidWorks.
 
 ## Configure a provider
 
-Forge reads settings from environment variables first, then `%APPDATA%\Forge\config.json`. Keys live in the DPAPI store (or the `FORGE_PROVIDER_KEY` env var) — never in the config file.
+Forge reads chat settings (provider, base URL, model) from `%APPDATA%\Forge\config.json`. Keys live in per-provider DPAPI-encrypted key files, falling back to the `FORGE_PROVIDER_KEY` env var — never in the config file.
 
 1. Create `%APPDATA%\Forge\config.json`:
 

@@ -151,6 +151,7 @@ namespace Forge.SolidWorks
         {
             try
             {
+                if (!Telemetry.Enabled) return;   // usage sharing OFF: no background poll — nothing leaves this machine
                 var model = SwAddin.SwApp?.ActiveDoc as IModelDoc2;
                 string project = ProjectKey(model);
                 if (string.IsNullOrEmpty(project)) return;
@@ -1128,7 +1129,7 @@ namespace Forge.SolidWorks
             {
                 _noticesShown = true;
                 try { var crash = ForgeData.CheckInterrupted(); if (crash != null) Send(new { type = "answer", answer = crash }); } catch { }
-                try { var upd = await ForgeData.UpdateNotice(); if (upd != null) Send(new { type = "answer", answer = upd }); } catch { }
+                if (Telemetry.Enabled) { try { var upd = await ForgeData.UpdateNotice(); if (upd != null) Send(new { type = "answer", answer = upd }); } catch { } }
             }
 
             // Privacy / anonymous-usage control (data contract in docs/DATA.md).
@@ -1413,7 +1414,8 @@ namespace Forge.SolidWorks
                 { Send(new { type = "error", message = "Sharing works on a part - open the part you want to share." }); return; }
                 string project = ProjectKey(model);
                 if (string.IsNullOrEmpty(project)) { Send(new { type = "error", message = "Save the part before sharing." }); return; }
-                await ForgeApi.PushModel(project, System.Environment.UserName, dims);
+                if (!Telemetry.Enabled) { Send(new { type = "error", message = "Sharing is OFF while usage sharing is OFF — say \"share data on\" or flip it in Settings to share. Nothing left this machine." }); return; }
+                await ForgeApi.PushModel(project, "", dims);   // anonymous: never send the Windows username
                 Send(new { type = "shared", count = dims.Count });
                 return;
             }
