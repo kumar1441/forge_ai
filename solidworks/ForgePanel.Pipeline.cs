@@ -2897,7 +2897,7 @@ namespace Forge.SolidWorks
         }
 
         // ---- the runner: returns true if the pipeline handled the command; false => let the offline regex path try. ----
-        private async Task<bool> RunViaPipeline(string intent, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken))
+        private async Task<bool> RunViaPipeline(string intent, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken), string sid = null)
         {
             var doc = App?.ActiveDoc as IModelDoc2;
             if (doc == null) return false;   // no doc: let the legacy path show its guidance
@@ -5071,7 +5071,7 @@ namespace Forge.SolidWorks
             // MCP BUILD (multi-part / assembly from scratch) — runs BEFORE recipe: tangled creates the
             // deterministic paths can't split go to the SolidWorks-MCP server (its own COM session against the
             // running SolidWorks). Explicit "mcp" asks, assembly builds, and 3+-step compounds land here.
-            if (await TryRunMcpBuild(intent, ct)) return true;
+            if (await TryRunMcpBuild(intent, ct, sid)) return true;
 
             // RECIPE CREATE (multi-feature from scratch) — runs BEFORE compound: a refused-class create
             // ("bracket with 4 holes and filleted edges") becomes an LLM-authored feature recipe executed by
@@ -5696,7 +5696,7 @@ namespace Forge.SolidWorks
         // MCP BUILD runner: explicit "mcp" asks, assembly from-scratch builds, and 3+-step compounds
         // execute as LLM-authored tool plans against the SolidWorks-MCP server. True when claimed
         // (success OR honest error); false falls through (bare/single-part -> recipe/deterministic paths).
-        private async Task<bool> TryRunMcpBuild(string intent, System.Threading.CancellationToken ct)
+        private async Task<bool> TryRunMcpBuild(string intent, System.Threading.CancellationToken ct, string sid)
         {
             if (!McpBuild.IsMcpCreate(intent)) return false;
             if (ProviderFactoryAvailable() == false) return false;
@@ -5707,7 +5707,7 @@ namespace Forge.SolidWorks
             var relay = new ThinkRelay("Planning", msg => Send(msg));
             relay.Start(Forge.Providers.ProviderFactory.CurrentModel());
             McpBuild.McpBuildOutcome mc;
-            try { mc = await McpBuild.Run(intent, emitM, ct, relay.OnDelta); relay.End(false); }
+            try { mc = await McpBuild.RunAgent(intent, emitM, ct, relay.OnDelta, sid); relay.End(false); }
             catch (OperationCanceledException)
             {
                 relay.End(true);

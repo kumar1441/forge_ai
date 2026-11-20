@@ -206,8 +206,48 @@ namespace Forge.SolidWorks
             try
             {
                 if (action == "readModel") ReadModel();
-                else if (action == "generate") await Generate((string)msg.intent);
+                else if (action == "generate") await Generate((string)msg.intent, (string)msg.sid);
                 else if (action == "enhance") await EnhancePrompt((string)msg.text);
+                // Transcript compaction (Kilo parity): summarize older turns so long sessions stay readable.
+                // Unary call is fine — summaries are short and fast. Plain-text summary, fences stripped.
+                else if (action == "compact")
+                {
+                    string text = null;
+                    try { text = (string)msg.text; } catch { }
+                    if (string.IsNullOrWhiteSpace(text))
+                    { Send(new { type = "error", message = "Nothing to compact." }); return; }
+                    IProviderClient c2;
+                    try { c2 = ProviderFactory.Resolve(); } catch { c2 = null; }
+                    if (c2 == null)
+                    { Send(new { type = "error", message = "Compaction needs an LLM provider — using local titles instead.", localCompact = true }); return; }
+                    try
+                    {
+                        var msgs = new List<ChatMessage>
+                        {
+                            new ChatMessage { Role = "system", Content = "Summarize this CAD assistant chat into 5-10 short bullets: what was built or changed, key dims and models, open issues. Plain text, no fences, no commentary." },
+                            new ChatMessage { Role = "user", Content = text.Trim() }
+                        };
+                        var res = await c2.CompleteAsync(msgs,
+                            new ProviderOptions { MaxTokens = 1000, Temperature = 0.2, Model = ProviderFactory.CurrentModel() },
+                            System.Threading.CancellationToken.None);
+                        string s = res != null ? res.Text : null;
+                        if (!string.IsNullOrWhiteSpace(s))
+                        {
+                            s = System.Text.RegularExpressions.Regex.Replace(s.Trim(), @"^```\w*\n?|```$", "").Trim();
+                            Send(new { type = "compacted", summary = s });
+                        }
+                        else Send(new { type = "error", message = "Compaction came back empty — keeping full history.", localCompact = true });
+                    }
+                    catch (Exception ex)
+                    {
+                        Send(new { type = "error", message = "Compaction failed: " + ex.Message + " — keeping full history.", localCompact = true });
+                    }
+                }
+                else if (action == "usage")   // top-bar context dropdown: today's provider token totals + agent history
+                {
+                    try { Send(new { type = "usage", tokensIn = IntentRate.TokensInToday, tokensOut = IntentRate.TokensOutToday, agentMsgs = McpBuild.HistoryCount(), agentTokens = McpBuild.AgentTokCount }); }
+                    catch (Exception ex) { Send(new { type = "usage", error = ex.Message }); }
+                }
                 else if (action == "attach") DoAttach();
                 else if (action == "clearAttach") { _attachedFile = null; Send(new { type = "attachCleared" }); }
                 else if (action == "stop")   // Kilo-style interrupt: cancel the in-flight run/enhance; partial CoT stays
@@ -215,15 +255,39 @@ namespace Forge.SolidWorks
                     try { if (_runCts != null) _runCts.Cancel(); } catch { }
                     try { if (_enhanceCts != null) _enhanceCts.Cancel(); } catch { }
                 }
-                else if (action == "revert")   // Kilo-style revert: drop the pending thread so the resent prompt starts clean
+                else if (action == "revert")   // Kilo-style revert: drop the pending thread + truncate the agent chat so the resent prompt starts clean
                 {
                     _pendingIntent = null; _pendingConfirm = null;
                     _lastImpactTarget = null; _lastImpactPrimary = null; _lastImpactDependents = null;
+                    try
+                    {
+                        string rsid = null; int keep = 0;
+                        try { rsid = (string)msg.sid; } catch { }
+                        try { keep = (int)msg.keep; } catch { }
+                        if (!string.IsNullOrWhiteSpace(rsid)) McpBuild.TruncateHistory(rsid, keep);
+                        else McpBuild.ClearHistory();
+                    }
+                    catch { }
+                }
+                else if (action == "loadHistory")   // restore a chat: load its persisted agent conversation
+                {
+                    try
+                    {
+                        string lsid = null;
+                        try { lsid = (string)msg.sid; } catch { }
+                        if (!string.IsNullOrWhiteSpace(lsid))
+                        {
+                            McpBuild.EnsureSessionPublic(lsid);
+                            Send(new { type = "historyLoaded", turns = McpBuild.HistoryCount() });
+                        }
+                    }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't load chat history: " + ex.Message }); }
                 }
                 else if (action == "reset")   // rehearsal/recording: wipe the panel + every pending thread for a clean take
                 {
                     _pendingIntent = null; _attachedFile = null; _pendingConfirm = null;
                     _lastImpactTarget = null; _lastImpactPrimary = null; _lastImpactDependents = null;
+                    try { McpBuild.ClearHistory(); } catch { } // fresh agent conversation
                     Send(new { type = "attachCleared" });
                 }
                 else if (action == "highlight") HighlightByName(msg);
@@ -674,7 +738,7 @@ namespace Forge.SolidWorks
             "with which fasteners); end with build order; take as many words as the machine needs, no length limit. " +
             "Vague scope is banned: 'pattern holes where applicable' must become exact counts, sizes, positions.";
 
-        private async Task Generate(string intent)
+        private async Task Generate(string intent, string sid)
         {
             _currentRunId = Guid.NewGuid().ToString("N").Substring(0, 12);   // tags this run for thumbs feedback + correction capture
             try { if (_runCts != null) _runCts.Cancel(); } catch { }
@@ -717,7 +781,7 @@ namespace Forge.SolidWorks
             // enriched build spec is full of fastener callouts (M3/M4/M5) and mate words ("mount") that
             // those matchers would otherwise claim with no doc open ("Open your assembly first"). Verb-gated
             // (create/make/build/...), so edit flows keep theirs. Needs no open document.
-            if (await TryRunMcpBuild(intent, runCt)) return;
+            if (await TryRunMcpBuild(intent, runCt, sid)) return;
             if (await TryRunCreateRecipe(intent, runCt)) return;
 
             // Bulk resize fasteners (Demo #6, M6â†’M8) â€” route AUTHORITATIVELY before the cloud parse. A clear
@@ -748,7 +812,7 @@ namespace Forge.SolidWorks
             //   â€” and future ones â€” get parse -> confirm-or-ask -> preview -> execute -> verify -> log uniformly.
             //   Returns false only when the cloud parser is unreachable or the action is unknown; then the
             //   per-handler regex blocks below run as the OFFLINE fallback (and the legacy variant path after them).
-            if (await RunViaPipeline(intent, runCt)) return;
+            if (await RunViaPipeline(intent, runCt, sid)) return;
 
             // Auto-mate â€” the first "doer". Works on an ASSEMBLY, so intercept here BEFORE ActivePart()
             // (which only accepts parts). Deploys the Gauge â†’ Torque â†’ Sentinel crew with live narration.

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -10,15 +11,175 @@ namespace Forge.SolidWorks
 {
     /// <summary>
     /// McpBuild — the chat path for MULTI-PART / assembly from-scratch builds ("gearbox with 3 gears",
-    /// "bracket and a bolt", anything the deterministic 2-step compound can't split). It drives the
-    /// SolidWorks-MCP server (hjbaard/SolidWorks-MCP) over stdio via McpBridge: the user's own LLM authors
-    /// an ordered tool-call plan from the server's live tool list, Forge executes it step by step, and a
-    /// loud failure at any step stops the run honestly (the server itself returns {ok:false} on misses).
-    /// Single-part multi-feature asks stay on the recipe route; bare primitives and confident two-step
-    /// compounds keep their deterministic handlers. Keyless chat falls through to the existing refusal.
+    /// "bracket and a bolt", anything the deterministic 2-step can't split). Two modes:
+    /// AGENT LOOP (openai-compatible providers): the model gets the live tool list as real function
+    /// calls plus the running conversation history, then plans -> acts -> observes -> re-plans until the
+    /// build is done — true agency across turns, not one-shot. SINGLE-SHOT fallback (other providers /
+    /// tool-call failure): one JSON plan executed sequentially, as before.
     /// </summary>
     public static class McpBuild
     {
+        // Agent conversation store, Kilo-style: per-chat history (system + user/assistant/tool turns)
+        // PERSISTED to %APPDATA%\Forge\agent\{sid}.json on every mutation, loaded on restore, truncated
+        // on revert, summarized (never silently dropped) past 60 messages. The loop re-sends it every
+        // iteration, so the model observes what it just did — agency instead of one-shot.
+        private class AgentSession
+        {
+            public readonly List<JObject> Msgs = new List<JObject>();
+            public readonly List<int> TurnStarts = new List<int>(); // Msgs indices where user turns begin
+        }
+
+        private static readonly Dictionary<string, AgentSession> Sessions = new Dictionary<string, AgentSession>();
+        private static string CurrentSid;
+        public static int AgentMsgCount { get; private set; }
+        public static long AgentTokCount { get; private set; }
+
+        public static void EnsureSessionPublic(string sid) { EnsureSession(sid); }
+
+        private static string AgentDir()
+        {
+            string d = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Forge", "agent");
+            try { Directory.CreateDirectory(d); } catch { }
+            return d;
+        }
+
+        private static AgentSession EnsureSession(string sid)
+        {
+            if (string.IsNullOrWhiteSpace(sid)) sid = "default";
+            lock (Sessions)
+            {
+                AgentSession s;
+                if (Sessions.TryGetValue(sid, out s)) { CurrentSid = sid; return s; }
+                s = new AgentSession();
+                try
+                {
+                    string p = Path.Combine(AgentDir(), sid + ".json");
+                    if (File.Exists(p))
+                    {
+                        var arr = JArray.Parse(File.ReadAllText(p));
+                        foreach (var t in arr) { var o = t as JObject; if (o != null) s.Msgs.Add(o); }
+                        // Rebuild turn boundaries (user-role entries) since only messages persist.
+                        for (int i = 0; i < s.Msgs.Count; i++)
+                            if ((string)s.Msgs[i]["role"] == "user") s.TurnStarts.Add(i);
+                    }
+                }
+                catch { }
+                Sessions[sid] = s;
+                CurrentSid = sid;
+                return s;
+            }
+        }
+
+        private static void SaveSession(string sid)
+        {
+            try
+            {
+                AgentSession s;
+                lock (Sessions) { if (!Sessions.TryGetValue(sid ?? "default", out s)) return; }
+                var arr = new JArray();
+                lock (s.Msgs) { foreach (var m in s.Msgs) arr.Add(m); }
+                File.WriteAllText(Path.Combine(AgentDir(), (sid ?? "default") + ".json"), arr.ToString(Newtonsoft.Json.Formatting.None));
+                // Prune old session files (keep newest 30).
+                try
+                {
+                    var files = new DirectoryInfo(AgentDir()).GetFiles("*.json");
+                    Array.Sort(files, (a, b) => b.LastWriteTimeUtc.CompareTo(a.LastWriteTimeUtc));
+                    for (int i = 30; i < files.Length; i++) { try { files[i].Delete(); } catch { } }
+                }
+                catch { }
+            }
+            catch { }
+        }
+
+        public static void ClearHistory()
+        {
+            lock (Sessions) { Sessions.Clear(); }
+            CurrentSid = null;
+            AgentMsgCount = 0;
+        }
+
+        public static int HistoryCount()
+        {
+            try
+            {
+                lock (Sessions)
+                {
+                    AgentSession s;
+                    if (CurrentSid != null && Sessions.TryGetValue(CurrentSid, out s)) return s.Msgs.Count;
+                }
+            }
+            catch { }
+            return 0;
+        }
+
+        /// <summary>Revert a chat to its first keep user-turns (panel counts turns, host maps to messages).</summary>
+        public static void TruncateHistory(string sid, int keepTurns)
+        {
+            if (string.IsNullOrWhiteSpace(sid)) return;
+            var s = EnsureSession(sid);
+            lock (s.Msgs)
+            {
+                if (keepTurns <= 0)
+                {
+                    // Keep only the system prompt: a truly fresh conversation on this chat.
+                    JObject sys = s.Msgs.Count > 0 && (string)s.Msgs[0]["role"] == "system" ? s.Msgs[0] : null;
+                    s.Msgs.Clear();
+                    s.TurnStarts.Clear();
+                    if (sys != null) s.Msgs.Add(sys);
+                }
+                else if (keepTurns < s.TurnStarts.Count)
+                {
+                    int cut = s.TurnStarts[keepTurns];
+                    s.Msgs.RemoveRange(cut, s.Msgs.Count - cut);
+                    s.TurnStarts.RemoveRange(keepTurns, s.TurnStarts.Count - keepTurns);
+                }
+            }
+            SaveSession(sid);
+        }
+
+        /// <summary>Summarize (never silently drop) the oldest half once history passes 60 messages.</summary>
+        private static async Task CompactHistoryIfNeeded(IProviderClient client, string sid, string model)
+        {
+            AgentSession s = EnsureSession(sid);
+            int count;
+            lock (s.Msgs) { count = s.Msgs.Count; }
+            if (count <= 60) return;
+            int cut = count - 30; // summarize everything except the newest 30
+            List<JObject> old;
+            lock (s.Msgs) { old = s.Msgs.GetRange(1, cut - 1); } // keep [0]=system
+            string summary = null;
+            try
+            {
+                var msgs = new List<ChatMessage>
+                {
+                    new ChatMessage { Role = "system", Content = "Summarize this CAD agent history into durable facts: what was built, key dims/decisions, open issues. Plain text, under 200 words." },
+                    new ChatMessage { Role = "user", Content = new JArray(old.ToArray()).ToString(Newtonsoft.Json.Formatting.None) }
+                };
+                var res = await client.CompleteAsync(msgs,
+                    new ProviderOptions { MaxTokens = 800, Temperature = 0, Model = model },
+                    System.Threading.CancellationToken.None);
+                summary = res != null ? res.Text : null;
+            }
+            catch { summary = null; }
+            lock (s.Msgs)
+            {
+                if (string.IsNullOrWhiteSpace(summary))
+                {
+                    // Bounded fallback: drop oldest (already bounded at 60, noted in trace).
+                    try { GroundTruth.Trace?.Invoke("mcp-build: history compact fallback, dropped " + (cut - 1) + " msgs"); } catch { }
+                    s.Msgs.RemoveRange(1, cut - 1);
+                }
+                else
+                {
+                    s.Msgs.RemoveRange(1, cut - 1);
+                    s.Msgs.Insert(1, new JObject { ["role"] = "system", ["content"] = "[Earlier work compacted] " + summary.Trim() });
+                }
+                for (int i = 0; i < s.TurnStarts.Count; i++) s.TurnStarts[i] = Math.Max(0, s.TurnStarts[i] - (cut - 1));
+                while (s.TurnStarts.Count > 0 && s.TurnStarts[0] < 0) s.TurnStarts.RemoveAt(0);
+            }
+            SaveSession(sid);
+        }
+
         private static readonly Regex CreateVerbRx = new Regex(
             @"\b(create|make|build|design|generate|model)\b",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
@@ -176,6 +337,175 @@ namespace Forge.SolidWorks
                 ")" + (string.IsNullOrEmpty(measured) ? "." : " Measured: " + measured);
             return outcome;
         }
+
+        /// <summary>
+        /// The agentic loop: history + real function calls + observe -> re-plan. Only for
+        /// openai-compatible providers (function calling); anything else falls back to single-shot Run.
+        /// If the model completes with zero tool calls, that means it can't/won't use tools — fall back
+        /// to the JSON-plan path rather than pretending a text reply built anything.
+        /// </summary>
+        public static async Task<McpBuildOutcome> RunAgent(
+            string intent, Func<string, string, string, string, Task> emit, System.Threading.CancellationToken ct, Action<string, string> onThink, string sid)
+        {
+            var outcome = new McpBuildOutcome();
+            if (!IsMcpCreate(intent)) return outcome;
+
+            IProviderClient client;
+            try
+            {
+                client = ProviderFactory.Resolve();
+                if (client == null) return outcome;
+            }
+            catch { return outcome; }
+            if (client.Id != "openai-compatible")
+                return await Run(intent, emit, ct, onThink); // no function calling here: single-shot path
+
+            outcome.Attempted = true;
+            JArray tools;
+            try
+            {
+                await McpBridge.EnsureStartedAsync();
+                tools = await McpBridge.ListToolsAsync();
+                if (tools.Count == 0) throw new McpBridge.McpException("tool list came back empty.");
+            }
+            catch (Exception ex)
+            {
+                outcome.Error = "Couldn't start the SolidWorks-MCP server: " + ex.Message;
+                return outcome;
+            }
+
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var fns = new JArray();
+            foreach (var t in tools)
+            {
+                var o = t as JObject; if (o == null) continue;
+                string n = (string)o["name"]; if (string.IsNullOrWhiteSpace(n)) continue;
+                names.Add(n);
+                fns.Add(new JObject
+                {
+                    ["type"] = "function",
+                    ["function"] = new JObject
+                    {
+                        ["name"] = n,
+                        ["description"] = (((string)o["description"]) ?? "").Split('\n')[0].Trim(),
+                        ["parameters"] = o["inputSchema"] ?? new JObject { ["type"] = "object" }
+                    }
+                });
+            }
+            string toolsJson = fns.ToString(Newtonsoft.Json.Formatting.None);
+            string model = ProviderFactory.CurrentModel();
+
+            var session = EnsureSession(sid);
+            lock (session.Msgs)
+            {
+                if (session.Msgs.Count == 0 || (string)session.Msgs[0]["role"] != "system")
+                    session.Msgs.Insert(0, new JObject { ["role"] = "system", ["content"] = AgentSystemPrompt });
+                session.TurnStarts.Add(session.Msgs.Count);
+                session.Msgs.Add(new JObject { ["role"] = "user", ["content"] = (intent ?? "").Trim() });
+                AgentMsgCount = session.Msgs.Count;
+            }
+            SaveSession(sid);
+            await CompactHistoryIfNeeded(client, sid, model);
+
+            var opts = new ProviderOptions { MaxTokens = 16000, Temperature = 0, Model = model, ToolsJson = toolsJson, ToolChoice = "auto" };
+            var log = new List<string>();
+            int executed = 0;
+            try
+            {
+                for (int iter = 1; iter <= 20; iter++)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    await emit("Builder", "thinking through the build (step " + iter + ")", "run", null);
+                    List<JObject> hist;
+                    lock (session.Msgs) { hist = new List<JObject>(session.Msgs); }
+                    ProviderResult res = await StreamAgentTurn(client, new JArray(hist.ToArray()), opts, ct, onThink);
+                    if (res == null) throw new Exception("empty provider response");
+                    try { IntentRate.Note(res.TokIn, res.TokOut); } catch { }
+                    AgentTokCount += res.TokIn + res.TokOut;
+
+                    if (res.ToolCalls == null || res.ToolCalls.Count == 0)
+                    {
+                        if (executed == 0) // model won't use tools: single-shot JSON path instead
+                            return await Run(intent, emit, ct, onThink);
+                        string summary = (res.Text ?? "").Trim();
+                        if (summary.Length > 600) summary = summary.Substring(0, 600) + "…";
+                        outcome.Summary = "Built in " + executed + " tool steps" +
+                            (string.IsNullOrEmpty(summary) ? "." : ". " + summary);
+                        SaveSession(sid);
+                        return outcome;
+                    }
+
+                    // Record the assistant turn (with tool calls) so the next iteration observes it.
+                    var asst = new JObject { ["role"] = "assistant", ["content"] = res.Text ?? "" };
+                    var tcArr = new JArray();
+                    foreach (var c in res.ToolCalls)
+                        tcArr.Add(new JObject { ["id"] = c.Id ?? Guid.NewGuid().ToString("N"), ["type"] = "function", ["function"] = new JObject { ["name"] = c.Name, ["arguments"] = c.ArgumentsJson ?? "{}" } });
+                    asst["tool_calls"] = tcArr;
+                    lock (session.Msgs) { session.Msgs.Add(asst); AgentMsgCount = session.Msgs.Count; }
+
+                    foreach (var c in res.ToolCalls)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        if (string.IsNullOrWhiteSpace(c.Name) || !names.Contains(c.Name))
+                        {
+                            lock (session.Msgs) { session.Msgs.Add(new JObject { ["role"] = "tool", ["tool_call_id"] = c.Id, ["content"] = "ERROR: unknown tool '" + c.Name + "'. Use only listed tools." }); }
+                            continue;
+                        }
+                        JObject args;
+                        try { args = JObject.Parse(string.IsNullOrWhiteSpace(c.ArgumentsJson) ? "{}" : c.ArgumentsJson); }
+                        catch { args = new JObject(); }
+                        executed++;
+                        await emit("Builder", "step " + executed + ": " + c.Name, "run", null);
+                        // Cancellable even mid-flight: an orphaned server call is discarded, never applied twice.
+                        var callTask = McpBridge.CallToolAsync(c.Name, args);
+                        var finished = await Task.WhenAny(callTask, Task.Delay(-1, ct));
+                        if (finished != callTask) throw new OperationCanceledException(ct);
+                        McpBridge.ToolResult r;
+                        try { r = await callTask; }
+                        catch (Exception ex) { r = new McpBridge.ToolResult { Ok = false, Text = "transport failed: " + ex.Message }; }
+                        string text = r.Text ?? "";
+                        if (text.Length > 2000) text = text.Substring(0, 2000) + "…(truncated)";
+                        log.Add(c.Name + " -> " + (r.Ok ? "ok" : "FAILED"));
+                        lock (session.Msgs) { session.Msgs.Add(new JObject { ["role"] = "tool", ["tool_call_id"] = c.Id, ["content"] = (r.Ok ? "" : "FAILED: ") + text }); AgentMsgCount = session.Msgs.Count; }
+                        if (!r.Ok)
+                        {
+                            // Don't stop: feed the failure back and let the model re-plan around it.
+                            await emit("Builder", c.Name + " missed — re-planning around it", "run", null);
+                        }
+                    }
+                    SaveSession(sid);
+                }
+                outcome.Error = "Stopped after 20 tool steps with the build incomplete (" +
+                    string.Join("; ", log.ToArray()) + ") — what built so far stays open. Simplify or split the request.";
+                SaveSession(sid);
+                return outcome;
+            }
+            catch (OperationCanceledException) { SaveSession(sid); outcome.Error = "INTERRUPTED"; return outcome; }
+            catch (Exception ex)
+            {
+                SaveSession(sid);
+                outcome.Error = "The agent loop failed (" + ex.GetType().Name + ": " + ex.Message + ") — try again or split the request.";
+                return outcome;
+            }
+        }
+
+        // One streamed agent turn: the full history goes over the wire as raw OpenAI messages
+        // (ChatMessage can't carry tool_calls/tool results), deltas stream CoT via onThink.
+        private static async Task<ProviderResult> StreamAgentTurn(
+            IProviderClient client, JArray history, ProviderOptions opts, System.Threading.CancellationToken ct, Action<string, string> onThink)
+        {
+            var oc = client as OpenAiCompatibleClient;
+            if (oc == null) throw new Exception("agent loop needs an OpenAI-compatible provider");
+            var res = await oc.CompleteStreamingRawAsync(history, opts, ct, onThink);
+            return res;
+        }
+
+        private const string AgentSystemPrompt =
+            "You are Forge, a parametric CAD builder driving SolidWorks through tools. ALL dimensions in MILLIMETRES. " +
+            "Rules: start with new_part (or new_assembly for multi-part builds); build the base solid first, then features; " +
+            "observe every tool result and adapt — a failed call means try a different tool or dims, never repeat it verbatim; " +
+            "verify with get_mass_properties or get_bounding_box when done; keep calling tools until the request is fully built; " +
+            "then reply with a short summary including measured dims. No filler steps.";
 
         private static async Task<string> BestEffortVerify()
         {

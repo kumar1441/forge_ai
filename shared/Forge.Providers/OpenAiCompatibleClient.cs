@@ -106,6 +106,11 @@ namespace Forge.Providers
             {
                 if (opts.MaxTokens.HasValue) j["max_tokens"] = opts.MaxTokens.Value;
                 if (opts.Temperature.HasValue) j["temperature"] = opts.Temperature.Value;
+                if (!string.IsNullOrWhiteSpace(opts.ToolsJson))
+                {
+                    try { j["tools"] = JArray.Parse(opts.ToolsJson); } catch { }
+                    j["tool_choice"] = string.IsNullOrWhiteSpace(opts.ToolChoice) ? "auto" : opts.ToolChoice;
+                }
             }
             if (stream) j["stream"] = true;
             return j.ToString(Newtonsoft.Json.Formatting.None);
@@ -124,11 +129,43 @@ namespace Forge.Providers
             string model = (opts != null && !string.IsNullOrWhiteSpace(opts.Model)) ? opts.Model : _defaultModel;
             if (string.IsNullOrWhiteSpace(model))
                 throw new ProviderException("No model configured for provider " + Id + " — set \"model\" in config.json or pass ProviderOptions.Model.");
-
-            string url = BuildUrl(opts);
             string body = BuildBody(messages, opts, model, true);
+            return await CompleteStreamingBodyAsync(body, model, opts, ct, onDelta);
+        }
+
+        /// <summary>
+        /// Same SSE stream, but the message array is supplied raw (JArray) so agent-loop turns can
+        /// carry tool_calls and tool-role results, which ChatMessage cannot represent.
+        /// </summary>
+        public async Task<ProviderResult> CompleteStreamingRawAsync(
+            JArray messages, ProviderOptions opts, CancellationToken ct, Action<string, string> onDelta)
+        {
+            if (messages == null) throw new ArgumentNullException("messages");
+            string model = (opts != null && !string.IsNullOrWhiteSpace(opts.Model)) ? opts.Model : _defaultModel;
+            if (string.IsNullOrWhiteSpace(model))
+                throw new ProviderException("No model configured for provider " + Id + " — set \"model\" in config.json or pass ProviderOptions.Model.");
+            var j = new JObject { ["model"] = model, ["messages"] = messages };
+            if (opts != null)
+            {
+                if (opts.MaxTokens.HasValue) j["max_tokens"] = opts.MaxTokens.Value;
+                if (opts.Temperature.HasValue) j["temperature"] = opts.Temperature.Value;
+                if (!string.IsNullOrWhiteSpace(opts.ToolsJson))
+                {
+                    try { j["tools"] = JArray.Parse(opts.ToolsJson); } catch { }
+                    j["tool_choice"] = string.IsNullOrWhiteSpace(opts.ToolChoice) ? "auto" : opts.ToolChoice;
+                }
+            }
+            j["stream"] = true;
+            return await CompleteStreamingBodyAsync(j.ToString(Newtonsoft.Json.Formatting.None), model, opts, ct, onDelta);
+        }
+
+        private async Task<ProviderResult> CompleteStreamingBodyAsync(
+            string body, string model, ProviderOptions opts, CancellationToken ct, Action<string, string> onDelta)
+        {
+            string url = BuildUrl(opts);
             var contentAcc = new StringBuilder();
             var reasonAcc = new StringBuilder();
+            var toolParts = new System.Collections.Generic.Dictionary<int, ToolCall>();
             string gotModel = null;
             int tokIn = 0, tokOut = 0;
 
@@ -178,12 +215,30 @@ namespace Forge.Providers
                                 }
                                 var choices = evt["choices"] as JArray;
                                 var choice = choices != null && choices.Count > 0 ? choices[0] : null;
-                                var delta = choice != null ? choice["delta"] : null;
-                                if (delta == null) continue;
-                                string dc = (string)delta["content"];
-                                string dr = (string)delta["reasoning_content"] ?? (string)delta["reasoning"];
-                                if (!string.IsNullOrEmpty(dc)) { contentAcc.Append(dc); try { if (onDelta != null) onDelta("content", dc); } catch { } }
-                                if (!string.IsNullOrEmpty(dr)) { reasonAcc.Append(dr); try { if (onDelta != null) onDelta("reasoning", dr); } catch { } }
+                            var delta = choice != null ? choice["delta"] : null;
+                            if (delta == null) continue;
+                            string dc = (string)delta["content"];
+                            string dr = (string)delta["reasoning_content"] ?? (string)delta["reasoning"];
+                            if (!string.IsNullOrEmpty(dc)) { contentAcc.Append(dc); try { if (onDelta != null) onDelta("content", dc); } catch { } }
+                            if (!string.IsNullOrEmpty(dr)) { reasonAcc.Append(dr); try { if (onDelta != null) onDelta("reasoning", dr); } catch { } }
+                            var tcs = delta["tool_calls"] as JArray;
+                            if (tcs != null)
+                            {
+                                foreach (var tc in tcs)
+                                {
+                                    var o = tc as JObject; if (o == null) continue;
+                                    int idx = (int?)o["index"] ?? 0;
+                                    ToolCall part;
+                                    if (!toolParts.TryGetValue(idx, out part)) { part = new ToolCall(); toolParts[idx] = part; }
+                                    string tid = (string)o["id"]; if (!string.IsNullOrEmpty(tid)) part.Id = tid;
+                                    var fn = o["function"] as JObject;
+                                    if (fn != null)
+                                    {
+                                        string fnn = (string)fn["name"]; if (!string.IsNullOrEmpty(fnn)) part.Name = fnn;
+                                        string frag = (string)fn["arguments"]; if (frag != null) part.ArgumentsJson = (part.ArgumentsJson ?? "") + frag;
+                                    }
+                                }
+                            }
                             }
                             catch { continue; }
                         }
@@ -193,9 +248,10 @@ namespace Forge.Providers
 
             string content = contentAcc.ToString();
             if (string.IsNullOrWhiteSpace(content)) content = reasonAcc.ToString();
-            if (string.IsNullOrWhiteSpace(content))
+            var calls = new System.Collections.Generic.List<ToolCall>(toolParts.Values);
+            if (string.IsNullOrWhiteSpace(content) && calls.Count == 0)
                 throw new ProviderException("Provider returned no content.");
-            return new ProviderResult { Text = content, TokIn = tokIn, TokOut = tokOut, Model = gotModel ?? model };
+            return new ProviderResult { Text = content, TokIn = tokIn, TokOut = tokOut, Model = gotModel ?? model, ToolCalls = calls };
         }
 
         private static ProviderResult Parse(string text, string fallbackModel)

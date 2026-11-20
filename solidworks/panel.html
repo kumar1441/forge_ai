@@ -244,6 +244,13 @@
   .modelpop .mrefresh:hover { border-color:var(--accent); color:var(--ink); }
   .modelpop .mempty { padding:18px 12px; text-align:center; color:var(--faint); font-size:12.5px; }
 
+  /* transcript compaction (Kilo-style: older turns collapse into an expandable summary) */
+  .compact { border:1px dashed var(--line); border-radius:12px; background:var(--surface); overflow:hidden; }
+  .compact .chead { padding:8px 12px; cursor:pointer; color:var(--faint); font-size:11.5px; user-select:none; }
+  .compact .chead:hover { color:var(--soft); }
+  .compact .cbody { padding:0 8px 8px; display:flex; flex-direction:column; gap:8px; }
+  .compact .csum { padding:2px 12px 6px; color:var(--soft); white-space:pre-wrap; font-size:12px; }
+
   /* streaming chain-of-thought (Kilo-style thinking block) */
   .think { border:1px solid var(--line); border-radius:12px; background:var(--surface);
     font-size:12.5px; color:var(--soft); overflow:hidden; }
@@ -303,6 +310,31 @@
   .settings .sclose:hover { color:var(--ink); }
   .settings .sfoot { font-size:10.5px; color:var(--faint); padding:2px 6px 4px; }
 
+  /* top-bar context pill + usage dropdown (Kilo-style) */
+  .ctxpill { background:var(--raised); border:1px solid var(--line); border-right:none; border-radius:8px 0 0 8px;
+    color:var(--soft); font:inherit; font-size:11.5px; padding:1px 4px 1px 9px; cursor:pointer; line-height:1.4; }
+  .ctxpill:hover { color:var(--ink); }
+  .ctxarrow { border-radius:0 8px 8px 0 !important; font-size:10px !important; padding:1px 8px 1px 4px !important; }
+  .ctxpop { position:absolute; top:52px; right:14px; z-index:60; width:270px;
+    background:var(--raised); border:1px solid var(--line); border-radius:12px; padding:12px;
+    display:flex; flex-direction:column; gap:8px; box-shadow:0 12px 40px rgba(0,0,0,.5); }
+  .ctxpop .crow { display:flex; justify-content:space-between; font-size:12px; color:var(--soft); }
+  .ctxpop .crow b { color:var(--ink); font-weight:600; }
+  .ctxpop .cbar { height:6px; border-radius:3px; background:var(--bg); overflow:hidden; }
+  .ctxpop .cbar i { display:block; height:100%; background:var(--accent); border-radius:3px; }
+  /* transcript search bar */
+  .findbar { display:flex; align-items:center; gap:6px; padding:8px 14px; border-bottom:1px solid var(--line);
+    background:var(--surface); }
+  .findbar input { flex:1; background:var(--bg); border:1px solid var(--line); border-radius:8px;
+    padding:6px 9px; font:inherit; font-size:12.5px; color:var(--ink); outline:none; }
+  .findbar input:focus { border-color:var(--accent); }
+  .findbar button { background:none; border:1px solid var(--line); border-radius:7px; color:var(--soft);
+    font:inherit; font-size:11.5px; padding:3px 9px; cursor:pointer; }
+  .findbar button:hover { border-color:var(--accent); color:var(--ink); }
+  .findbar .fcount { font-size:11px; color:var(--faint); min-width:44px; text-align:center; }
+  mark.fhl { background:var(--amber-soft); color:var(--ink); border-radius:3px; padding:0 1px; }
+  mark.fhl.cur { background:var(--accent); color:#fff; }
+
   /* chat history popover (Kilo-style: search + session list + restore/delete) */
   .history { position:absolute; top:52px; right:14px; z-index:60; width:300px; max-width:92vw;
     background:var(--raised); border:1px solid var(--line); border-radius:12px; padding:10px;
@@ -330,6 +362,9 @@
     <div class="headtop" id="headtop">
       <div class="brand"><b><span>◆</span> Forge</b></div>
       <div class="headacts">
+        <button class="ctxpill" id="ctxpill" title="Session context used — click for exact usage">0%</button><button class="gear ctxarrow" id="ctxarrow" title="Usage details">▾</button>
+        <button class="gear" id="searchbtn" title="Search this chat">🔍</button>
+        <button class="gear" id="compactbtn" title="Compact older turns">🗜</button>
         <button class="gear" id="histbtn" title="Chat history">🕘</button>
         <button class="gear" id="gearbtn" title="Settings">⚙</button>
         <button class="clearbtn" id="clearbtn" title="Clear the panel for a fresh recording take">Clear</button>
@@ -367,6 +402,23 @@
       <div class="hlist" id="hlist"></div>
       <button class="hnew" id="hnew">+ New chat</button>
     </div>
+    <div class="ctxpop" id="ctxpop" style="display:none">
+      <div class="crow"><span>Session context</span><b id="ctxpct">–</b></div>
+      <div class="cbar"><i id="ctxbar" style="width:0%"></i></div>
+      <div class="crow"><span>Local storage</span><b id="ctxstore">–</b></div>
+      <div class="crow"><span>Turns (live / stored)</span><b id="ctxturns">–</b></div>
+      <div class="crow"><span>Provider · model</span><b id="ctxprov">–</b></div>
+      <div class="crow"><span>Tokens today (in / out)</span><b id="ctxtok">–</b></div>
+    <div class="crow"><span>Agent history</span><b id="ctxagent">–</b></div>
+    </div>
+  </div>
+
+  <div class="findbar" id="findbar" style="display:none">
+    <input id="findinput" placeholder="Search this chat…" autocomplete="off" />
+    <span class="fcount" id="fcount"></span>
+    <button id="fprev" title="Previous match">↑</button>
+    <button id="fnext" title="Next match">↓</button>
+    <button id="fx" title="Close search">✕</button>
   </div>
 
   <div class="transcript" id="transcript">
@@ -420,13 +472,14 @@
   const grow = () => { intent.style.height = "auto"; intent.style.height = Math.min(intent.scrollHeight,200) + "px"; };
   intent.addEventListener("input", () => { grow(); preEnhance = null; $("enhanceUndo").style.display = "none"; });
 
-  function refresh() { post({ action: "readModel" }); post({ action: "getProvider" }); }
+  function refresh() { post({ action: "readModel" }); post({ action: "getProvider" }); renderCtx(); }
   window.addEventListener("DOMContentLoaded", refresh);
 
   // Clear the panel for a fresh recording take: wipe the transcript + reset Forge's pending threads.
   function clearPanel() {
     stopWords();
     working = false; turn = null; sessionId = null;
+    post({ action: "reset" }); // fresh agent conversation host-side too
     transcript.innerHTML = '<div class="empty" id="empty">Forge <b>knows</b> your part.<br>' +
       'Forge <b>understands</b> what you mean.<br>Forge <b>gets it done.</b></div>';
     hideChip();
@@ -436,6 +489,91 @@
     intent.focus();
   }
   $("clearbtn").addEventListener("click", clearPanel);
+  // ---- top bar: context pill + usage dropdown (Kilo-style) + transcript search ----
+  let usage = { in: 0, out: 0 };
+  function storageBytes() {
+    let n = 0;
+    try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); const v = localStorage.getItem(k); n += (k.length + (v ? v.length : 0)) * 2; } } catch (e) {}
+    return n;
+  }
+  const fmtKB = (b) => b < 1024 ? b + " B" : b < 1048576 ? (b / 1024).toFixed(1) + " KB" : (b / 1048576).toFixed(2) + " MB";
+  function renderCtx() {
+    const cap = 5 * 1024 * 1024, used = storageBytes();
+    const pct = Math.min(99, Math.floor(used / cap * 100));
+    $("ctxpill").textContent = pct + "%";
+    $("ctxpill").title = `Session context used (${fmtKB(used)} of ~5 MB local storage) — click for exact usage`;
+    let live = 0; try { live = transcript.querySelectorAll(":scope > .turn").length; } catch (e) {}
+    let stored = 0; try { stored = loadSessions().reduce((a, s) => a + s.turns.length, 0); } catch (e2) {}
+    $("ctxpct").textContent = pct + "%";
+    $("ctxbar").style.width = pct + "%";
+    $("ctxstore").textContent = fmtKB(used) + " / ~5 MB";
+    $("ctxturns").textContent = live + " / " + stored;
+    $("ctxprov").textContent = `${curSlug || "?"} · ${shortModel(curModel) || "–"}`;
+    $("ctxtok").textContent = `${Number(usage.in || 0).toLocaleString()} / ${Number(usage.out || 0).toLocaleString()}`;
+    $("ctxagent").textContent = `${usage.agentMsgs || 0} msgs · ${Number(usage.agentTokens || 0).toLocaleString()} tok`;
+  }
+  function toggleCtx(force) {
+    const p = $("ctxpop");
+    const show = force !== undefined ? force : p.style.display === "none";
+    p.style.display = show ? "flex" : "none";
+    if (show) { post({ action: "usage" }); renderCtx(); }
+  }
+  $("ctxpill").addEventListener("click", (e) => { e.stopPropagation(); toggleCtx(); });
+  $("ctxarrow").addEventListener("click", (e) => { e.stopPropagation(); toggleCtx(); });
+  $("compactbtn").addEventListener("click", () => compactTranscript(false));
+  document.addEventListener("click", (e) => { if (!e.target.closest("#ctxpop") && !e.target.closest("#ctxpill") && !e.target.closest("#ctxarrow")) $("ctxpop").style.display = "none"; });
+
+  // transcript find: highlight all matches, jump between them
+  let findMarks = [], findIdx = -1;
+  function clearFind() {
+    findMarks.forEach(m => { try { m.replaceWith(document.createTextNode(m.textContent)); } catch (e) {} });
+    findMarks = []; findIdx = -1; $("fcount").textContent = "";
+    try { transcript.normalize(); } catch (e) {}
+  }
+  function paintFind() {
+    findMarks.forEach(m => m.classList.remove("cur"));
+    if (findIdx >= 0 && findMarks[findIdx]) { findMarks[findIdx].classList.add("cur"); try { findMarks[findIdx].scrollIntoView({ block: "center" }); } catch (e) {} }
+    $("fcount").textContent = findMarks.length ? `${findIdx + 1}/${findMarks.length}` : ( $("findinput").value ? "0" : "" );
+  }
+  function runFind() {
+    clearFind();
+    const q = $("findinput").value;
+    if (!q) return;
+    const ql = q.toLowerCase();
+    const walker = document.createTreeWalker(transcript, NodeFilter.SHOW_TEXT);
+    const nodes = []; let n;
+    while ((n = walker.nextNode())) { if (n.nodeValue.toLowerCase().includes(ql)) nodes.push(n); }
+    nodes.forEach(tn => {
+      const frag = document.createDocumentFragment();
+      const val = tn.nodeValue, low = val.toLowerCase();
+      let i = 0, pos;
+      while ((pos = low.indexOf(ql, i)) >= 0) {
+        if (pos > i) frag.append(document.createTextNode(val.slice(i, pos)));
+        const mk = document.createElement("mark"); mk.className = "fhl"; mk.textContent = val.slice(pos, pos + q.length);
+        frag.append(mk); findMarks.push(mk); i = pos + q.length;
+      }
+      if (i < val.length) frag.append(document.createTextNode(val.slice(i)));
+      tn.replaceWith(frag);
+    });
+    if (findMarks.length) { findIdx = 0; paintFind(); } else { $("fcount").textContent = "0"; }
+  }
+  function toggleFind(force) {
+    const f = $("findbar");
+    const show = force !== undefined ? force : f.style.display === "none";
+    f.style.display = show ? "flex" : "none";
+    if (show) { setTimeout(() => $("findinput").focus(), 0); }
+    else { clearFind(); $("findinput").value = ""; intent.focus(); }
+  }
+  $("searchbtn").addEventListener("click", (e) => { e.stopPropagation(); toggleFind(); });
+  $("findinput").addEventListener("input", runFind);
+  $("findinput").addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") { e.preventDefault(); if (findMarks.length) { findIdx = (findIdx + (e.shiftKey ? findMarks.length - 1 : 1)) % findMarks.length; paintFind(); } }
+    else if (e.key === "Escape") toggleFind(false);
+  });
+  $("fprev").addEventListener("click", () => { if (findMarks.length) { findIdx = (findIdx + findMarks.length - 1) % findMarks.length; paintFind(); } });
+  $("fnext").addEventListener("click", () => { if (findMarks.length) { findIdx = (findIdx + 1) % findMarks.length; paintFind(); } });
+  $("fx").addEventListener("click", () => toggleFind(false));
   $("histbtn").addEventListener("click", (e) => {
     e.stopPropagation();
     const h = $("history");
@@ -490,7 +628,9 @@
     if (e.key === "Escape") {
       settingsEl.style.display = "none";
       if ($("history")) $("history").style.display = "none";
-      if (working) { e.stopPropagation(); post({ action: "stop" }); }
+      if ($("ctxpop")) $("ctxpop").style.display = "none";
+      if ($("findbar") && $("findbar").style.display !== "none") toggleFind(false);
+      if (working || enhanceActive) { e.stopPropagation(); post({ action: "stop" }); }
       if ($("modelpop")) closeModels(false);
       const nope = document.querySelector(".gate .nope");   // FDL 4.4: Esc = "Not yet"
       if (nope) nope.click();
@@ -598,6 +738,14 @@
     sessionId = id;
     hideChip(); hIdx = -1; draftStash = null; preEnhance = null; $("enhanceUndo").style.display = "none";
     $("history").style.display = "none";
+    post({ action: "loadHistory", sid: id });
+    const rt = [...transcript.querySelectorAll(":scope > .turn")];
+    if (rt.length > 20) {
+      const old = rt.slice(0, rt.length - 10);
+      const { block, sum, body } = buildCompactBlock(old, null);
+      sum.textContent = titlesDigest(body);
+      transcript.insertBefore(block, rt[rt.length - 10]);
+    }
     renderHistoryList(); scroll(true);
   }
 
@@ -614,9 +762,11 @@
   });
 
   function run(text) {
+    if (text.startsWith("/")) { intent.value = ""; grow(); slashRun(text); return; }
     if (working) return;
     working = true;
     lastPrompt = text;
+    if (!sessionId) sessionId = "s" + Date.now();
     histList.push(text); histSave(); hIdx = -1; draftStash = null;
     const e = $("empty"); if (e) e.remove();
 
@@ -645,8 +795,79 @@
     intent.value = ""; grow();
     preEnhance = null; $("enhanceUndo").style.display = "none";
 
-    post({ action: "generate", intent: text });
+    post({ action: "generate", intent: text, sid: sessionId });
     if (!hasBridge) demoRun(text);   // standalone browser preview
+  }
+
+  // ---- slash commands (Kilo-style: local, instant, no LLM round-trip) ----
+  const SLASH_HELP = "/compact — summarize older turns into an expandable block\n/clear, /new — start a fresh chat\n/regen — re-run the last prompt\n/model — open the model picker\n/provider [slug] — switch provider (deepseek|openrouter|nvidia|openai|anthropic|ollama) or open settings\n/history — open chat history\n/help — this list";
+  function slashRun(text) {
+    const parts = text.slice(1).trim().split(/\s+/);
+    const cmd = (parts[0] || "").toLowerCase(), args = parts.slice(1);
+    switch (cmd) {
+      case "clear": case "new": clearPanel(); break;
+      case "help": systemCard(SLASH_HELP.replace(/</g, "&lt;").replace(/\n/g, "<br>")); break;
+      case "regen": case "regenerate":
+        if (!working && lastPrompt && !lastPrompt.startsWith("/")) run(lastPrompt);
+        else systemCard("Nothing to regenerate yet.");
+        break;
+      case "model": openModels(); break;
+      case "provider":
+        if (args[0]) { chatModels = []; renderModelList($("msearch") ? $("msearch").value : ""); post({ action: "setProvider", provider: args[0].toLowerCase() }); }
+        else { settingsEl.style.display = "flex"; }
+        break;
+      case "history": $("history").style.display = "flex"; renderHistoryList(); setTimeout(() => $("hsearch").focus(), 0); break;
+      case "compact": compactTranscript(false); break;
+      default: systemCard(`Unknown command <b>/${cmd.replace(/</g, "&lt;")}</b>.<br>${SLASH_HELP.replace(/</g, "&lt;").replace(/\n/g, "<br>")}`); break;
+    }
+    scroll();
+  }
+
+  // ---- transcript compaction ----
+  let pendingCompact = null; // { sum, body } awaiting the host summary
+  function buildCompactBlock(oldTurns, summaryText) {
+    const block = document.createElement("div"); block.className = "compact";
+    const hd = document.createElement("div"); hd.className = "chead";
+    const ht = document.createElement("span");
+    ht.textContent = `🗜 ${oldTurns.length} earlier turns compacted — click to expand`;
+    hd.appendChild(ht);
+    const bd = document.createElement("div"); bd.className = "cbody"; bd.style.display = "none";
+    const sum = document.createElement("div"); sum.className = "csum";
+    if (summaryText) sum.textContent = summaryText;
+    bd.appendChild(sum);
+    oldTurns.forEach(t => bd.appendChild(t));
+    hd.addEventListener("click", () => { bd.style.display = bd.style.display === "none" ? "" : "none"; scroll(); });
+    block.append(hd, bd);
+    return { block, sum, body: bd };
+  }
+  function titlesDigest(body) {
+    return [...body.querySelectorAll(":scope > .turn .bubble.user")]
+      .map((b, i) => `${i + 1}. ${b.textContent.slice(0, 80)}`).join("\n");
+  }
+  function compactTranscript(auto) {
+    const turns = [...transcript.querySelectorAll(":scope > .turn")];
+    const keep = 10;
+    if (turns.length <= keep + 1) { if (!auto) systemCard("Nothing to compact — chat is short."); return; }
+    const old = turns.slice(0, turns.length - keep);
+    const digest = old.map(t => {
+      const q = t.querySelector(".bubble.user")?.textContent || "";
+      const a = (t.querySelector(".forge")?.innerText || "").slice(0, 200);
+      return "Q: " + q + "\nA: " + a;
+    }).join("\n---\n");
+    const { block, sum, body } = buildCompactBlock(old, hasBridge ? "Summarizing…" : null);
+    transcript.insertBefore(block, turns[turns.length - keep]);
+    if (hasBridge) {
+      pendingCompact = { sum, body };
+      post({ action: "compact", text: digest.slice(0, 12000) });
+    } else {
+      sum.textContent = titlesDigest(body);
+    }
+    scroll();
+  }
+  function compactFallback() {
+    if (!pendingCompact) return;
+    pendingCompact.sum.textContent = titlesDigest(pendingCompact.body);
+    pendingCompact = null;
   }
 
   function startWords() {
@@ -692,7 +913,8 @@
     }
     if (wasTurn) recordTurn(html);
     working = false; turn = null;
-    scroll();
+    scroll(); renderCtx();
+    if (!pendingCompact && transcript.querySelectorAll(":scope > .turn").length > 40) compactTranscript(true);
   }
 
   function renderRedWave(m) {
@@ -783,6 +1005,10 @@
       ebReset();
     }
 
+    else if (m.type === "compacted") {
+      if (pendingCompact) { pendingCompact.sum.textContent = m.summary || ""; pendingCompact = null; }
+    }
+
     else if (m.type === "enhanced") {      if (preEnhance === null) preEnhance = intent.value;
       intent.value = m.text || ""; grow();
       $("enhanceUndo").style.display = "";
@@ -810,11 +1036,19 @@
       }
     }
 
+    else if (m.type === "usage") {
+      if (!m.error) {
+        usage = { in: m.tokensIn || 0, out: m.tokensOut || 0, agentMsgs: m.agentMsgs || 0, agentTokens: m.agentTokens || 0 };
+        renderCtx();
+      }
+    }
+
     else if (m.type === "provider") {
       if (!m.error) {
         curModel = m.model || null; curDynamic = !!m.dynamic; curSlug = m.slug || null;
         renderPill();
         renderSettings(m);
+        renderCtx();
         $("mrefresh").style.display = curDynamic ? "" : "none";
         if (curDynamic && !chatModels.length) post({ action: "refreshModels" });
       }
@@ -828,6 +1062,7 @@
 
     else if (m.type === "error") {
       if (enhanceActive) ebReset(); // only an in-flight enhance owns the button
+      if (m.localCompact) compactFallback();
       finish(`<div class="err">${(m.message || "").replace(/</g,"&lt;")}</div>`);
     }
 
@@ -1119,8 +1354,9 @@
     const turn = btn.closest(".turn");
     if (!turn) return;
     const bubble = turn.querySelector(".bubble.user");
-    let keep = 0; let psib = turn.previousElementSibling;
-    while (psib) { if (psib.classList && psib.classList.contains("turn")) keep++; psib = psib.previousElementSibling; }
+    const flat = [...transcript.querySelectorAll(".turn")];
+    const keep = Math.max(0, flat.indexOf(turn));
+    post({ action: "revert", sid: sessionId, keep: keep });
     if (sessionId) {
       const all = loadSessions();
       const s = all.find(x => x.id === sessionId);
@@ -1133,7 +1369,6 @@
     preEnhance = null; $("enhanceUndo").style.display = "none";
     turn = null; stopWords();
     intent.focus(); scroll(true);
-    post({ action: "revert" });
   });
 
   $("scrolldown").addEventListener("click", () => {

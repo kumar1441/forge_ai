@@ -18,6 +18,17 @@ namespace Forge.Providers
         public double? Temperature;
         public string Model;
         public string BaseUrlOverride;
+        /// <summary>Serialized JSON array of OpenAI-style {type:function,function:{name,description,parameters}} tools.</summary>
+        public string ToolsJson;
+        public string ToolChoice;
+    }
+
+    /// <summary>A single function call requested by the model in an agentic loop turn.</summary>
+    public class ToolCall
+    {
+        public string Id;
+        public string Name;
+        public string ArgumentsJson;
     }
 
     /// <summary>A successful completion. Never fabricated: on failure CompleteAsync throws or returns null.</summary>
@@ -27,6 +38,7 @@ namespace Forge.Providers
         public long TokIn;
         public long TokOut;
         public string Model;
+        public System.Collections.Generic.List<ToolCall> ToolCalls;
     }
 
     /// <summary>Typed failure for network, HTTP-status, timeout, or parse errors from an LLM provider.</summary>
