@@ -187,7 +187,11 @@
   .err  { font-size:13px; color:var(--red); }
 
   /* composer pinned to the bottom */
-  .composer { border-top:1px solid var(--line); padding:12px 14px 8px; background:var(--bg); }
+  .composer { border-top:1px solid var(--line); padding:12px 14px 8px; background:var(--bg); position:relative; }
+  .scrolldown { position:absolute; right:12px; top:-42px; z-index:60; width:32px; height:32px;
+    border-radius:50%; border:1px solid var(--line); background:var(--raised); color:var(--soft);
+    font-size:15px; cursor:pointer; box-shadow:0 4px 16px rgba(0,0,0,.4); }
+  .scrolldown:hover { border-color:var(--accent); color:var(--ink); }
   .ask { position:relative; }
   textarea {
     width:100%; resize:none; overflow-x:hidden; overflow-y:auto; min-height:48px; max-height:200px;
@@ -240,6 +244,16 @@
   .modelpop .mrefresh:hover { border-color:var(--accent); color:var(--ink); }
   .modelpop .mempty { padding:18px 12px; text-align:center; color:var(--faint); font-size:12.5px; }
 
+  /* streaming chain-of-thought (Kilo-style thinking block) */
+  .think { border:1px solid var(--line); border-radius:12px; background:var(--surface);
+    font-size:12.5px; color:var(--soft); overflow:hidden; }
+  .think .thead { padding:8px 12px; cursor:pointer; display:flex; align-items:center; gap:8px;
+    color:var(--faint); font-size:11.5px; user-select:none; }
+  .think .thead:hover { color:var(--soft); }
+  .think .tbody { padding:0 12px 10px; white-space:pre-wrap; word-break:break-word;
+    max-height:220px; overflow-y:auto; }
+  .think.collapsed .tbody { display:none; }
+
   /* enhance busy state: pill keeps its width, dots wave left-to-right */
   #enhance.busy { color:var(--soft); }
   #enhance .wdot { display:inline-block; font-size:9px; vertical-align:2px; animation:ewave 1.15s infinite; }
@@ -268,6 +282,15 @@
   .settings .srow { display:flex; align-items:center; justify-content:space-between; gap:10px;
     padding:7px 6px; font-size:12.5px; color:var(--ink); }
   .settings .srow label { color:var(--soft); }
+  .settings select, .settings input[type="password"] { background:var(--bg); border:1px solid var(--line);
+    border-radius:8px; color:var(--ink); font:inherit; font-size:12px; padding:4px 6px; outline:none; max-width:128px; }
+  .settings select:focus, .settings input[type="password"]:focus { border-color:var(--accent); }
+  .settings .skeywrap { display:flex; gap:4px; align-items:center; }
+  .settings .skeywrap input { width:86px; }
+  .settings .skeywrap button { background:none; border:1px solid var(--line); border-radius:7px; color:var(--soft);
+    font:inherit; font-size:11px; padding:3px 8px; cursor:pointer; }
+  .settings .skeywrap button:hover { border-color:var(--accent); color:var(--ink); }
+  .settings .ssub { font-size:10.5px; color:var(--faint); padding:0 6px 2px; word-break:break-all; }
   .settings .ssep { border-top:1px solid var(--line); margin:4px 0; }
   .toggle { position:relative; width:38px; height:22px; flex:none; cursor:pointer; }
   .toggle input { opacity:0; width:0; height:0; }
@@ -297,7 +320,21 @@
         <span class="toggle"><input type="checkbox" id="themetgl" /><span class="tk"></span></span>
       </div>
       <div class="ssep"></div>
-      <div class="srow"><label>Provider</label><span style="color:var(--faint);font-size:11.5px">BYOK · see README</span></div>
+      <div class="srow"><label>Provider</label>
+        <select id="setprov">
+          <option value="deepseek">DeepSeek</option>
+          <option value="openrouter">OpenRouter</option>
+          <option value="nvidia">NVIDIA NIM</option>
+          <option value="openai">OpenAI</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="ollama">Ollama (local)</option>
+        </select>
+      </div>
+      <div class="srow" id="setkeyrow" style="display:none"><label>API key</label>
+        <span class="skeywrap"><input type="password" id="setkey" placeholder="paste key" autocomplete="off" /><button id="setkeysave" title="Save key (DPAPI-encrypted)">Save</button></span>
+      </div>
+      <div class="ssub" id="setsub"></div>
+      <div class="ssep"></div>
       <div class="srow"><label>Usage data</label>
         <span class="toggle"><input type="checkbox" id="telmtgl" /><span class="tk"></span></span>
       </div>
@@ -314,6 +351,7 @@
   </div>
 
   <div class="composer">
+    <button class="scrolldown" id="scrolldown" title="Jump to latest" style="display:none">↓</button>
     <div class="attachrow">
       <button class="attachbtn" id="attach" title="Attach a file — e.g. the other version to compare against">📎 Attach a file</button>
       <button class="attachbtn modelpick" id="modelpick" title="Switch model"><span class="chev">▲</span><span id="modelname">model</span></button>
@@ -373,6 +411,33 @@
 
   // ---- settings: gear open/close + theme toggle (persists; default = follow OS) ----
   const settingsEl = $("settings"), themeTgl = $("themetgl"), telmTgl = $("telmtgl");
+
+  // ---- settings provider picker (Kilo-style): dropdown + key field when the pick has no key ----
+  let curSlug = null;
+  function renderSettings(m) {
+    const sel = $("setprov"), row = $("setkeyrow"), sub = $("setsub");
+    if (!sel) return;
+    if (m.slug && sel.querySelector(`option[value="${m.slug}"]`)) sel.value = m.slug;
+    curSlug = sel.value;
+    const needsKey = !m.hasKey && sel.value !== "ollama";
+    if (row) row.style.display = needsKey ? "" : "none";
+    if (sub) sub.textContent = (m.baseUrl || "") + (m.model ? " · " + m.model : "") + (m.hasKey ? " · key saved ✓" : " · no key");
+  }
+  $("setprov").addEventListener("change", () => {
+    $("setkey").value = "";
+    chatModels = []; renderModelList($("msearch") ? $("msearch").value : "");
+    post({ action: "setProvider", provider: $("setprov").value });
+  });
+  $("setkeysave").addEventListener("click", () => {
+    const k = $("setkey").value.trim();
+    if (!k) return;
+    post({ action: "saveKey", provider: $("setprov").value, key: k });
+    $("setkey").value = "";
+  });
+  $("setkey").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); $("setkeysave").click(); }
+    e.stopPropagation();
+  });
   function applyTheme() {
     const saved = localStorage.getItem("forge_theme");            // "dark" | "light" | null = follow OS
     const osLight = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches;
@@ -438,12 +503,21 @@
   try { histList = JSON.parse(localStorage.getItem("forge_history")) || []; } catch (e) { histList = []; }
   let hIdx = -1, draftStash = null;
   const histSave = () => { try { localStorage.setItem("forge_history", JSON.stringify(histList.slice(-100))); } catch (e) {} };
-  let turn = null;          // { steps, thinking, result } DOM refs for the active Forge turn
+  let turn = null, thinkEl = null;          // { steps, thinking, result } DOM refs for the active Forge turn
   let wordTimer = null;
   let lastPrompt = "";
 
   function nearBottom() { return transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 60; }
-  function scroll() { transcript.scrollTop = transcript.scrollHeight; }
+  function scroll(force) { if (force || pinned) transcript.scrollTop = transcript.scrollHeight; }
+
+  // Kilo-style pinned follow: track whether the user is at the bottom; streamed content
+  // only auto-follows while pinned, and a ↓ button appears when they've scrolled up to read.
+  let pinned = true;
+  transcript.addEventListener("scroll", () => {
+    pinned = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 60;
+    const sd = $("scrolldown");
+    if (sd) sd.style.display = pinned ? "none" : "";
+  });
 
   function run(text) {
     if (working) return;
@@ -469,8 +543,8 @@
     f.append(steps, thinking, result);
     t.append(u, f);
     transcript.append(t);
-    turn = { steps, thinking, result, tword: thinking.querySelector(".tword") };
-    scroll();
+
+    scroll(true);
     startWords();
 
     // CLEAR the input — like any chat
@@ -584,8 +658,30 @@
       }
     }
 
-    else if (m.type === "enhanced") {
-      if (preEnhance === null) preEnhance = intent.value;
+    else if (m.type === "thinkStart") {
+      thinkEl = document.createElement("div");
+      thinkEl.className = "think";
+      const tn = (m.model ? String(m.model).split("/").pop() : "");
+      thinkEl.innerHTML = "";
+      const hd = document.createElement("div"); hd.className = "thead";
+      hd.textContent = "✨ Thinking" + (tn ? " · " + tn : "") + "… (live)";
+      const bd = document.createElement("div"); bd.className = "tbody";
+      thinkEl.append(hd, bd);
+      hd.addEventListener("click", () => thinkEl.classList.toggle("collapsed"));
+      transcript.appendChild(thinkEl); scroll();
+    }
+    else if (m.type === "think") {
+      if (!thinkEl) return;
+      const bd = thinkEl.querySelector(".tbody");
+      if (bd && m.text) { bd.append(document.createTextNode(m.text)); scroll(); }
+    }
+    else if (m.type === "thinkEnd") {
+      if (!thinkEl) return;
+      const hd = thinkEl.querySelector(".thead");
+      if (hd) hd.textContent = `Thought for ${m.seconds || 0}s — click to collapse`;
+    }
+
+    else if (m.type === "enhanced") {      if (preEnhance === null) preEnhance = intent.value;
       intent.value = m.text || ""; grow();
       $("enhanceUndo").style.display = "";
       ebReset();
@@ -614,8 +710,9 @@
 
     else if (m.type === "provider") {
       if (!m.error) {
-        curModel = m.model || null; curDynamic = !!m.dynamic;
+        curModel = m.model || null; curDynamic = !!m.dynamic; curSlug = m.slug || null;
         renderPill();
+        renderSettings(m);
         $("mrefresh").style.display = curDynamic ? "" : "none";
         if (curDynamic && !chatModels.length) post({ action: "refreshModels" });
       }
@@ -922,8 +1019,12 @@
     if (bubble) { intent.value = bubble.textContent; grow(); }
     preEnhance = null; $("enhanceUndo").style.display = "none";
     turn = null; stopWords();
-    intent.focus(); scroll();
+    intent.focus(); scroll(true);
     post({ action: "revert" });
+  });
+
+  $("scrolldown").addEventListener("click", () => {
+    pinned = true; scroll(true); $("scrolldown").style.display = "none"; intent.focus();
   });
   let preEnhance = null, enhanceActive = false, enhanceTimer = null, enhanceT0 = 0;
   const ebReset = () => {

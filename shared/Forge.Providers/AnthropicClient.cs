@@ -80,6 +80,12 @@ namespace Forge.Providers
             }
         }
 
+        public Task<ProviderResult> CompleteStreamingAsync(
+            IReadOnlyList<ChatMessage> messages, ProviderOptions opts, CancellationToken ct, System.Action<string, string> onDelta)
+        {
+            throw new ProviderException("Streaming is not supported for the Anthropic provider yet — pick an OpenAI-compatible model for live thinking.");
+        }
+
         private string BuildUrl(ProviderOptions opts)
         {
             string root = _baseUrl;

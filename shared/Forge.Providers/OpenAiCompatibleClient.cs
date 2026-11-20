@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Text;
@@ -88,7 +89,7 @@ namespace Forge.Providers
             return root + "/chat/completions";
         }
 
-        private static string BuildBody(IReadOnlyList<ChatMessage> messages, ProviderOptions opts, string model)
+        private static string BuildBody(IReadOnlyList<ChatMessage> messages, ProviderOptions opts, string model, bool stream = false)
         {
             var j = new JObject();
             j["model"] = model;
@@ -106,7 +107,95 @@ namespace Forge.Providers
                 if (opts.MaxTokens.HasValue) j["max_tokens"] = opts.MaxTokens.Value;
                 if (opts.Temperature.HasValue) j["temperature"] = opts.Temperature.Value;
             }
+            if (stream) j["stream"] = true;
             return j.ToString(Newtonsoft.Json.Formatting.None);
+        }
+
+        /// <summary>
+        /// Streaming chat completions (SSE). onDelta fires per chunk as ("reasoning"|"content", text)
+        /// so the UI can print the model's chain-of-thought live, Kilo-style, instead of a dead timer.
+        /// Reasoning deltas come from reasoning_content/reasoning; content deltas are the answer draft.
+        /// Returns the accumulated result (same multi-shape fallbacks as Parse).
+        /// </summary>
+        public async Task<ProviderResult> CompleteStreamingAsync(
+            IReadOnlyList<ChatMessage> messages, ProviderOptions opts, CancellationToken ct, Action<string, string> onDelta)
+        {
+            if (messages == null) throw new ArgumentNullException("messages");
+            string model = (opts != null && !string.IsNullOrWhiteSpace(opts.Model)) ? opts.Model : _defaultModel;
+            if (string.IsNullOrWhiteSpace(model))
+                throw new ProviderException("No model configured for provider " + Id + " — set \"model\" in config.json or pass ProviderOptions.Model.");
+
+            string url = BuildUrl(opts);
+            string body = BuildBody(messages, opts, model, true);
+            var contentAcc = new StringBuilder();
+            var reasonAcc = new StringBuilder();
+            string gotModel = null;
+            int tokIn = 0, tokOut = 0;
+
+            using (var req = new HttpRequestMessage(HttpMethod.Post, url))
+            {
+                if (!string.IsNullOrEmpty(_apiKey))
+                    req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + _apiKey);
+                req.Content = new StringContent(body, Encoding.UTF8, "application/json");
+
+                HttpResponseMessage resp;
+                try { resp = await Http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false); }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                catch (TaskCanceledException) { throw new ProviderException("Provider request timed out."); }
+                catch (HttpRequestException ex) { throw new ProviderException("Provider network failure: " + ex.Message, ex); }
+
+                using (resp)
+                {
+                    if (!resp.IsSuccessStatusCode)
+                    {
+                        string errText = "";
+                        try { errText = await resp.Content.ReadAsStringAsync().ConfigureAwait(false); } catch { }
+                        throw new ProviderException("Provider HTTP " + (int)resp.StatusCode + " (" + resp.StatusCode + "): " + Truncate(errText));
+                    }
+                    using (var stream = await resp.Content.ReadAsStreamAsync().ConfigureAwait(false))
+                    using (var reader = new StreamReader(stream, Encoding.UTF8))
+                    {
+                        string line;
+                        while ((line = await reader.ReadLineAsync().ConfigureAwait(false)) != null)
+                        {
+                            if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
+                            line = line.Trim();
+                            if (line.Length < 5 || !line.StartsWith("data:")) continue;
+                            string data = line.Substring(5).Trim();
+                            if (data == "[DONE]") break;
+                            JObject evt;
+                            try { evt = JObject.Parse(data); }
+                            catch { continue; }
+                            try
+                            {
+                                string mn = (string)evt["model"];
+                                if (!string.IsNullOrWhiteSpace(mn)) gotModel = mn;
+                                var usage = evt["usage"];
+                                if (usage != null)
+                                {
+                                    if (usage["prompt_tokens"] != null) tokIn = (int)usage["prompt_tokens"];
+                                    if (usage["completion_tokens"] != null) tokOut = (int)usage["completion_tokens"];
+                                }
+                                var choices = evt["choices"] as JArray;
+                                var choice = choices != null && choices.Count > 0 ? choices[0] : null;
+                                var delta = choice != null ? choice["delta"] : null;
+                                if (delta == null) continue;
+                                string dc = (string)delta["content"];
+                                string dr = (string)delta["reasoning_content"] ?? (string)delta["reasoning"];
+                                if (!string.IsNullOrEmpty(dc)) { contentAcc.Append(dc); try { if (onDelta != null) onDelta("content", dc); } catch { } }
+                                if (!string.IsNullOrEmpty(dr)) { reasonAcc.Append(dr); try { if (onDelta != null) onDelta("reasoning", dr); } catch { } }
+                            }
+                            catch { continue; }
+                        }
+                    }
+                }
+            }
+
+            string content = contentAcc.ToString();
+            if (string.IsNullOrWhiteSpace(content)) content = reasonAcc.ToString();
+            if (string.IsNullOrWhiteSpace(content))
+                throw new ProviderException("Provider returned no content.");
+            return new ProviderResult { Text = content, TokIn = tokIn, TokOut = tokOut, Model = gotModel ?? model };
         }
 
         private static ProviderResult Parse(string text, string fallbackModel)

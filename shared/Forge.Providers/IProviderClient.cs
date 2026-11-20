@@ -41,5 +41,8 @@ namespace Forge.Providers
     {
         string Id { get; }
         Task<ProviderResult> CompleteAsync(IReadOnlyList<ChatMessage> messages, ProviderOptions opts, CancellationToken ct);
+        /// <summary>Streaming completions (SSE). onDelta fires per chunk as ("reasoning"|"content", text).
+        /// Backends without streaming throw ProviderException.</summary>
+        Task<ProviderResult> CompleteStreamingAsync(IReadOnlyList<ChatMessage> messages, ProviderOptions opts, CancellationToken ct, System.Action<string, string> onDelta);
     }
 }

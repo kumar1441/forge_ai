@@ -297,9 +297,31 @@ namespace Forge.SolidWorks
                     {
                         var cfg = ReadForgeConfig();
                         string p = (string)cfg["provider"];
-                        Send(new { type = "provider", provider = p, baseUrl = (string)cfg["baseUrl"], model = (string)cfg["model"], dynamic = IsDynamicProvider(p) });
+                        string bu = (string)cfg["baseUrl"];
+                        Send(new { type = "provider", slug = PresetSlugFor(p, bu), provider = p, baseUrl = bu, model = (string)cfg["model"], dynamic = IsDynamicProvider(p), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKey(p)) });
                     }
                     catch (Exception ex) { Send(new { type = "provider", error = ex.Message }); }
+                }
+                else if (action == "setProvider")
+                {
+                    string provider = null;
+                    try { provider = (string)msg.provider; } catch { }
+                    try
+                    {
+                        string slug = (provider ?? "").Trim().ToLowerInvariant();
+                        if (slug != "deepseek" && slug != "openrouter" && slug != "openai" && slug != "anthropic" && slug != "ollama" && slug != "nvidia")
+                            throw new Exception("Unknown provider '" + provider + "'.");
+                        var preset = ProviderPresetFor(slug);
+                        var cfg = ReadForgeConfig();
+                        cfg["provider"] = preset.Provider;
+                        cfg["baseUrl"] = preset.BaseUrl;
+                        cfg["model"] = preset.Model;
+                        WriteForgeConfig(cfg);
+                        string p = preset.Provider;
+                        Send(new { type = "provider", slug = slug, provider = p, baseUrl = preset.BaseUrl, model = preset.Model, dynamic = IsDynamicProvider(p), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKey(p)) });
+                        Send(new { type = "answer", answer = "Provider switched to " + slug + " (" + preset.Model + ") — pick another model from the pill if you like." });
+                    }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't switch provider: " + ex.Message }); }
                 }
                 else if (action == "refreshModels")
                 {
@@ -328,7 +350,8 @@ namespace Forge.SolidWorks
                         var cfg = ReadForgeConfig();
                         cfg["model"] = model.Trim();
                         WriteForgeConfig(cfg);
-                        Send(new { type = "provider", provider = (string)cfg["provider"], baseUrl = (string)cfg["baseUrl"], model = (string)cfg["model"], dynamic = IsDynamicProvider((string)cfg["provider"]) });
+                        string sp = (string)cfg["provider"], sbu = (string)cfg["baseUrl"];
+                        Send(new { type = "provider", slug = PresetSlugFor(sp, sbu), provider = sp, baseUrl = sbu, model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKey(sp)) });
                         Send(new { type = "answer", answer = "Model switched to " + model.Trim() + " — it applies to the next run." });
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't switch model: " + ex.Message }); }
@@ -456,6 +479,22 @@ namespace Forge.SolidWorks
             return string.Equals((provider ?? "").Trim(), "openai-compatible", StringComparison.OrdinalIgnoreCase);
         }
 
+        // Map a stored provider/baseUrl back to the onboarding slug so settings can show it
+        // ("nvidia", not the "openai-compatible" client id). Custom endpoints report as-is.
+        private static string PresetSlugFor(string provider, string baseUrl)
+        {
+            string p = (provider ?? "").Trim().ToLowerInvariant();
+            string bu = (baseUrl ?? "").Trim().ToLowerInvariant();
+            if (p == "anthropic") return "anthropic";
+            if (p == "ollama") return "ollama";
+            if (bu.Contains("integrate.api.nvidia.com")) return "nvidia";
+            if (bu.Contains("openrouter.ai")) return "openrouter";
+            if (bu.Contains("api.deepseek.com")) return "deepseek";
+            if (bu.Contains("api.openai.com")) return "openai";
+            if (p == "openai-compatible") return "openai-compatible";
+            return p;
+        }
+
         private static string StoredProviderKey(string provider)
         {
             try { var k = KeyStore.Load(provider); if (!string.IsNullOrWhiteSpace(k)) return k; } catch { }
@@ -531,9 +570,28 @@ namespace Forge.SolidWorks
                     new ChatMessage { Role = "system", Content = EnhanceInstruction },
                     new ChatMessage { Role = "user", Content = "Draft request to enhance, not answer:\n\n" + text.Trim() }
                 };
-                var res = await client.CompleteAsync(msgs,
-                    new ProviderOptions { MaxTokens = 32000, Temperature = 0.2, Model = ProviderFactory.CurrentModel() },
-                    System.Threading.CancellationToken.None);
+                // Stream the chain-of-thought live (Kilo-style) instead of a dead timer: reasoning
+                // deltas print into a thinking block as they arrive; the cleaned result still lands
+                // in the composer for review. Marshalled to the UI thread — the stream runs on IO threads.
+                string picked = ProviderFactory.CurrentModel();
+                var ui = System.Threading.SynchronizationContext.Current;
+                var watch = System.Diagnostics.Stopwatch.StartNew();
+                Send(new { type = "thinkStart", model = picked });
+                var res = await client.CompleteStreamingAsync(msgs,
+                    new ProviderOptions { MaxTokens = 32000, Temperature = 0.2, Model = picked },
+                    System.Threading.CancellationToken.None,
+                    (kind, delta) =>
+                    {
+                        if (kind != "reasoning" || string.IsNullOrEmpty(delta)) return;
+                        try
+                        {
+                            if (ui != null) ui.Post(_ => { try { Send(new { type = "think", text = delta }); } catch { } }, null);
+                            else Send(new { type = "think", text = delta });
+                        }
+                        catch { }
+                    });
+                watch.Stop();
+                Send(new { type = "thinkEnd", seconds = (int)watch.Elapsed.TotalSeconds });
                 string clean = CleanEnhanced(res != null ? res.Text : null);
                 if (string.IsNullOrWhiteSpace(clean)) throw new Exception("empty enhancement");
                 try { IntentRate.Note(res.TokIn, res.TokOut); } catch { }
