@@ -14,14 +14,30 @@ namespace Forge.Providers
     {
         public static IProviderClient Resolve()
         {
+            string unused;
+            return Resolve(out unused);
+        }
+
+        /// <summary>
+        /// Single-read snapshot: the client AND the model come from the same config load, so a
+        /// provider/model switch landing mid-run can never mix one run's key with another run's
+        /// model. Prefer this over Resolve()+CurrentModel() for any multi-call run.
+        /// </summary>
+        public static IProviderClient Resolve(out string model)
+        {
+            model = null;
             JObject cfg = ReadConfig();
             if (cfg == null) return null;
 
-            string provider = (string)cfg["provider"];
+            // Wrong-type config values ({"provider": 5}, arrays, objects) must read as
+            // missing — never throw out of Resolve into the caller's fall-through.
+            string provider = null, baseUrl = null;
+            try { provider = (string)cfg["provider"]; } catch { provider = null; }
             if (string.IsNullOrWhiteSpace(provider)) return null;
-
-            string baseUrl = (string)cfg["baseUrl"];
-            string model = (string)cfg["model"];
+            try { baseUrl = (string)cfg["baseUrl"]; } catch { baseUrl = null; }
+            try { model = (string)cfg["model"]; } catch { model = null; }
+            if (model != null) model = model.Trim();
+            if (model != null && model.Length == 0) model = null;
             // Key: DPAPI store first (settings pane), then the FORGE_PROVIDER_KEY env var.
             // Never from a plaintext field in config.json — keys don't live in files.
             // Slug-aware: keys are stored per onboarding slug ("nvidia"), with the legacy
@@ -52,6 +68,30 @@ namespace Forge.Providers
             }
         }
 
+        /// <summary>
+        /// Cheap model for rewrite chores (enhance, compaction summaries) — Kilo parity: small
+        /// model first, main-model fallback. Only returns models known to exist; otherwise null
+        /// and the caller keeps the current model.
+        /// </summary>
+        public static string GetSmallModel(string provider, string baseUrl)
+        {
+            string bu = (baseUrl ?? "").Trim().ToLowerInvariant();
+            if (bu.Contains("api.deepseek.com")) return "deepseek-chat";
+            if (bu.Contains("api.openai.com")) return "gpt-4o-mini";
+            return null;
+        }
+
+        /// <summary>Small model for the current config (rewrite chores), or null to keep current.</summary>
+        public static string SmallModelForCurrentConfig()
+        {
+            try
+            {
+                JObject cfg = ReadConfig();
+                if (cfg == null) return null;
+                return GetSmallModel((string)cfg["provider"], (string)cfg["baseUrl"]);
+            }
+            catch { return null; }
+        }
         /// <summary>The model currently selected (model picker writes config.json["model"]).</summary>
         public static string CurrentModel()
         {

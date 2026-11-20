@@ -237,18 +237,23 @@ namespace Forge.SolidWorks
                     if (string.IsNullOrWhiteSpace(text))
                     { Send(new { type = "error", message = "Nothing to compact." }); return; }
                     IProviderClient c2;
-                    try { c2 = ProviderFactory.Resolve(); } catch { c2 = null; }
+                    string compactModel;
+                    try { c2 = ProviderFactory.Resolve(out compactModel); } catch { c2 = null; compactModel = null; }
                     if (c2 == null)
                     { Send(new { type = "error", message = "Compaction needs an LLM provider — using local titles instead.", localCompact = true }); return; }
                     try
                     {
+                        // A hostile/pasted transcript must not become a token blowup: summarize the
+                        // recent tail (older turns matter less than what was just built).
+                        string compactText = text.Trim();
+                        if (compactText.Length > 8000) compactText = "…(truncated) " + compactText.Substring(compactText.Length - 8000);
                         var msgs = new List<ChatMessage>
                         {
                             new ChatMessage { Role = "system", Content = "Summarize this CAD assistant chat into 5-10 short bullets: what was built or changed, key dims and models, open issues. Plain text, no fences, no commentary." },
-                            new ChatMessage { Role = "user", Content = text.Trim() }
+                            new ChatMessage { Role = "user", Content = compactText }
                         };
                         var res = await c2.CompleteAsync(msgs,
-                            new ProviderOptions { MaxTokens = 1000, Temperature = 0.2, Model = ProviderFactory.CurrentModel() },
+                            new ProviderOptions { MaxTokens = 1000, Temperature = 0.2, Model = ProviderFactory.SmallModelForCurrentConfig() ?? compactModel },
                             System.Threading.CancellationToken.None);
                         string s = res != null ? res.Text : null;
                         if (!string.IsNullOrWhiteSpace(s))
@@ -685,8 +690,11 @@ namespace Forge.SolidWorks
             };
             try
             {
+                // A hostile panel message can post a 100k-entry array: cap what we stat.
+                int postedSeen = 0;
                 if (posted != null) foreach (var t in posted)
                 {
+                    if (++postedSeen > 100) break;
                     string s = t != null ? t.ToString() : null;
                     if (!string.IsNullOrWhiteSpace(s)) add(s);
                 }
@@ -961,12 +969,19 @@ namespace Forge.SolidWorks
         {
             if (string.IsNullOrWhiteSpace(text))
             {
-                Send(new { type = "enhanced", text = "Describe what to build or change — e.g. 'a wall-mount bracket 80x60x6 with 2 M6 holes'. Then ✨ Enhance turns it into a concrete spec; review, edit, send." });
+                Send(new { type = "enhanced", text = "Describe what to build or change — e.g. 'a wall-mount bracket 100x80x6 with 2 M6 holes'. Then ✨ Enhance turns it into a concrete spec; review, edit, send." });
+                return;
+            }
+            // Same blob policy as Generate: fail closed before the streaming call.
+            if (text.Length > 4000)
+            {
+                Send(new { type = "error", message = "That draft is too long (" + text.Length + " chars, cap is 4000) — trim it to the key dims, then ✨ again." });
                 return;
             }
             IProviderClient client;
-            try { client = ProviderFactory.Resolve(); }
-            catch { client = null; }
+            string picked;
+            try { client = ProviderFactory.Resolve(out picked); }
+            catch { client = null; picked = null; }
             if (client == null)
             {
                 Send(new { type = "error", message = "Enhance needs an LLM provider — save a key in the welcome screen first, then try again." });
@@ -976,6 +991,13 @@ namespace Forge.SolidWorks
             try { if (_enhanceCts != null) _enhanceCts.Dispose(); } catch { }
             _enhanceCts = new System.Threading.CancellationTokenSource();
             var ect = _enhanceCts.Token;
+            // Small model for rewrites (Kilo parity): cheap + fast, falls back to the picked model
+            // when no known-cheap model exists for this provider. Temp 0.7 like Kilo (rewrite
+            // wants a little variance, not determinism).
+            string eprovider = null, ebase = null;
+            try { var ecfg = ReadForgeConfig(); eprovider = (string)ecfg["provider"]; ebase = (string)ecfg["baseUrl"]; } catch { }
+            string esmall = ProviderFactory.GetSmallModel(eprovider, ebase);
+            string useModel = string.IsNullOrWhiteSpace(esmall) ? picked : esmall;
             try
             {
                 var msgs = new List<ChatMessage>
@@ -986,15 +1008,15 @@ namespace Forge.SolidWorks
                 // Stream the chain-of-thought live (Kilo-style) instead of a dead timer: reasoning
                 // deltas print into a thinking block as they arrive; the cleaned result still lands
                 // in the composer for review. Marshalled to the UI thread — the stream runs on IO threads.
-                string picked = ProviderFactory.CurrentModel();
+                // picked is the run's Resolve snapshot: a picker switch mid-stream can't mix models.
                 var ui = System.Threading.SynchronizationContext.Current;
                 var watch = System.Diagnostics.Stopwatch.StartNew();
-                Send(new { type = "thinkStart", model = picked, label = "Enhancing" });
+                Send(new { type = "thinkStart", model = useModel, label = "Enhancing" });
                 ProviderResult res;
                 try
                 {
                     res = await client.CompleteStreamingAsync(msgs,
-                        new ProviderOptions { MaxTokens = 32000, Temperature = 0.2, Model = picked },
+                        new ProviderOptions { MaxTokens = 32000, Temperature = 0.7, Model = useModel },
                         ect,
                         (kind, delta) =>
                         {
@@ -1011,7 +1033,7 @@ namespace Forge.SolidWorks
                 {
                     // Non-streaming backends (Anthropic): same prompt as one unary call, no live deltas.
                     res = await client.CompleteAsync(msgs,
-                        new ProviderOptions { MaxTokens = 32000, Temperature = 0.2, Model = picked },
+                        new ProviderOptions { MaxTokens = 32000, Temperature = 0.7, Model = useModel },
                         ect);
                 }
                 watch.Stop();
@@ -1098,14 +1120,19 @@ namespace Forge.SolidWorks
 
         private async Task Generate(string intent, string sid, Newtonsoft.Json.Linq.JArray postedPaths)
         {
-            _currentRunId = Guid.NewGuid().ToString("N").Substring(0, 12);   // tags this run for thumbs feedback + correction capture
-            string myRun = _currentRunId; // a newer send supersedes this run: abandon silently when stale
             if (string.IsNullOrWhiteSpace(intent)) intent = "";
+            // A pasted blob (50KB dumps, emoji walls, log files) must fail closed here: no regex
+            // storm in the matchers, no token blowup in the LLM calls, no bloat in telemetry logs.
+            if (intent.Length > 4000) { Send(new { type = "error", message = "That request is too long (" + intent.Length + " chars, cap is 4000) — paste just the key dims and steps, then send." }); return; }
             if (string.IsNullOrWhiteSpace(sid)) sid = null; // McpBuild falls back to "default"
+            // Cancel the in-flight run BEFORE minting the new id: a stale run's last-gasp
+            // Send then carries its own (dead) id instead of the new run's.
             try { if (_runCts != null) _runCts.Cancel(); } catch { }
             try { if (_runCts != null) _runCts.Dispose(); } catch { }
             _runCts = new System.Threading.CancellationTokenSource();
             var runCt = _runCts.Token;
+            _currentRunId = Guid.NewGuid().ToString("N").Substring(0, 12);   // tags this run for thumbs feedback + correction capture
+            string myRun = _currentRunId; // a newer send supersedes this run: abandon silently when stale
 
             // @-mentioned files ride with the prompt (posted paths + @tokens in the text). The first
             // doubles as the attach-button file so Compare-class handlers pick it up with no doc open.
@@ -1123,6 +1150,7 @@ namespace Forge.SolidWorks
             // their apartment-bound COM runs on THIS UI/STA thread, never a post-await threadpool thread (a
             // threadpool COM read on the InterferenceDetectionManager access-violates and takes SolidWorks down).
             if (await TryDemoRouteFirst(intent)) return;
+            if (myRun != _currentRunId) return; // superseded while awaiting: the new run owns the panel
 
             // One-time session notices: an interrupted last run (crash recovery) + a newer build available.
             if (!_noticesShown)
@@ -1131,6 +1159,7 @@ namespace Forge.SolidWorks
                 try { var crash = ForgeData.CheckInterrupted(); if (crash != null) Send(new { type = "answer", answer = crash }); } catch { }
                 if (Telemetry.Enabled) { try { var upd = await ForgeData.UpdateNotice(); if (upd != null) Send(new { type = "answer", answer = upd }); } catch { } }
             }
+            if (myRun != _currentRunId) return; // superseded during the notices: stay silent
 
             // Privacy / anonymous-usage control (data contract in docs/DATA.md).
             string _lc = (intent ?? "").Trim().ToLowerInvariant();
@@ -1143,11 +1172,13 @@ namespace Forge.SolidWorks
 
             // A preview was shown last turn and is awaiting a "go" â€” resolve it before anything else.
             if (await ResolvePendingConfirm(intent)) return;
+            if (myRun != _currentRunId) return; // superseded while awaiting: the new run owns the panel
 
             // Change-impact FOLLOW-UP (Demo 3, RULE #2): after "what breaks if I change X?" a reply like
             // "show me the pattern" / "highlight it" references the dependent we just named â€” resolve + SHOW it
             // instead of re-asking. Only fires when we have a remembered impact AND the reply is anaphoric.
             if (TryImpactFollowup(intent)) return;
+            if (myRun != _currentRunId) return; // superseded while awaiting: the new run owns the panel
 
             // FROM-SCRATCH CREATE — before every edit-oriented matcher (resizer/mate/mirror/...): an
             // enriched build spec is full of fastener callouts (M3/M4/M5) and mate words ("mount") that

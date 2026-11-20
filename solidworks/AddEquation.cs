@@ -213,15 +213,6 @@ namespace Forge.SolidWorks
             return m.Success ? m.Groups[1].Value.Trim() : null;
         }
 
-        // Run one add strategy, rebuild, and report whether the equation count actually rose. Ignores the strategy's
-        // own return code (unreliable here) — trusts only the re-read count, so a silent no-op falls through to the next.
-        private static bool TryAdd(IEquationMgr eqMgr, IModelDoc2 model, Action add, int countBefore)
-        {
-            try { add(); } catch { }
-            try { model.ForceRebuild3(true); } catch { }
-            return SafeCount(eqMgr) > countBefore;
-        }
-
         private static int SafeCount(IEquationMgr m) { try { return m.GetCount(); } catch { return 0; } }
         private static string SafeEq(IEquationMgr m, int i) { try { return m.get_Equation(i); } catch { return null; } }
         private static string Fmt(double v) => double.IsNaN(v) ? "?" : v.ToString("0.###", CultureInfo.InvariantCulture);

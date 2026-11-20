@@ -86,6 +86,8 @@ namespace Forge.Providers
                         try { text = await resp.Content.ReadAsStringAsync().ConfigureAwait(false); }
                         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                         catch (OperationCanceledException) { throw new ProviderException("Provider request timed out."); }
+                        // A hostile/garbled gateway can stream megabytes of non-JSON: bound what we parse.
+                        if (text != null && text.Length > 5000000) throw new ProviderException("Provider returned an oversized response (" + text.Length + " chars) — retry or split the request.");
                         if (resp.IsSuccessStatusCode)
                             return Parse(text, model);
                         int code = (int)resp.StatusCode;
@@ -299,8 +301,10 @@ namespace Forge.Providers
                             if (src == null) continue;
                             string dc = (string)src["content"];
                             string dr = (string)src["reasoning_content"] ?? (string)src["reasoning"];
-                            if (!string.IsNullOrEmpty(dc)) { contentAcc.Append(dc); try { if (onDelta != null) onDelta("content", dc); } catch { } }
-                            if (!string.IsNullOrEmpty(dr)) { reasonAcc.Append(dr); try { if (onDelta != null) onDelta("reasoning", dr); } catch { } }
+                            // Accumulator caps: a runaway stream must degrade to truncation, never OOM.
+                            // 200k/100k chars sit far above any valid MaxTokens-bounded turn.
+                            if (!string.IsNullOrEmpty(dc)) { if (contentAcc.Length < 200000) contentAcc.Append(dc.Length + contentAcc.Length > 200000 ? dc.Substring(0, 200000 - contentAcc.Length) : dc); try { if (onDelta != null) onDelta("content", dc); } catch { } }
+                            if (!string.IsNullOrEmpty(dr)) { if (reasonAcc.Length < 100000) reasonAcc.Append(dr.Length + reasonAcc.Length > 100000 ? dr.Substring(0, 100000 - reasonAcc.Length) : dr); try { if (onDelta != null) onDelta("reasoning", dr); } catch { } }
                             var tcs = src["tool_calls"] as JArray;
                             if (tcs != null)
                             {
@@ -330,7 +334,9 @@ namespace Forge.Providers
                                             string frag = argTok.Type == JTokenType.String
                                                 ? (string)argTok
                                                 : argTok.ToString(Newtonsoft.Json.Formatting.None);
-                                            if (frag != null) part.ArgumentsJson = (part.ArgumentsJson ?? "") + frag;
+                                            // Per-call arg cap: a hostile stream fragment-loop must not pile MBs
+                                            // into one call's arguments (the executor rejects oversize args loudly).
+                                            if (frag != null && (part.ArgumentsJson == null || part.ArgumentsJson.Length < 100000)) part.ArgumentsJson = (part.ArgumentsJson ?? "") + frag;
                                         }
                                     }
                                 }

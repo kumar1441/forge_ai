@@ -12,7 +12,8 @@ namespace Forge.SolidWorks
     public class Recipe
     {
         public JObject Raw;
-        public int SchemaVersion => (int?)Raw["schemaVersion"] ?? 1;
+        // Wrong-type schemaVersion (string/object from a garbled model) reads as default, never throws.
+        public int SchemaVersion { get { try { return (int?)Raw["schemaVersion"] ?? 1; } catch { return 1; } } }
         public string Kind => ((string)Raw["kind"] ?? "part").ToLowerInvariant();          // part | assembly
         public string Category => ((string)Raw["category"] ?? "").ToLowerInvariant();       // bracket | plate | ...
         public string Name => (string)Raw["name"] ?? ("recipe-" + Guid.NewGuid().ToString("N").Substring(0, 8));

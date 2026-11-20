@@ -80,6 +80,8 @@ namespace Forge.Providers
                         try { text = await resp.Content.ReadAsStringAsync().ConfigureAwait(false); }
                         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                         catch (OperationCanceledException) { throw new ProviderException("Provider request timed out."); }
+                        // Bound what we parse: a garbled gateway must error, never OOM the host.
+                        if (text != null && text.Length > 5000000) throw new ProviderException("Provider returned an oversized response (" + text.Length + " chars) — retry or split the request.");
                         if (resp.IsSuccessStatusCode)
                             return Parse(text, model);
                         int code = (int)resp.StatusCode;

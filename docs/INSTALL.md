@@ -95,3 +95,47 @@ Override the launch in `%APPDATA%\Forge\mcp.json` if needed:
 ## Keyless mode
 
 With no provider configured and no key set, the deterministic local parser handles a large part of the catalog — free, offline, instant.
+
+## Using the chat
+
+The composer sits at the bottom of the panel: `Enter` sends, `Shift+Enter` adds a line, `Esc` closes popovers (or stops a run), `/` starts a slash command. All of the below is panel plus host behavior as implemented today.
+
+### Model picker
+
+The pill next to Attach shows the short model id (or `model` when none is set). Clicking it opens the model popover: search box on top, rows grouped as Recent / Favorites / vendor prefix, footer with count plus Refresh. Refresh asks the host for the live list (`refreshModels`); providers backed by `openai-compatible` return a live list, others report one fixed model. Star toggles a favorite (persisted in `forge_fav_models`); the last five picks are kept in `forge_recent_models`. Keyboard in the search box: `Up/Down/Home/End` move, `Enter` picks (highlighted row, else the active model, else the first row), `Esc` closes. Switching posts `setModel` and applies to the next run.
+
+### Enhance
+
+`✨ Enhance` rewrites the current draft into a build-ready spec via the host `enhance` action (needs SolidWorks connected and a provider key for the current slug, except Ollama). The rewritten text replaces the draft and a `↩` button appears; clicking it — or `Ctrl/Cmd+Z` immediately after enhancing — restores the pre-enhance draft. Typing a new character clears the undo state. Empty draft inserts hint text instead of sending.
+
+### Prompt history and chat history
+
+`↑` recalls the previous sent prompt, `↓` moves newer (persisted in `forge_history`, last 100). Navigation only triggers on the first/last line so multiline editing keeps caret movement; the unsent draft is stashed on the first `↑` and restored when paging past the newest. `🕘` opens the chat-history popover (persisted in `forge_sessions`, newest 30 chats, 100 turns each): search filters by title or prompt text, clicking a row restores that transcript and loads its agent conversation host-side, `✕` deletes one chat, `+ New chat` clears the panel.
+
+### Revert, unrevert, regen
+
+Each user turn has a `↩ revert` button. It stops any in-flight run, drops that turn and everything after it from the transcript, truncates the host agent history to the kept turn count (`revert` with `sid` + `keep`), puts the reverted prompt back in the composer for editing, and stashes the removed turns for one step. `/unrevert` restores that stash (same chat only; a chat switch clears it). `↻` and `/regen` re-run the last non-command prompt; with no prior prompt they report that there is nothing to regenerate.
+
+### Transcript compaction
+
+`/compact` and the `🗜` top-bar button fold all but the newest 10 turns into a collapsed `🗜 N earlier turns compacted` block. With a provider connected the host summarizes the folded text (`compact` action, plain-text bullets); otherwise the block keeps a numbered titles digest. The Settings cog holds `Auto-compact` plus `Compact at` (default on, 60 agent messages, floored at 10). The host honors the same toggle/threshold independently and disables entirely when the toggle is off or the threshold is non-positive. The panel also auto-compacts once the transcript passes 40 turns when auto-compact is on.
+
+### Top bar
+
+`%` pill: local-storage used versus ~5 MB (click for exact bytes). `▾`: usage dropdown — storage used bar, local storage bytes, turns (live / stored), provider · model, tokens today (in / out, host `usage` reply), agent history (message count / token count, host `HistoryCount` / `AgentTokCount`). `🔍`: in-chat find bar — highlights all matches, `↑/↓` or `Enter/Shift+Enter` jumps, counter shows `n/m` or `none`, `✕` or `Esc` clears. `🗜`: manual compact (refuses while a compact or — unless stopped — a run is in flight; short chats report there is nothing to compact).
+
+### Slash commands
+
+The dispatcher (`slashRun`) supports exactly: `/clear` (= `/new`: fresh chat, resets host conversation), `/help` (command list), `/regen` (= `/regenerate`: re-run last prompt), `/model` (open model picker), `/provider [slug]` (switch with `deepseek|openrouter|nvidia|openai|anthropic|ollama`, or open Settings with no arg), `/allow <tool>` (always allow), `/deny <tool>` (block), `/undeny <tool>` (unblock), `/unrevert` (restore last revert), `/auto-approve [on|off]` (master switch, or report state), `/history` (open chat history), `/compact` (fold older turns). Anything else renders the unknown-command card plus the same help text. Leading-`/` input never reaches the agent.
+
+### Auto-approve
+
+Settings holds `Auto-approve` (master) plus `Read tools`, `Build tools`, `Destructive` (persisted as `forge_appr_*`, pushed via `setAutoApprove`). Tool category is host-derived (read/build/destructive by name prefix). When a call needs consent the panel shows an approval card (`🔶 Approval needed`, truncated JSON args) with `Approve` / `Always allow` / `Reject`; the verdict posts `approveReply`. `/allow <tool>` adds to `%APPDATA%\Forge\approvals.json`, `/deny <tool>` adds to `%APPDATA%\Forge\denials.json`, `/undeny <tool>` removes from denials; the Settings cog lists both files' contents with per-item remove buttons.
+
+### @-mentions
+
+Typing `@` opens the file picker: the host searches open SolidWorks documents first (tagged `open`), then the active document's folder plus one level of subfolders (CAD extensions first), filtered by the query, capped at 50 rows; `Enter/Tab` accepts, arrows move, `Esc` closes. Picking adds a chip under the composer (removable with `✕`). On send, only chips whose names are still in the text are posted as `paths`. Host-side the first posted path doubles as the attach-button file, so Compare-class handlers pick it up with no document open. Remaining `@name` tokens resolve against open documents and the active-doc folder.
+
+### Settings cog
+
+`⚙` opens Settings. Provider row: dropdown (`deepseek|openrouter|nvidia|openai|anthropic|ollama`); switching posts `setProvider` and remembers the per-provider model. API-key row appears only when the current provider has no stored key (hidden for Ollama); `Save` stores it via the host DPAPI key store, never in `config.json`. Compact rows: `Auto-compact` toggle plus `Compact at` message threshold. Approval rows: master plus read/build/destructive toggles, the `Always allowed` list, and the `Denied` list.

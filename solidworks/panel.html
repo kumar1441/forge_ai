@@ -82,6 +82,15 @@
 
   /* FDL §8 a11y: visible focus ring on every interactive element */
   :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  /* robustness caps: long strings never break layout (scroll/ellipsis, no restyle) */
+  .bubble.user { overflow-wrap:anywhere; max-height:320px; overflow-y:auto; }
+  .card .answer { overflow-wrap:anywhere; max-height:320px; overflow-y:auto; }
+  .card .sub { overflow-wrap:anywhere; max-height:200px; overflow-y:auto; }
+  .card .files, .share .link { overflow-wrap:anywhere; }
+  .err { overflow-wrap:anywhere; max-height:200px; overflow-y:auto; }
+  .compact .csum { overflow-wrap:anywhere; max-height:200px; overflow-y:auto; }
+  .step > span:last-child { min-width:0; overflow:hidden; text-overflow:ellipsis; }
+  .step.done > span:last-child { display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical; overflow:hidden; }
   /* FDL §2 motion: reduce -> no pulse, no arrivals */
   @media (prefers-reduced-motion: reduce) {
     .step.run .glyph, .thinking .tdot { animation:none; }
@@ -407,16 +416,16 @@
     <div class="headtop" id="headtop">
       <div class="brand"><b><span>◆</span> Forge</b></div>
       <div class="headacts">
-        <button class="ctxpill" id="ctxpill" title="Local storage used — click for exact usage">0%</button><button class="gear ctxarrow" id="ctxarrow" title="Usage details">▾</button>
-        <button class="gear" id="searchbtn" title="Search this chat">🔍</button>
+        <button class="ctxpill" id="ctxpill" title="Local storage used — click for exact usage" aria-expanded="false" aria-controls="ctxpop">0%</button><button class="gear ctxarrow" id="ctxarrow" title="Usage details" aria-expanded="false" aria-controls="ctxpop">▾</button>
+        <button class="gear" id="searchbtn" title="Search this chat" aria-expanded="false" aria-controls="findbar">🔍</button>
         <button class="gear" id="compactbtn" title="Compact older turns">🗜</button>
-        <button class="gear" id="histbtn" title="Chat history">🕘</button>
-        <button class="gear" id="gearbtn" title="Settings">⚙</button>
+        <button class="gear" id="histbtn" title="Chat history" aria-expanded="false" aria-controls="history">🕘</button>
+        <button class="gear" id="gearbtn" title="Settings" aria-expanded="false" aria-controls="settings">⚙</button>
         <button class="clearbtn" id="clearbtn" title="Clear the panel for a fresh recording take">Clear</button>
       </div>
     </div>
     <div class="know" id="know">Looking for your part…</div>
-    <div class="settings" id="settings" style="display:none">
+    <div class="settings" id="settings" style="display:none" role="dialog" aria-label="Settings">
       <button class="sclose" id="sclose">✕</button>
       <div class="srow"><label>Dark theme</label>
         <span class="toggle"><input type="checkbox" id="themetgl" /><span class="tk"></span></span>
@@ -465,12 +474,12 @@
       </div>
       <div class="sfoot">usage data = anonymous hashes only · off = nothing leaves this machine</div>
     </div>
-    <div class="history" id="history" style="display:none">
+    <div class="history" id="history" style="display:none" role="dialog" aria-label="Chat history">
       <input class="hsearch" id="hsearch" placeholder="Search chats…" autocomplete="off" />
       <div class="hlist" id="hlist"></div>
       <button class="hnew" id="hnew">+ New chat</button>
     </div>
-    <div class="ctxpop" id="ctxpop" style="display:none">
+    <div class="ctxpop" id="ctxpop" style="display:none" role="dialog" aria-label="Usage details" tabindex="-1">
       <div class="crow"><span>Storage used</span><b id="ctxpct">–</b></div>
       <div class="cbar"><i id="ctxbar" style="width:0%"></i></div>
       <div class="crow"><span>Local storage</span><b id="ctxstore">–</b></div>
@@ -481,7 +490,7 @@
     </div>
   </div>
 
-  <div class="findbar" id="findbar" style="display:none">
+  <div class="findbar" id="findbar" style="display:none" role="search" aria-label="Search this chat">
     <input id="findinput" placeholder="Search this chat…" autocomplete="off" />
     <span class="fcount" id="fcount"></span>
     <button id="fprev" title="Previous match">↑</button>
@@ -503,17 +512,17 @@
     <button class="scrolldown" id="scrolldown" title="Jump to latest" style="display:none">↓</button>
     <div class="attachrow">
       <button class="attachbtn" id="attach" title="Attach a file — e.g. the other version to compare against">📎 Attach a file</button>
-      <button class="attachbtn modelpick" id="modelpick" title="Switch model"><span class="chev">▲</span><span id="modelname">model</span></button>
+      <button class="attachbtn modelpick" id="modelpick" title="Switch model" aria-expanded="false" aria-controls="modelpop"><span class="chev">▲</span><span id="modelname">model</span></button>
       <button class="attachbtn" id="enhance" title="Enhance prompt — rewrite this draft into a concrete build spec">✨ Enhance</button>
       <button class="attachbtn" id="enhanceUndo" title="Restore the draft from before enhancing" style="display:none">↩</button>
       <button class="attachbtn" id="regen" title="Regenerate — re-run the last prompt">↻</button>
-      <div class="modelpop" id="modelpop" style="display:none">
+      <div class="modelpop" id="modelpop" style="display:none" role="dialog" aria-label="Switch model">
         <input class="msearch" id="msearch" placeholder="Search models…" autocomplete="off" />
         <div class="mlist" id="mlist"></div>
         <div class="mfoot"><span id="mcount"></span><button class="mrefresh" id="mrefresh" title="Reload the live model list">↻ Refresh</button></div>
       </div>
       <span class="chip" id="chip" style="display:none"></span>
-      <div class="menpop" id="menpop" style="display:none">
+      <div class="menpop" id="menpop" style="display:none" role="dialog" aria-label="Mention a file">
         <div class="mlist" id="menlist"></div>
         <div class="mfoot"><span id="mencount"></span></div>
       </div>
@@ -548,9 +557,12 @@
     "Ratcheting","Whirring","Clanking","Cranking","Sprocketing","Kerchunking"];
 
   const grow = () => { intent.style.height = "auto"; intent.style.height = Math.min(intent.scrollHeight,200) + "px"; };
-  // Quota-safe localStorage write: on QuotaExceeded, prune chat sessions/history then retry once.
+  // Quota-safe localStorage: reads fall back to memory, writes prune then keep memory copy.
+  const memStore = {}; let quotaFull = false;
+  function safeGet(k) { try { const v = localStorage.getItem(k); return v === null && (k in memStore) ? memStore[k] : v; } catch (e) { return (k in memStore) ? memStore[k] : null; } }
   function safeSet(k, v) {
-    try { localStorage.setItem(k, v); return; } catch (e) {}
+    memStore[k] = v;
+    try { localStorage.setItem(k, v); if (quotaFull) { quotaFull = false; renderCtx(); } return; } catch (e) {}
     try {
       const all = JSON.parse(localStorage.getItem("forge_sessions") || "[]");
       if (Array.isArray(all) && all.length > 1) {
@@ -558,16 +570,27 @@
         localStorage.setItem("forge_sessions", JSON.stringify(all.slice(0, 10)));
       } else { try { localStorage.removeItem("forge_history"); } catch (e2) {} }
     } catch (e3) {}
-    try { localStorage.setItem(k, v); } catch (e4) { renderCtx(); }
+    try { localStorage.setItem(k, v); if (quotaFull) { quotaFull = false; renderCtx(); } } catch (e4) { quotaFull = true; try { renderCtx(); } catch (e5) {} }
   }
+  function popHidden(el) { try { return el && el.style.display === "none"; } catch (e) { return true; } }
+  function setExpanded(id, open) { try { const b = $(id); if (b) b.setAttribute("aria-expanded", open ? "true" : "false"); } catch (e) {} }
+  function focusIfHidden(el) { try { if (el && el.contains(document.activeElement)) intent.focus(); } catch (e) {} }
   function closePops() {
-    ["settings", "history", "ctxpop", "modelpop", "menpop"].forEach(id => { const el = $(id); if (el) el.style.display = "none"; });
+    ["settings", "history", "ctxpop", "modelpop", "menpop"].forEach(id => { const el = $(id); if (el && !popHidden(el)) { focusIfHidden(el); el.style.display = "none"; } setExpanded(id === "settings" ? "gearbtn" : id === "history" ? "histbtn" : id === "ctxpop" ? "ctxpill" : id === "modelpop" ? "modelpick" : null, false); });
+    setExpanded("ctxarrow", false); setExpanded("searchbtn", $("findbar") && $("findbar").style.display !== "none");
     menOpen = false;
     if ($("findbar") && $("findbar").style.display !== "none") toggleFind(false);
   }
+  // Popover exclusivity: the five popovers share screen space, so opening one hides the rest.
+  // (findbar is a bar, not a popover — only closePops full-resets touch it.)
+  function closeOthers(except) {
+    ["settings", "history", "ctxpop", "modelpop", "menpop"].forEach(id => { if (id !== except) { const el = $(id); if (el && !popHidden(el)) { focusIfHidden(el); el.style.display = "none"; } } });
+    if (except !== "menpop") menOpen = false;
+  }
+  function showPop(id) { closeOthers(id); const el = $(id); if (el) el.style.display = "flex"; if (id === "settings") { setExpanded("gearbtn", true); setTimeout(() => { try { $("setprov").focus(); } catch (e) {} }, 0); } if (id === "history") setExpanded("histbtn", true); if (id === "ctxpop") { setExpanded("ctxpill", true); setExpanded("ctxarrow", true); } if (id === "modelpop") setExpanded("modelpick", true); }
   // Always-allow / deny lists (Kilo parity: surfaced in settings with remove buttons).
   const allowKey = "forge_allow_list", denyKey = "forge_deny_list";
-  const loadList = (k) => { try { const v = JSON.parse(localStorage.getItem(k)); return Array.isArray(v) ? v.filter(x => typeof x === "string") : []; } catch (e) { return []; } };
+  const loadList = (k) => { try { const v = JSON.parse(safeGet(k)); return Array.isArray(v) ? v.filter(x => typeof x === "string") : []; } catch (e) { return []; } };
   function renderRules(hostAllow, hostDeny) {
     const al = hostAllow || loadList(allowKey), dl = hostDeny || loadList(denyKey);
     const paint = (id, arr, rm) => {
@@ -592,7 +615,7 @@
   intent.addEventListener("input", () => { grow(); preEnhance = null; $("enhanceUndo").style.display = "none"; });
 
   // ---- auto-approval policy (Kilo parity: master + per-category, persisted, pushed to host) ----
-  const apprKey = (k, d) => { try { const v = localStorage.getItem(k); return v === null ? d : v === "1"; } catch (e) { return d; } };
+  const apprKey = (k, d) => { try { const v = safeGet(k); return v === null ? d : v === "1"; } catch (e) { return d; } };
   function loadApprCfg() {
     $("apprtgl").checked = apprKey("forge_appr_master", true);
     $("apprread").checked = apprKey("forge_appr_read", true);
@@ -606,12 +629,10 @@
   }
   function pushApprCfg() {
     const cfg = { master: $("apprtgl").checked, read: $("apprread").checked, build: $("apprbuild").checked, destructive: $("apprdest").checked };
-    try {
-      localStorage.setItem("forge_appr_master", cfg.master ? "1" : "0");
-      localStorage.setItem("forge_appr_read", cfg.read ? "1" : "0");
-      localStorage.setItem("forge_appr_build", cfg.build ? "1" : "0");
-      localStorage.setItem("forge_appr_dest", cfg.destructive ? "1" : "0");
-    } catch (e) {}
+    safeSet("forge_appr_master", cfg.master ? "1" : "0");
+    safeSet("forge_appr_read", cfg.read ? "1" : "0");
+    safeSet("forge_appr_build", cfg.build ? "1" : "0");
+    safeSet("forge_appr_dest", cfg.destructive ? "1" : "0");
     syncApprRow();
     post({ action: "setAutoApprove", master: cfg.master, read: cfg.read, build: cfg.build, destructive: cfg.destructive });
   }
@@ -624,15 +645,15 @@
     try {
       post({
         action: "setAutoApprove",
-        master: localStorage.getItem("forge_appr_master") !== "0",
-        read: localStorage.getItem("forge_appr_read") !== "0",
-        build: localStorage.getItem("forge_appr_build") !== "0",
-        destructive: localStorage.getItem("forge_appr_dest") === "1"
+        master: safeGet("forge_appr_master") !== "0",
+        read: safeGet("forge_appr_read") !== "0",
+        build: safeGet("forge_appr_build") !== "0",
+        destructive: safeGet("forge_appr_dest") === "1"
       });
     } catch (e) {}
     try {
-      const on = localStorage.getItem("forge_compact_on");
-      const at = localStorage.getItem("forge_compact_at");
+      const on = safeGet("forge_compact_on");
+      const at = safeGet("forge_compact_at");
       post({ action: "setCompact", on: on === null ? true : on === "1", at: at === null ? 60 : (parseInt(at, 10) || 0) });
     } catch (e2) {}
     renderCtx();
@@ -676,29 +697,39 @@
   const fmtKB = (b) => b < 1024 ? b + " B" : b < 1048576 ? (b / 1024).toFixed(1) + " KB" : (b / 1048576).toFixed(2) + " MB";
   function renderCtx() {
     const cap = 5 * 1024 * 1024, used = storageBytes();
-    const pct = Math.min(99, Math.floor(used / cap * 100));
-    $("ctxpill").textContent = pct + "%";
-    $("ctxpill").title = `Local storage used (${fmtKB(used)} of ~5 MB local storage) — click for exact usage`;
+    const dpct = Math.min(99, Math.floor(used / cap * 100));
+    let compactOn = true, compactAt = 60;
+    try {
+      compactOn = safeGet("forge_compact_on") !== "0";
+      const a = parseInt(safeGet("forge_compact_at"), 10);
+      if (!isNaN(a) && a >= 10) compactAt = a;
+    } catch (e) {}
+    const amsgs = Number(usage.agentMsgs || 0);
+    const apct = (compactOn && amsgs > 0) ? Math.min(99, Math.floor(amsgs / compactAt * 100)) : null;
+    $("ctxpill").textContent = (apct !== null ? `ctx ${apct}% · ` : "") + `disk ${dpct}%`;
+    $("ctxpill").title = (apct !== null ? `Agent context ${apct}% of ${compactAt} msgs · ` : "") + `Local storage ${dpct}% of ~5 MB — click for exact usage`;
     let live = 0; try { live = transcript.querySelectorAll(":scope > .turn").length; } catch (e) {}
     let stored = 0; try { stored = loadSessions().reduce((a, s) => a + s.turns.length, 0); } catch (e2) {}
-    $("ctxpct").textContent = pct + "%";
-    $("ctxbar").style.width = pct + "%";
-    $("ctxstore").textContent = fmtKB(used) + " / ~5 MB";
+    $("ctxpct").textContent = dpct + "%";
+    $("ctxbar").style.width = dpct + "%";
+    $("ctxstore").textContent = fmtKB(used) + " / ~5 MB" + (quotaFull ? " · full, session-only" : "");
     $("ctxturns").textContent = live + " / " + stored;
     $("ctxprov").textContent = `${curSlug || "?"} · ${shortModel(curModel) || "–"}`;
     $("ctxtok").textContent = `${Number(usage.in || 0).toLocaleString()} / ${Number(usage.out || 0).toLocaleString()}`;
-    $("ctxagent").textContent = `${usage.agentMsgs || 0} msgs · ${Number(usage.agentTokens || 0).toLocaleString()} tok`;
+    $("ctxagent").textContent = `${amsgs} msgs · ${Number(usage.agentTokens || 0).toLocaleString()} tok` + (apct !== null ? ` · ${apct}% of ${compactAt}` : "");
   }
   function toggleCtx(force) {
     const p = $("ctxpop");
     const show = force !== undefined ? force : p.style.display === "none";
-    p.style.display = show ? "flex" : "none";
-    if (show) { post({ action: "usage" }); renderCtx(); }
+    if (show) { closeOthers("ctxpop"); p.style.display = "flex"; }
+    else { focusIfHidden(p); p.style.display = "none"; intent.focus(); }
+    setExpanded("ctxpill", show); setExpanded("ctxarrow", show);
+    if (show) { post({ action: "usage" }); renderCtx(); try { p.focus(); } catch (e) {} }
   }
   $("ctxpill").addEventListener("click", (e) => { e.stopPropagation(); toggleCtx(); });
   $("ctxarrow").addEventListener("click", (e) => { e.stopPropagation(); toggleCtx(); });
   $("compactbtn").addEventListener("click", () => compactTranscript(false));
-  document.addEventListener("click", (e) => { if (!e.target.closest("#ctxpop") && !e.target.closest("#ctxpill") && !e.target.closest("#ctxarrow")) $("ctxpop").style.display = "none"; });
+  document.addEventListener("click", (e) => { if (!e.target.closest("#ctxpop") && !e.target.closest("#ctxpill") && !e.target.closest("#ctxarrow")) { const p = $("ctxpop"); if (p && !popHidden(p)) { focusIfHidden(p); p.style.display = "none"; setExpanded("ctxpill", false); setExpanded("ctxarrow", false); } } });
   document.addEventListener("click", (e) => { if (menOpen && !e.target.closest("#menpop") && e.target !== intent) menClose(); });
 
   // transcript find: highlight all matches, jump between them
@@ -719,6 +750,7 @@
     const q = $("findinput").value;
     if (!q) return;
     const ql = q.toLowerCase();
+    const FIND_MAX = 400; // cap: first N marks only, keeps 500-turn transcripts responsive
     const walker = document.createTreeWalker(transcript, NodeFilter.SHOW_TEXT);
     const nodes = []; let n;
     while ((n = walker.nextNode())) {
@@ -728,31 +760,38 @@
         if (el.classList && el.classList.contains("cbody") && el.style.display === "none") { hidden = true; break; }
         el = el.parentElement;
       }
-      if (!hidden && n.nodeValue.toLowerCase().includes(ql)) nodes.push(n);
+      if (!hidden && n.nodeValue.toLowerCase().includes(ql)) { nodes.push(n); if (nodes.length >= FIND_MAX) break; }
     }
-    nodes.forEach(tn => {
+    let capped = false;
+    for (const tn of nodes) {
+      if (findMarks.length >= FIND_MAX) { capped = true; break; }
       const frag = document.createDocumentFragment();
       const val = tn.nodeValue, low = val.toLowerCase();
       let i = 0, pos;
       while ((pos = low.indexOf(ql, i)) >= 0) {
+        if (findMarks.length >= FIND_MAX) { capped = true; break; }
         if (pos > i) frag.append(document.createTextNode(val.slice(i, pos)));
         const mk = document.createElement("mark"); mk.className = "fhl"; mk.textContent = val.slice(pos, pos + q.length);
         frag.append(mk); findMarks.push(mk); i = pos + q.length;
       }
+      if (capped) { frag.append(document.createTextNode(val.slice(i))); tn.replaceWith(frag); break; }
       if (i < val.length) frag.append(document.createTextNode(val.slice(i)));
       tn.replaceWith(frag);
-    });
-    if (findMarks.length) { findIdx = 0; paintFind(); } else { $("fcount").textContent = "none"; $("fcount").title = "No matches — keep typing, or Esc closes search"; }
+    }
+    if (findMarks.length) { findIdx = 0; paintFind(); if (capped) $("fcount").title = `Showing first ${FIND_MAX} matches — refine the search to narrow it`; } else { $("fcount").textContent = "none"; $("fcount").title = "No matches — keep typing, or Esc closes search"; }
   }
+  let findTimer = null;
   function toggleFind(force) {
     const f = $("findbar");
     const show = force !== undefined ? force : f.style.display === "none";
+    if (show) closeOthers();
     f.style.display = show ? "flex" : "none";
+    setExpanded("searchbtn", show);
     if (show) { setTimeout(() => $("findinput").focus(), 0); }
-    else { clearFind(); $("findinput").value = ""; intent.focus(); }
+    else { try { if (findTimer) { clearTimeout(findTimer); findTimer = null; } } catch (e) {} clearFind(); $("findinput").value = ""; focusIfHidden(f); intent.focus(); }
   }
   $("searchbtn").addEventListener("click", (e) => { e.stopPropagation(); toggleFind(); });
-  $("findinput").addEventListener("input", runFind);
+  $("findinput").addEventListener("input", () => { try { if (findTimer) clearTimeout(findTimer); } catch (e) {} findTimer = setTimeout(runFind, 150); });
   $("findinput").addEventListener("keydown", (e) => {
     e.stopPropagation();
     if (e.key === "Enter") { e.preventDefault(); if (findMarks.length) { findIdx = (findIdx + (e.shiftKey ? findMarks.length - 1 : 1)) % findMarks.length; paintFind(); } }
@@ -764,13 +803,13 @@
   $("histbtn").addEventListener("click", (e) => {
     e.stopPropagation();
     const h = $("history");
-    h.style.display = h.style.display === "none" ? "flex" : "none";
-    if (h.style.display !== "none") { renderHistoryList(); $("hsearch").value = ""; renderHistoryList(); setTimeout(() => $("hsearch").focus(), 0); }
+    if (h.style.display === "none") { showPop("history"); renderHistoryList(); $("hsearch").value = ""; renderHistoryList(); setExpanded("histbtn", true); setTimeout(() => $("hsearch").focus(), 0); }
+    else { focusIfHidden(h); h.style.display = "none"; setExpanded("histbtn", false); intent.focus(); }
   });
   $("hsearch").addEventListener("input", renderHistoryList);
-  $("hsearch").addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Escape") { $("history").style.display = "none"; intent.focus(); } });
-  $("hnew").addEventListener("click", () => { clearPanel(); $("history").style.display = "none"; intent.focus(); });
-  document.addEventListener("click", (e) => { if (!e.target.closest("#history") && !e.target.closest("#histbtn")) $("history").style.display = "none"; });
+  $("hsearch").addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Escape") { focusIfHidden($("history")); $("history").style.display = "none"; setExpanded("histbtn", false); intent.focus(); } });
+  $("hnew").addEventListener("click", () => { clearPanel(); focusIfHidden($("history")); $("history").style.display = "none"; setExpanded("histbtn", false); intent.focus(); });
+  document.addEventListener("click", (e) => { if (!e.target.closest("#history") && !e.target.closest("#histbtn")) { const h = $("history"); if (h && !popHidden(h)) { focusIfHidden(h); h.style.display = "none"; setExpanded("histbtn", false); } } });
 
   // ---- settings: gear open/close + theme toggle (persists; default = follow OS) ----
   const settingsEl = $("settings"), themeTgl = $("themetgl"), telmTgl = $("telmtgl");
@@ -794,7 +833,7 @@
     chatModels = []; renderModelList($("msearch") ? $("msearch").value : "");
     if ($("mcount")) $("mcount").textContent = hasBridge ? "Loading…" : "Preview mode — model list needs SolidWorks.";
     if (!hasBridge) { systemCard(needBridgeMsg("Switching providers")); return; }
-    if (needsKey()) { systemCard(`No key saved for <b>${curSlug}</b> — paste it in Settings → API key, hit Save, then pick a model.`); settingsEl.style.display = "flex"; }
+    if (needsKey()) { systemCard(`No key saved for <b>${curSlug}</b> — paste it in Settings → API key, hit Save, then pick a model.`); showPop("settings"); }
     post({ action: "setProvider", provider: $("setprov").value });
   });
   $("setkeysave").addEventListener("click", () => {
@@ -807,16 +846,16 @@
   });
   $("setkey").addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); $("setkeysave").click(); }
-    if (e.key === "Escape") { settingsEl.style.display = "none"; intent.focus(); }
+    if (e.key === "Escape") { focusIfHidden(settingsEl); settingsEl.style.display = "none"; setExpanded("gearbtn", false); intent.focus(); }
     e.stopPropagation();
   });
 
   // ---- auto-compaction controls (Kilo parity: threshold + off switch, persisted, pushed to host) ----
-  const autoCompactOn = () => { try { return localStorage.getItem("forge_compact_on") !== "0"; } catch (e) { return true; } };
+  const autoCompactOn = () => { try { return safeGet("forge_compact_on") !== "0"; } catch (e) { return true; } };
   function loadCompactCfg() {
     try {
-      const on = localStorage.getItem("forge_compact_on");
-      const at = localStorage.getItem("forge_compact_at");
+      const on = safeGet("forge_compact_on");
+      const at = safeGet("forge_compact_at");
       $("compacttgl").checked = on === null ? true : on === "1";
       let n = at === null ? 60 : parseInt(at, 10);
       if (isNaN(n) || n < 10) n = 60;
@@ -829,10 +868,8 @@
     // The toggle alone enables/disables — the number is just the threshold (floored, never magic).
     let at = parseInt($("compactat").value, 10); if (isNaN(at) || at < 10) at = 10;
     $("compactat").value = at;
-    try {
-      localStorage.setItem("forge_compact_on", $("compacttgl").checked ? "1" : "0");
-      localStorage.setItem("forge_compact_at", String(at));
-    } catch (e) {}
+    safeSet("forge_compact_on", $("compacttgl").checked ? "1" : "0");
+    safeSet("forge_compact_at", String(at));
     syncCompactRow();
     post({ action: "setCompact", on: $("compacttgl").checked, at: at });
   }
@@ -840,7 +877,7 @@
   $("compactat").addEventListener("change", pushCompactCfg);
   loadCompactCfg();
   function applyTheme() {
-    let saved = null; try { saved = localStorage.getItem("forge_theme"); } catch (e) {}            // "dark" | "light" | null = follow OS
+    let saved = null; try { saved = safeGet("forge_theme"); } catch (e) {}            // "dark" | "light" | null = follow OS
     const osLight = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches;
     const dark = saved ? saved !== "light" : !osLight;
     document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
@@ -849,24 +886,29 @@
   $("gearbtn").addEventListener("click", (e) => {
     e.stopPropagation();
     const open = settingsEl.style.display === "none";
-    settingsEl.style.display = open ? "flex" : "none";
+    if (open) showPop("settings"); else { focusIfHidden(settingsEl); settingsEl.style.display = "none"; }
+    setExpanded("gearbtn", open);
     if (open) $("setprov").focus(); else intent.focus();
   });
-  $("sclose").addEventListener("click", () => { settingsEl.style.display = "none"; intent.focus(); });
-  document.addEventListener("click", (e) => { if (!e.target.closest("#settings") && !e.target.closest("#gearbtn")) settingsEl.style.display = "none"; });
+  $("sclose").addEventListener("click", () => { focusIfHidden(settingsEl); settingsEl.style.display = "none"; setExpanded("gearbtn", false); intent.focus(); });
+  document.addEventListener("click", (e) => { if (!e.target.closest("#settings") && !e.target.closest("#gearbtn")) { if (!popHidden(settingsEl)) { focusIfHidden(settingsEl); settingsEl.style.display = "none"; setExpanded("gearbtn", false); } } });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       if (document.getElementById("onboard")) return; // onboarding is modal — Esc must not yank focus behind it
       if (menOpen) { menClose(); intent.focus(); return; }
+      // Staged Esc: popovers first (no side effects), then stop-run, then idle gate-dismiss.
+      const anyPop = ["settings", "history", "ctxpop", "modelpop"].some(id => { const el = $(id); return el && el.style.display !== "none"; })
+        || ($("findbar") && $("findbar").style.display !== "none");
       closePops();
+      if (anyPop) { intent.focus(); return; } // closing a popover must not stop the run or touch approvals
       if (working || enhanceActive) { e.stopPropagation(); post({ action: "stop" }); if (enhanceActive) ebReset(); intent.focus(); return; }
-      if ($("modelpop") && $("modelpop").style.display !== "none") { closeModels(false); return; }
-      const nope = document.querySelector(".gate .nope, .appr:not(.done) .abtns button:last-child");
+      // Idle with a ConfirmGate showing: Esc means "Not yet".
+      const nope = document.querySelector(".gate .nope");
       if (nope) nope.click();
       intent.focus(); // every popover close lands back in the composer
     }
   });
-  themeTgl.addEventListener("change", () => { try { localStorage.setItem("forge_theme", themeTgl.checked ? "dark" : "light"); } catch (e) {} applyTheme(); });
+  themeTgl.addEventListener("change", () => { safeSet("forge_theme", themeTgl.checked ? "dark" : "light"); applyTheme(); });
   telmTgl.addEventListener("change", () => post({ action: "telemetry", on: telmTgl.checked }));
   applyTheme();
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
@@ -983,7 +1025,7 @@
       em.textContent = "Preview mode — file search needs SolidWorks. Your @text is kept; attach works once reconnected.";
       $("menlist").appendChild(em);
       $("mencount").textContent = "";
-      $("menpop").style.display = "flex";
+      showPop("menpop");
       return;
     }
     menStart = q.start;
@@ -994,7 +1036,7 @@
 
   // prompt history (persists; unsent draft stashed while browsing)
   let histList = [];
-  try { const v = JSON.parse(localStorage.getItem("forge_history")); histList = Array.isArray(v) ? v : []; } catch (e) { histList = []; }
+  try { const v = JSON.parse(safeGet("forge_history")); histList = Array.isArray(v) ? v : []; } catch (e) { histList = []; }
   let hIdx = -1, draftStash = null;
   const histSave = () => { try { safeSet("forge_history", JSON.stringify(histList.slice(-100))); } catch (e) {} };
   let turn = null, thinkEl = null;          // { steps, thinking, result } DOM refs for the active Forge turn
@@ -1004,7 +1046,7 @@
   // ---- chat history (Kilo-style sessions: search, restore, delete, new) ----
   let sessionId = null;
   const sessKey = "forge_sessions";
-  const loadSessions = () => { try { const v = JSON.parse(localStorage.getItem(sessKey)); return Array.isArray(v) ? v : []; } catch (e) { return []; } };
+  const loadSessions = () => { try { const v = JSON.parse(safeGet(sessKey)); return Array.isArray(v) ? v : []; } catch (e) { return []; } };
   const saveSessions = (s) => { try { safeSet(sessKey, JSON.stringify(s.slice(0, 30))); } catch (e) {} };
   const ago = (t) => { const m = Math.floor((Date.now() - t) / 60000); if (m < 1) return "just now"; if (m < 60) return m + "m ago"; const h = Math.floor(m / 60); if (h < 24) return h + "h ago"; return Math.floor(h / 24) + "d ago"; };
   const shortModel = (id) => String(id || "").split("/").pop();
@@ -1021,7 +1063,8 @@
   function renderHistoryList() {
     const q = ($("hsearch").value || "").toLowerCase();
     const list = $("hlist"); list.innerHTML = "";
-    const all = loadSessions().filter(s => !q || s.title.toLowerCase().includes(q) || s.turns.some(t => (t.q || "").toLowerCase().includes(q)));
+    let all = [];
+    try { all = loadSessions().filter(s => !q || s.title.toLowerCase().includes(q) || s.turns.some(t => (t.q || "").toLowerCase().includes(q))); } catch (e) { all = []; }
     if (!all.length) {
       const em = document.createElement("div"); em.className = "hempty";
       if (q) {
@@ -1037,14 +1080,18 @@
     all.forEach(s => {
       const row = document.createElement("div");
       row.className = "hrow" + (s.id === sessionId ? " active" : "");
+      row.tabIndex = 0; row.setAttribute("role", "button"); row.setAttribute("aria-label", "Restore chat: " + s.title);
       const main = document.createElement("div"); main.className = "hmain";
       const tt = document.createElement("div"); tt.className = "htitle"; tt.textContent = s.title;
       const mt = document.createElement("div"); mt.className = "hmeta";
       mt.textContent = `${ago(s.updated || s.started)} · ${s.turns.length} turn${s.turns.length === 1 ? "" : "s"}${s.model ? " · " + s.model : ""}`;
       main.append(tt, mt);
-      const del = document.createElement("button"); del.className = "hdel"; del.title = "Delete"; del.textContent = "✕";
+      const del = document.createElement("button"); del.className = "hdel"; del.title = "Delete"; del.setAttribute("aria-label", "Delete chat: " + s.title); del.textContent = "✕";
       del.addEventListener("click", (e) => { e.stopPropagation(); saveSessions(loadSessions().filter(x => x.id !== s.id)); if (s.id === sessionId) sessionId = null; renderHistoryList(); $("hsearch").focus(); });
-      main.addEventListener("click", () => restoreSession(s.id));
+      const restore = () => restoreSession(s.id);
+      main.addEventListener("click", restore);
+      row.addEventListener("click", (e) => { if (e.target === row) restore(); });
+      row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); restore(); } });
       row.append(main, del); list.appendChild(row);
     });
   }
@@ -1064,7 +1111,7 @@
     });
     sessionId = id;
     hideChip(); hIdx = -1; draftStash = null; preEnhance = null; $("enhanceUndo").style.display = "none";
-    $("history").style.display = "none";
+    focusIfHidden($("history")); $("history").style.display = "none"; setExpanded("histbtn", false);
     post({ action: "loadHistory", sid: id });
     const rt = [...transcript.querySelectorAll(":scope > .turn")];
     if (rt.length > 20) {
@@ -1073,7 +1120,7 @@
       sum.textContent = titlesDigest(body);
       transcript.insertBefore(block, rt[rt.length - 10]);
     }
-    renderHistoryList(); scroll(true);
+    renderHistoryList(); scroll(true); intent.focus();
   }
 
   function nearBottom() { return transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 60; }
@@ -1110,6 +1157,7 @@
     const f = document.createElement("div"); f.className = "forge";
     const steps = document.createElement("div"); steps.className = "steps";
     const thinking = document.createElement("div"); thinking.className = "thinking";
+    thinking.setAttribute("aria-live", "polite");
     thinking.innerHTML = `<span class="tdot">●</span><span class="tword">${WORDS[0]}…</span>`;
     const result = document.createElement("div"); result.className = "result";
     f.append(steps, thinking, result);
@@ -1126,7 +1174,7 @@
 
     const mpaths = mentionPaths.map(p => p.path).filter(p => {
       const nm = (mentionPaths.find(q => q.path === p) || {}).name || "";
-      return !nm || text.includes(nm);
+      return !nm || text.includes("@" + nm);
     });
     mentionPaths.length = 0; renderChips(); menClose();
     if (hasBridge && needsKey()) systemCard(`No key saved for <b>${curSlug}</b> — sending anyway, but add one in Settings → API key and hit Save so the next run succeeds. Your prompt is kept.`);
@@ -1135,7 +1183,7 @@
   }
 
   // ---- slash commands (Kilo-style: local, instant, no LLM round-trip) ----
-  const SLASH_HELP = "/compact — summarize older turns into an expandable block\n/clear, /new — start a fresh chat\n/regen — re-run the last prompt\n/model — open the model picker\n/provider [slug] — switch provider (deepseek|openrouter|nvidia|openai|anthropic|ollama) or open settings\n/allow <tool> — always allow one tool going forward\n/deny <tool> — block one tool outright · /undeny <tool> — unblock it\n/auto-approve [on|off] — master switch for unattended tool runs\n/history — open chat history\n/help — this list\n/unrevert — restore the last reverted turns";
+  const SLASH_HELP = "/compact — summarize older turns into an expandable block\n/summarize — same as /compact\n/clear, /new — start a fresh chat\n/regen, /regenerate — re-run the last prompt\n/model, /models — open the model picker\n/provider [slug] — switch provider (deepseek|openrouter|nvidia|openai|anthropic|ollama) or open settings\n/allow <tool> — always allow one tool going forward\n/deny <tool> — block one tool outright · /undeny <tool> — unblock it\n/auto-approve [on|off] — master switch for unattended tool runs\n/history, /sessions — open chat history · /resume, /continue — same list\n/status — show usage details\n/undo — revert the last turn · /redo — restore it\n/help — this list\n/unrevert — restore the last reverted turns";
   function slashRun(text) {
     const parts = text.slice(1).trim().split(/\s+/);
     const cmd = (parts[0] || "").toLowerCase(), args = parts.slice(1);
@@ -1143,10 +1191,11 @@
       case "clear": case "new": clearPanel(); break;
       case "help": systemCard(SLASH_HELP.replace(/</g, "&lt;").replace(/\n/g, "<br>")); break;
       case "regen": case "regenerate":
-        if (!working && lastPrompt && !lastPrompt.startsWith("/")) run(lastPrompt);
+        if (working) systemCard("Still working — wait for this run (or Esc to stop it), then ↻ or /regen re-runs it.");
+        else if (lastPrompt && !lastPrompt.startsWith("/")) run(lastPrompt);
         else         systemCard("Nothing to regenerate yet — send a prompt first, then ↻ or /regen re-runs it.");
         break;
-      case "model": openModels(); break;
+      case "model": case "models": openModels(); break;
       case "provider":
         if (args[0]) {
           const pv = args[0].toLowerCase();
@@ -1154,10 +1203,10 @@
           curSlug = pv; curModel = null; renderPill(); renderCtx();
           chatModels = []; renderModelList($("msearch") ? $("msearch").value : "");
           if (!hasBridge) { systemCard(needBridgeMsg("Switching providers")); break; }
-          if (needsKey()) { systemCard(`No key saved for <b>${pv}</b> — paste it in Settings → API key, hit Save, then pick a model.`); settingsEl.style.display = "flex"; }
+          if (needsKey()) { systemCard(`No key saved for <b>${pv}</b> — paste it in Settings → API key, hit Save, then pick a model.`); showPop("settings"); }
           post({ action: "setProvider", provider: pv });
         }
-        else { settingsEl.style.display = "flex"; }
+        else { showPop("settings"); }
         break;
       case "allow":
         if (args[0]) { trackAllow(args[0]); post({ action: "allowTool", tool: args[0] }); }
@@ -1181,8 +1230,17 @@
           systemCard(`Auto-approve is <b>${$("apprtgl").checked ? "on" : "off"}</b>. Usage: <b>/auto-approve on|off</b>.`);
         }
         break;
-      case "history": $("history").style.display = "flex"; renderHistoryList(); setTimeout(() => $("hsearch").focus(), 0); break;
-      case "compact": compactTranscript(false); break;
+      case "history": case "sessions": case "resume": case "continue": showPop("history"); renderHistoryList(); setExpanded("histbtn", true); setTimeout(() => $("hsearch").focus(), 0); break;
+      case "compact": case "summarize": compactTranscript(false); break;
+      case "undo": {
+        const turns = [...transcript.querySelectorAll(":scope > .turn")];
+        const last = turns[turns.length - 1];
+        if (last) { last.querySelector(".revertbtn")?.click(); }
+        else systemCard("Nothing to undo yet — send a prompt first.");
+        break;
+      }
+      case "redo": unrevert(); break;
+      case "status": toggleCtx(true); break;
       default: systemCard(`Unknown command <b>/${cmd.replace(/</g, "&lt;")}</b>.<br>${SLASH_HELP.replace(/</g, "&lt;").replace(/\n/g, "<br>")}`); break;
     }
     scroll();
@@ -1194,6 +1252,10 @@
   function unrevert() {
     if (working || !lastReverted || !lastReverted.nodes.length) { if (!working) systemCard("Nothing to unrevert — ↩ revert on a turn stashes it here for one step."); return; }
     if (sessionId && lastReverted.sid && lastReverted.sid !== sessionId) { lastReverted = null; systemCard("Nothing to unrevert — the chat changed since that revert, so there is nothing safe to restore."); return; }
+    if (sessionId && lastReverted.keep != null) { // a new message sent post-revert grew the session — refuse, don't splice stale turns around it
+      const cur = (loadSessions().find(x => x.id === sessionId) || {}).turns;
+      if (cur && cur.length !== lastReverted.keep) { lastReverted = null; systemCard("Nothing to unrevert — you sent a new message after that revert, so there is nothing safe to restore."); return; }
+    }
     closePops(); clearFind();
     const ref = lastReverted.refNext && document.contains(lastReverted.refNext) ? lastReverted.refNext : null;
     lastReverted.nodes.forEach(n => transcript.insertBefore(n, ref));
@@ -1203,11 +1265,12 @@
       if (s) { s.turns = (lastReverted.turns || []).slice(0, 100); s.updated = Date.now(); saveSessions(all); }
     }
     lastReverted = null;
-    scroll(true);
+    scroll(true); intent.focus();
   }
   function buildCompactBlock(oldTurns, summaryText) {
     const block = document.createElement("div"); block.className = "compact";
     const hd = document.createElement("div"); hd.className = "chead";
+    hd.tabIndex = 0; hd.setAttribute("role", "button"); hd.setAttribute("aria-label", `Expand ${oldTurns.length} compacted turns`);
     const ht = document.createElement("span");
     ht.textContent = `🗜 ${oldTurns.length} earlier turns compacted — click to expand`;
     hd.appendChild(ht);
@@ -1216,7 +1279,9 @@
     if (summaryText) sum.textContent = summaryText;
     bd.appendChild(sum);
     oldTurns.forEach(t => bd.appendChild(t));
-    hd.addEventListener("click", () => { bd.style.display = bd.style.display === "none" ? "" : "none"; scroll(); });
+    const toggle = () => { bd.style.display = bd.style.display === "none" ? "" : "none"; scroll(); };
+    hd.addEventListener("click", toggle);
+    hd.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
     block.append(hd, bd);
     return { block, sum, body: bd };
   }
@@ -1234,7 +1299,7 @@
     const old = turns.slice(0, turns.length - keep);
     const digest = old.map(t => {
       const q = t.querySelector(".bubble.user")?.textContent || "";
-      const a = (t.querySelector(".forge")?.innerText || "").slice(0, 200);
+      const a = ((t.querySelector(".forge")?.textContent) || "").slice(0, 200);
       return "Q: " + q + "\nA: " + a;
     }).join("\n---\n");
     const { block, sum, body } = buildCompactBlock(old, hasBridge ? "Summarizing…" : null);
@@ -1253,6 +1318,7 @@
     if (!pendingCompact) return;
     pendingCompact.sum.textContent = titlesDigest(pendingCompact.body);
     pendingCompact = null;
+    systemCard("AI summary failed — kept titles instead so nothing was lost. Retry /compact to try again.");
   }
 
   function startWords() {
@@ -1292,12 +1358,15 @@
           more = document.createElement("div");
           more.className = "step"; more.setAttribute("data-more", "1");
           more.style.cursor = "pointer"; more.title = "Show all steps";
-          more.addEventListener("click", () => {
+          more.tabIndex = 0; more.setAttribute("role", "button");
+          const toggleMore = () => {
             const nowExp = stepsEl.dataset.exp !== "1";
             stepsEl.dataset.exp = nowExp ? "1" : "";
             [...stepsEl.children].forEach(x => { if (x !== more) x.style.display = (nowExp || x.dataset.keep === "1") ? "" : "none"; });
             more.innerHTML = `<span class="glyph">…</span><span>${nowExp ? "showing all steps — click to collapse" : (more.dataset.label || "earlier steps")}</span>`;
-          });
+          };
+          more.addEventListener("click", toggleMore);
+          more.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleMore(); } });
           stepsEl.prepend(more);
         }
         const exp = stepsEl.dataset.exp === "1";
@@ -1321,10 +1390,13 @@
     const wasTurn = !!turn && !!lastPrompt;
     if (thinkEl) { // a zero-tool text finish still closes a live think block (Kilo text-response parity)
       try { const hd = thinkEl.querySelector(".thead"); if (hd && /live/.test(hd.textContent)) hd.textContent = "Thought — click to expand"; thinkEl.classList.add("collapsed"); } catch (e) {}
+      if (thinkEl.contains(document.activeElement)) { try { intent.focus(); } catch (e) {} }
       thinkEl = null;
     }
     if (turn) {
+      const hadFocus = turn.thinking.contains(document.activeElement);
       turn.thinking.remove();
+      if (hadFocus) { try { intent.focus(); } catch (e) {} }
       if (html) turn.result.innerHTML = html;
     } else if (html) {
       systemCard(html);
@@ -1399,14 +1471,19 @@
       if (thinkEl && thinkEl.isConnected) { try { thinkEl.querySelector(".thead").textContent = "Thought — click to expand"; } catch (e) {} thinkEl = null; }
       thinkEl = document.createElement("div");
       thinkEl.className = "think";
+      thinkEl.setAttribute("aria-live", "polite");
       const tn = (m.model ? String(m.model).split("/").pop() : "");
       thinkEl.innerHTML = "";
       const hd = document.createElement("div"); hd.className = "thead";
-      thinkEl._t0 = Date.now(); thinkEl._label = m.label || "Thinking"; thinkEl._model = tn;
+      hd.tabIndex = 0; hd.setAttribute("role", "button");
+      thinkEl._t0 = Date.now(); thinkEl._label = m.label || "Thinking"; thinkEl._model = tn; thinkEl._len = 0;
       hd.textContent = `✨ ${thinkEl._label}` + (tn ? ` · ${tn}` : "") + "… (live · 0s)";
       const bd = document.createElement("div"); bd.className = "tbody";
       thinkEl.append(hd, bd);
-      hd.addEventListener("click", () => { try { thinkEl.classList.toggle("collapsed"); } catch (e) {} });
+      const selfThink = thinkEl; // capture the block: the shared var moves on to the next think
+      const toggleThink = () => { try { selfThink.classList.toggle("collapsed"); } catch (e) {} };
+      hd.addEventListener("click", toggleThink);
+      hd.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleThink(); } });
       turn.result.appendChild(thinkEl); scroll();
     }
     else if (m.type === "think") {
@@ -1415,7 +1492,8 @@
       if (bd && m.text) {
         const last = bd.lastChild; // coalesce into one text node so long runs can't grow unbounded DOM
         if (last && last.nodeType === 3) last.data += m.text; else bd.append(document.createTextNode(m.text));
-        if (bd.textContent.length > 4000) thinkEl.classList.add("collapsed"); // auto-collapse long blocks
+        thinkEl._len = (thinkEl._len || 0) + m.text.length; // O(1) length tracking, not O(n) textContent scan
+        if (thinkEl._len > 4000) thinkEl.classList.add("collapsed"); // auto-collapse long blocks
         const hd2 = thinkEl.querySelector(".thead");
         if (hd2) {
           const s = Math.floor((Date.now() - (thinkEl._t0 || Date.now())) / 1000);
@@ -1488,7 +1566,7 @@
     else if (m.type === "files") {
       menItems = (m.files || []).slice(0, 50);
       menIdx = 0;
-      if (menQuery()) { menOpen = true; $("menpop").style.display = "flex"; renderMenList(); }
+      if (menQuery()) { menOpen = true; showPop("menpop"); renderMenList(); }
     }
 
     else if (m.type === "enhanced") {      if (preEnhance === null) preEnhance = (typeof enhanceDraft === "string" && enhanceDraft) ? enhanceDraft : intent.value;
@@ -1659,7 +1737,7 @@
   // Pure panel UI; the host (ForgePanel.cs) later sends { type:"firstrun" } and handles the key save via DPAPI.
   let onboarded = false;
   function showOnboard() {
-    if (onboarded || localStorage.getItem("forge_onboarded")) return;
+    if (onboarded || safeGet("forge_onboarded")) return;
     onboarded = true;
     const o = document.createElement("div"); o.className = "onboard"; o.id = "onboard";
     let page = 1;
@@ -1761,12 +1839,12 @@
     const done = () => {
         const pr = o.querySelector("#obprov");
         applyLocalProvider((pr && pr.value) || o.dataset.prov || null, null);
-        try { localStorage.setItem("forge_onboarded","1"); } catch (e) {} try { if (o.dataset.saved) post({ action: "getProvider" }); } catch (e2) {} o.remove(); refresh(); intent.focus(); };
+        try { safeSet("forge_onboarded","1"); } catch (e) {} try { if (o.dataset.saved) post({ action: "getProvider" }); } catch (e2) {} o.remove(); refresh(); intent.focus(); };
     render();
     transcript.appendChild(o);
   }
   // the host tells us it's a fresh run; until it does, the standalone preview still shows onboarding once
-  if (!hasBridge && !localStorage.getItem("forge_onboarded")) showOnboard();
+  if (!hasBridge && !safeGet("forge_onboarded")) showOnboard();
 
   if (hasBridge) try { window.chrome.webview.addEventListener("message", (e) => handle(JSON.parse(e.data))); } catch (e) {}
 
@@ -1858,14 +1936,16 @@
     post({ action: "attach" });
   });
   $("regen").addEventListener("click", () => {
-    if (working || !lastPrompt || lastPrompt.startsWith("/")) {
-      if (!lastPrompt || lastPrompt.startsWith("/")) systemCard("Nothing to regenerate yet — send a prompt first, then ↻ or /regen re-runs it.");
+    if (working) { systemCard("Still working — wait for this run (or Esc to stop it), then ↻ re-runs the last prompt."); return; }
+    if (!lastPrompt || lastPrompt.startsWith("/")) {
+      systemCard("Nothing to regenerate yet — send a prompt first, then ↻ or /regen re-runs it.");
       return;
     }
     run(lastPrompt);
   });
 
   // Kilo-style revert: drop this turn and everything after, restore the text for editing.
+  // Conversation-only rewind: the CAD model is untouched (no snapshots) — resend to rebuild on it.
   // The host clears its pending thread so the conversation continues from this point.
   // One-step unrevert: removed nodes + session turns are stashed; /unrevert restores them.
   transcript.addEventListener("click", (e) => {
@@ -1879,11 +1959,11 @@
     const flat = [...transcript.querySelectorAll(".turn")].filter(x => x.querySelector(":scope > .bubble.user"));
     const keep = Math.max(0, flat.indexOf(turnEl));
     post({ action: "revert", sid: sessionId, keep: keep });
-    let savedTurns = null;
+    let savedTurns = null, keepCount = null;
     if (sessionId) {
       const all = loadSessions();
       const s = all.find(x => x.id === sessionId);
-      if (s) { savedTurns = s.turns.slice(keep); s.turns = s.turns.slice(0, keep); s.updated = Date.now(); saveSessions(all); }
+      if (s) { savedTurns = s.turns.slice(keep); s.turns = s.turns.slice(0, keep); s.updated = Date.now(); saveSessions(all); keepCount = s.turns.length; }
     }
     let top = turnEl;
     while (top.parentElement && top.parentElement !== transcript) top = top.parentElement;
@@ -1893,9 +1973,10 @@
     removed.unshift(top); top.remove();
     if (pendingCompact && !document.contains(pendingCompact.body)) pendingCompact = null;
     if (thinkEl && !thinkEl.isConnected) thinkEl = null;
-    if (removed.length) lastReverted = { nodes: removed, refNext: nxt || null, sid: sessionId, turns: savedTurns };
+    if (removed.length) lastReverted = { nodes: removed, refNext: nxt || null, sid: sessionId, turns: savedTurns, keep: keepCount };
     else lastReverted = null;
     if (bubble) { intent.value = bubble.textContent; grow(); }
+    systemCard("Rewound conversation here — the CAD model itself is unchanged. Edit and resend to continue from this point.");
     preEnhance = null; $("enhanceUndo").style.display = "none";
     turn = null; thinkEl = null; working = false; stopWords();
     clearFind(); closePops();
@@ -1920,7 +2001,7 @@
   $("enhance").addEventListener("click", () => {
     if (enhanceActive) return;
     if (!hasBridge) { systemCard(needBridgeMsg("✨ Enhance") + " Tip: open Settings (⚙) to add a provider key first."); return; }
-    if (needsKey()) { systemCard(`✨ Enhance needs a provider key — paste it in Settings → API key for <b>${curSlug}</b>, hit Save, then Enhance again. Your draft is kept.`); settingsEl.style.display = "flex"; return; }
+    if (needsKey()) { systemCard(`✨ Enhance needs a provider key — paste it in Settings → API key for <b>${curSlug}</b>, hit Save, then Enhance again. Your draft is kept.`); showPop("settings"); return; }
     const eb = $("enhance");
     const draft = intent.value.trim();
     if (!draft) {
@@ -1949,9 +2030,9 @@
   // Favorites/recents are {provider, model} so identical ids on different providers don't collide.
   // Legacy plain-string entries migrate on read (match any provider).
   const normFav = (a) => (Array.isArray(a) ? a : []).map(x => typeof x === "string" ? { p: null, m: x } : x).filter(x => x && x.m);
-  const getFavs = () => { try { return normFav(JSON.parse(localStorage.getItem(favKey))); } catch (e) { return []; } };
+  const getFavs = () => { try { return normFav(JSON.parse(safeGet(favKey))); } catch (e) { return []; } };
   const setFavs = (a) => { try { safeSet(favKey, JSON.stringify(a)); } catch (e) {} };
-  const getRecents = () => { try { return normFav(JSON.parse(localStorage.getItem(recKey))); } catch (e) { return []; } };
+  const getRecents = () => { try { return normFav(JSON.parse(safeGet(recKey))); } catch (e) { return []; } };
   const setRecents = (a) => { try { safeSet(recKey, JSON.stringify(a)); } catch (e) {} };
   const favMatch = (f, id) => f.m === id && (!f.p || !curSlug || f.p === curSlug);
   const isFav = (id) => getFavs().some(f => favMatch(f, id));
@@ -1973,9 +2054,10 @@
   }
   function openModels() {
     if (!hasBridge) { systemCard(needBridgeMsg("The model picker")); return; }
-    if (needsKey()) { systemCard(`No key saved for <b>${curSlug || "this provider"}</b> — paste it in Settings → API key, hit Save, then Refresh.`); settingsEl.style.display = "flex"; }
+    if (needsKey()) { systemCard(`No key saved for <b>${curSlug || "this provider"}</b> — paste it in Settings → API key, hit Save, then Refresh.`); showPop("settings"); }
     if (!chatModels.length && curDynamic) post({ action: "refreshModels" });
-    $("modelpop").style.display = "flex";
+    closeOthers("modelpop");
+    $("modelpop").style.display = "flex"; setExpanded("modelpick", true);
     $("msearch").value = "";
     renderModelList("");
     requestAnimationFrame(() => {
@@ -1985,7 +2067,8 @@
     });
   }
   function closeModels(refocus) {
-    $("modelpop").style.display = "none";
+    focusIfHidden($("modelpop"));
+    $("modelpop").style.display = "none"; setExpanded("modelpick", false);
     if (refocus !== false) intent.focus();
   }
   function renderModelList(q) {
@@ -1996,20 +2079,35 @@
     const recents = getRecents().map(r => r.m).filter(id => items.includes(id));
     const showFavs = !query && items.some(isFav);
     const showRecents = !query && recents.length > 0;
-    const favRows = (id) => !isFav(id) && !(showRecents && recents.includes(id));
     const groups = [];
-    if (showRecents) groups.push({ label: "🕘 Recent", rows: recents });
     if (showFavs) groups.push({ label: "★ Favorites", rows: items.filter(isFav) });
-    const rest = query ? items : items.filter(favRows);
-    // Kilo parity: group the live list by vendor prefix when several vendors are present.
-    const vendor = (id) => { const s = String(id || ""); const i = s.indexOf("/"); if (i > 0) return s.slice(0, i); const j = s.indexOf("-"); return j > 0 ? s.slice(0, j) : "other"; };
-    const vendors = [...new Set(rest.map(vendor))];
-    if (!query && vendors.length > 1) vendors.sort().forEach(v => groups.push({ label: v, rows: rest.filter(id => vendor(id) === v) }));
+    if (showRecents) groups.push({ label: "🕘 Recent", rows: recents, clearable: true });
+    const rest = query ? items : items.filter(id => !isFav(id));
+    // Kilo parity: group the live list by vendor when several vendors are present.
+    // Prefer the known provider slug (fav/recents carry it); fall back to the model id prefix.
+    const vendorFor = (id) => {
+      const rec = getRecents().find(r => r.m === id);
+      if (rec && rec.p) return rec.p;
+      const fav = getFavs().find(f => f.m === id);
+      if (fav && fav.p) return fav.p;
+      if (curSlug) return curSlug;
+      return "models";
+    };
+    const vendors = [...new Set(rest.map(vendorFor))];
+    if (!query && vendors.length > 1) vendors.sort().forEach(v => groups.push({ label: v, rows: rest.filter(id => vendorFor(id) === v) }));
     else groups.push({ label: "Models", rows: rest });
     let shown = 0;
     groups.forEach(g => {
       if (!g.rows.length) return;
       const gl = document.createElement("div"); gl.className = "mgroup"; gl.textContent = g.label; list.appendChild(gl);
+      if (g.clearable) {
+        const clr = document.createElement("span");
+        clr.textContent = " · clear";
+        clr.style.cssText = "cursor:pointer;text-transform:none;letter-spacing:0";
+        clr.title = "Clear recent models";
+        clr.addEventListener("click", (e) => { e.stopPropagation(); setRecents([]); renderModelList($("msearch").value); });
+        gl.appendChild(clr);
+      }
       g.rows.forEach(id => {
         shown++;
         const row = document.createElement("div");
@@ -2050,7 +2148,7 @@
   }
   $("modelpick").addEventListener("click", (e) => {
     e.stopPropagation();
-    $("modelpop").style.display === "none" ? openModels() : closeModels(false);
+    $("modelpop").style.display === "none" ? openModels() : closeModels();
   });
   $("msearch").addEventListener("input", () => renderModelList($("msearch").value));
   $("msearch").addEventListener("keydown", (e) => {
@@ -2077,7 +2175,7 @@
   $("mrefresh").addEventListener("click", (e) => {
     e.stopPropagation();
     if (!hasBridge) { $("mcount").textContent = "Preview mode — needs SolidWorks."; systemCard(needBridgeMsg("Refreshing models")); return; }
-    if (needsKey()) { $("mcount").textContent = "Needs a key — see Settings."; systemCard(`Can't refresh models without a key — paste it in Settings → API key for <b>${curSlug}</b>, hit Save, then Refresh.`); settingsEl.style.display = "flex"; return; }
+    if (needsKey()) { $("mcount").textContent = "Needs a key — see Settings."; systemCard(`Can't refresh models without a key — paste it in Settings → API key for <b>${curSlug}</b>, hit Save, then Refresh.`); showPop("settings"); return; }
     $("mcount").textContent = "Loading…";
     post({ action: "refreshModels" });
     setTimeout(() => { if ($("mcount").textContent === "Loading…") { $("mcount").textContent = "Couldn't load models."; $("mcount").title = "No reply — check the key, then hit Refresh."; } }, 8000);

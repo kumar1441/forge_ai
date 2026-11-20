@@ -70,6 +70,14 @@ namespace Forge.SolidWorks
                 {
                     var f = tok as JObject; if (f == null) continue;
                     string op = ((string)f["op"] ?? "").Trim().ToLowerInvariant();
+                    // Doc closed mid-run (user closed it while we built): every later COM call
+                    // would throw — stop here with an honest message instead of a COM cascade.
+                    if (!IsDocAlive(ctx))
+                    {
+                        result.Error = "The model was closed mid-build — reopen it and ask again.";
+                        result.FailedOp = op;
+                        break;
+                    }
                     bool ok;
                     try { ok = ExecuteOp(ctx, op, f); }
                     catch (Exception ex)
@@ -86,13 +94,15 @@ namespace Forge.SolidWorks
                 }
 
                 // ---- rebuild + verify (independently of the ops' own return codes) ----
-                try { doc.ForceRebuild3(false); } catch { }
-                Verify(ctx);
+                // A doc closed on the last op leaves nothing to rebuild, verify, or save.
+                bool alive = IsDocAlive(ctx);
+                try { if (alive) doc.ForceRebuild3(false); } catch { }
+                if (alive) Verify(ctx);
 
                 // ---- save the artifact (even on failure, so the corpus keeps the model + path) ----
                 // Chat (keepOpen) skips the file entirely: like every other create handler, Forge never saves by
                 // default — the fresh document just stays open in SolidWorks.
-                if (!keepOpen)
+                if (!keepOpen && alive)
                 {
                     string ext = asm ? ".SLDASM" : ".SLDPRT";
                     string path = Path.Combine(outDir, SafeName(recipe.Name) + ext);
@@ -147,6 +157,8 @@ namespace Forge.SolidWorks
             string id = (string)f["id"];
             string plane = (string)f["plane"] ?? "Front";
             var entities = f["entities"] as JArray;
+            // A runaway entity list (100k rects) would hang SolidWorks sketching: fail fast instead.
+            if (entities != null && entities.Count > 2000) { c.Result.Step("sketch", "", false, "lists " + entities.Count + " entities (cap is 2000)"); return false; }
             if (!SelectSketchPlane(c, plane)) { c.Result.Step("sketch", "SelectByID2", false, "could not select plane '" + plane + "'"); return false; }
 
             var sk = c.Doc.SketchManager;
@@ -189,6 +201,8 @@ namespace Forge.SolidWorks
                     {
                         double cx = D(e, "cx"), cy = D(e, "cy"), r = D(e, "r");
                         int sides = (int?)e["sides"] ?? 6;
+                        // Zero/huge side counts reach the SW polygon call: clamp before it hangs or throws.
+                        if (sides < 3 || sides > 100) { c.Result.Step("sketch", "", false, "polygon sides=" + e["sides"]?.ToString() + " (must be 3-100)"); return false; }
                         // inscribed radius: a point on the polygon sits at (cx+r, cy)
                         sk.CreatePolygon(cx * MM, cy * MM, 0, (cx + r) * MM, cy * MM, 0, sides, true);
                         return true;
@@ -274,6 +288,8 @@ namespace Forge.SolidWorks
             double depth = D(f, "depthMm");
             var positions = f["positions"] as JArray;
             if (positions == null || positions.Count == 0) { c.Result.Step("hole", "", false, "no positions"); return false; }
+            // Validator caps at 1000, but the executor also runs unvalidated nested recipes: cap here too.
+            if (positions.Count > 1000) { c.Result.Step("hole", "", false, "lists " + positions.Count + " positions (cap is 1000)"); return false; }
 
             if (PreferHoleWizard && TryHoleWizard(c, id, onFace, standard, dia, through, depth, positions))
                 return true;
@@ -373,10 +389,13 @@ namespace Forge.SolidWorks
             if (axis1 == null) { c.Result.Step("linear_pattern", "InsertAxis2", false, "could not build dir axis"); return false; }
             int n1 = (int?)f["count"] ?? 2;
             double s1 = D(f, "spacingMm") * MM;
+            // A 1M-instance pattern would hang SolidWorks: same 1-500 bounds the recipe validator enforces.
+            if (n1 < 1 || n1 > 500) { c.Result.Step("linear_pattern", "", false, "count=" + f["count"]?.ToString() + " (must be 1-500)"); return false; }
 
             bool two = f["dir2"] != null && f["count2"] != null;
             Feature axis2 = two ? EnsureAxis(c, (string)f["dir2"]) : null;
             int n2 = two ? ((int?)f["count2"] ?? 1) : 0;
+            if (two && (n2 < 1 || n2 > 500)) { c.Result.Step("linear_pattern", "", false, "count2=" + f["count2"]?.ToString() + " (must be 1-500)"); return false; }
             double s2 = two ? D(f, "spacing2Mm") * MM : 0;
 
             c.Doc.ClearSelection2(true);
@@ -403,7 +422,9 @@ namespace Forge.SolidWorks
             var axis = EnsureAxis(c, ((string)f["axis"] ?? "z"));
             if (axis == null) { c.Result.Step("circular_pattern", "InsertAxis2", false, "could not build axis"); return false; }
             int n = (int?)f["count"] ?? 2;
+            if (n < 1 || n > 500) { c.Result.Step("circular_pattern", "", false, "count=" + f["count"]?.ToString() + " (must be 1-500)"); return false; }
             double angDeg = (double?)f["angleDeg"] ?? 360.0;
+            if (!Finite(angDeg) || Math.Abs(angDeg) > 1000000.0) { c.Result.Step("circular_pattern", "", false, "angleDeg is not a usable angle"); return false; }
             bool equal = (bool?)f["equal"] ?? true;
 
             c.Doc.ClearSelection2(true);
@@ -444,6 +465,7 @@ namespace Forge.SolidWorks
             string target = ((string)f["target"] ?? "all_edges").ToLowerInvariant();
             double dist = D(f, "distanceMm");
             double angDeg = (double?)f["angleDeg"] ?? 45.0;
+            if (!Finite(angDeg) || Math.Abs(angDeg) > 1000000.0) { c.Result.Step("chamfer", "", false, "angleDeg is not a usable angle"); return false; }
             int n = SelectTargetEdges(c, target);
             if (n == 0) { c.Result.Step("chamfer", "Select4", false, "no edges resolved for target '" + target + "'"); return false; }
 
@@ -647,6 +669,7 @@ namespace Forge.SolidWorks
                 var parts = descriptor.Split(':');
                 if (parts.Length != 3) return false;
                 double mm; if (!double.TryParse(parts[2], out mm)) return false;
+                if (!Finite(mm) || Math.Abs(mm) > 1000000.0) return false;
                 var plane = BuildOffsetPlane(c, parts[1], mm);
                 if (plane == null) return false;
                 return plane.Select2(false, 0);
@@ -1019,17 +1042,45 @@ namespace Forge.SolidWorks
 
         // ---------------------------------------------------------------- misc
 
-        private static double D(JObject o, string key) { return (double?)o[key] ?? 0.0; }
+        // Fail-closed number reader: missing/null reads as 0 (unchanged); wrong-type strings are
+        // parsed invariantly ("NaN"/"Infinity"/huge/abc become honest per-op failures via throw, which
+        // the Execute loop records); non-finite and absurd magnitudes never reach the SW API, where a
+        // NaN depth or 1e300mm extrude could hang or corrupt instead of failing loudly.
+        private static double D(JObject o, string key)
+        {
+            JToken t;
+            try { t = o[key]; }
+            catch { return 0.0; }
+            if (t == null || t.Type == JTokenType.Null) return 0.0;
+            try
+            {
+                double v;
+                if (t.Type == JTokenType.String)
+                {
+                    string s = ((string)t ?? "").Trim();
+                    if (s.Length == 0) return 0.0;
+                    if (!double.TryParse(s, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out v))
+                        throw new FormatException("'" + key + "' is not a number");
+                }
+                else v = (double?)t ?? 0.0;
+                if (!Finite(v)) throw new FormatException("'" + key + "' is not finite");
+                if (Math.Abs(v) > 1000000.0) throw new FormatException("'" + key + "'=" + v + "mm is out of range (cap 1000000mm)");
+                return v;
+            }
+            catch (FormatException) { throw; }
+            catch { return 0.0; }
+        }
+
+        private static bool Finite(double v) { return !double.IsNaN(v) && !double.IsInfinity(v); }
+
+        // The Execute loop's per-op liveness probe: a closed doc throws on any COM call.
+        private static bool IsDocAlive(Ctx c)
+        {
+            try { if (c == null || c.Doc == null) return false; string t = c.Doc.GetTitle(); return true; }
+            catch { return false; }
+        }
         private static double Round(double v) { return Math.Round(v, 3); }
         private static bool Near(double a, double b) { return Math.Abs(a - b) <= 0.01; }
-
-        private static bool SortedNear(double[] a, double[] b)
-        {
-            var x = (double[])a.Clone(); var y = (double[])b.Clone();
-            Array.Sort(x); Array.Sort(y);
-            for (int i = 0; i < x.Length; i++) if (Math.Abs(x[i] - y[i]) > 0.01) return false;
-            return true;
-        }
 
         private static string SafeName(string name)
         {

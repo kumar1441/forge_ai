@@ -165,6 +165,8 @@ namespace Forge.SolidWorks
                 while ((line = reader.ReadLine()) != null)
                 {
                     if (string.IsNullOrWhiteSpace(line)) continue;
+                    // A hostile/garbled server line must never reach the JSON parser unbounded.
+                    if (line.Length > 1000000) continue;
                     int id = -1;
                     TaskCompletionSource<string> tcs = null;
                     try

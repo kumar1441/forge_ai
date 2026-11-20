@@ -5392,6 +5392,11 @@ namespace Forge.SolidWorks
         //      outcome so a multi-op chain can decide whether to run its next leg. ----
         private async Task<HOutcome> ExecuteSpec(HSpec spec, IModelDoc2 doc, IntentPlan plan, IntentOperation op, string intent)
         {
+            // The doc is captured before awaits (cloud parse, approvals): it can be null or closed
+            // by the time we run. Fail closed with an actionable message — never a COM cascade.
+            if (doc == null) { Send(new { type = "error", message = "Open a part or assembly first, then tell me what to do." }); return new HOutcome { Error = "no open document" }; }
+            try { string probe = doc.GetTitle(); }
+            catch { Send(new { type = "error", message = "The model was closed — reopen it and ask again." }); return new HOutcome { Error = "model closed" }; }
             OpCounter.Increment();
             ForgeData.RunBegin(spec.Name, ForgeData.Mask(intent, IntentLayer.ComponentNames(doc)), 0);
             var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -6065,20 +6070,6 @@ namespace Forge.SolidWorks
         {
             try { var a = doc as AssemblyDoc; if (a != null) return a.GetComponentCount(false); } catch { }
             return 0;
-        }
-        // Count sibling .slddrw files next to the open doc — the drawing-package preview needs a count without
-        // pulling in DrawingPkg internals.
-        private static int DrawingPkgCount(IModelDoc2 doc)
-        {
-            try
-            {
-                string p = doc.GetPathName();
-                if (string.IsNullOrEmpty(p)) return 0;
-                string dir = System.IO.Path.GetDirectoryName(p);
-                if (string.IsNullOrEmpty(dir) || !System.IO.Directory.Exists(dir)) return 0;
-                return System.IO.Directory.GetFiles(dir, "*.slddrw").Length;
-            }
-            catch { return 0; }
         }
         // Read-only handlers log as read_run (like scan): they never write the model.
         private static bool IsReadHandler(string name)

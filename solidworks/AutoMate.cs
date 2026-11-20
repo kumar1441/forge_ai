@@ -109,26 +109,9 @@ namespace Forge.SolidWorks
             return false;
         }
 
-        // largest ⊥-to-axis face area on a component's face list — the bolt HEAD (heads are the widest flat).
-        private static double MaxPerpArea(List<Plane> planes, double[] ax)
-        {
-            double mx = 0;
-            foreach (var f in planes)
-                if (Math.Abs(Math.Abs(f.N[0] * ax[0] + f.N[1] * ax[1] + f.N[2] * ax[2]) - 1.0) <= 5e-2 && f.Area > mx) mx = f.Area;
-            return mx;
-        }
-
         private static bool PerpAxis(double[] n, double[] ax) =>
             Math.Abs(Math.Abs(n[0] * ax[0] + n[1] * ax[1] + n[2] * ax[2]) - 1.0) <= 5e-2;
         private static double Dot(double[] a, double[] b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-
-        // largest ⊥-to-axis planar face on a face list (the bolt HEAD, or a big flat flange face).
-        private static Plane LargestPerp(List<Plane> planes, double[] ax)
-        {
-            Plane best = null;
-            foreach (var f in planes) { if (!PerpAxis(f.N, ax)) continue; if (best == null || f.Area > best.Area) best = f; }
-            return best;
-        }
 
         private const int MATE_OK = (int)swAddMateError_e.swAddMateError_NoError;              // 1 (NOT 0)
         private const int MATE_OVERDEF = (int)swAddMateError_e.swAddMateError_OverDefinedAssembly; // 5
