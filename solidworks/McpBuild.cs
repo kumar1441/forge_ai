@@ -128,9 +128,9 @@ namespace Forge.SolidWorks
             }
 
             var steps = plan["steps"] as JArray;
-            if (steps == null || steps.Count == 0 || steps.Count > 15)
+            if (steps == null || steps.Count == 0 || steps.Count > 40)
             {
-                outcome.Error = "The plan has " + (steps == null ? 0 : steps.Count) + " steps (chat builds cap at 15) — split it into smaller builds.";
+                outcome.Error = "The plan has " + (steps == null ? 0 : steps.Count) + " steps (chat builds cap at 40) — split it into smaller builds.";
                 return outcome;
             }
             foreach (var s in steps)
@@ -195,9 +195,9 @@ namespace Forge.SolidWorks
 
         private static async Task<Tuple<JObject, string>> AuthorPlan(IProviderClient client, string intent, List<string> catalog)
         {
-            // Generous cap: reasoning models spend tokens thinking before emitting JSON — a tight
-            // cap slices the plan mid-object and extraction fails closed.
-            var opts = new ProviderOptions { MaxTokens = 16000, Temperature = 0 };
+            // Finite cap: uncapped lets reasoning models think forever and the call never returns.
+            // Verified live: capped calls complete; uncapped hang past the 10-minute timeout.
+            var opts = new ProviderOptions { MaxTokens = 32000, Temperature = 0 };
             string user = "User said: \"" + (intent ?? "").Trim() + "\"\n\nOutput ONLY the plan JSON. No markdown fences, no commentary.";
             string lastDiag = "no attempts made";
             for (int attempt = 0; attempt < 2; attempt++)
@@ -209,7 +209,13 @@ namespace Forge.SolidWorks
                 };
                 ProviderResult res;
                 try { res = await client.CompleteAsync(msgs, opts, CancellationToken.None); }
-                catch (Exception ex) { return new Tuple<JObject, string>(null, "provider call failed: " + ex.GetType().Name + " " + ex.Message); }
+                catch (Exception ex)
+                {
+                    string why = (ex.Message ?? "");
+                    if (why.Contains("timed out"))
+                        return new Tuple<JObject, string>(null, "TIMED OUT after 10 minutes of thinking — the model is overloaded or the plan is too big; retry, simplify, or switch to a faster model");
+                    return new Tuple<JObject, string>(null, "provider call failed: " + ex.GetType().Name + " " + ex.Message);
+                }
                 string raw = res != null ? res.Text : null;
                 string err;
                 var plan = SafeJsonExtractor.ExtractResponseEnvelope(raw, out err);
@@ -239,6 +245,7 @@ namespace Forge.SolidWorks
             "Reply with ONLY the JSON object.\n" +
             "Schema: {\"steps\":[{\"tool\":\"<exact tool name>\",\"args\":{...}}]} " +
             "Args use each tool's own parameter names (mm for lengths, degrees for angles). " +
-            "Keep it to 15 steps max — one base solid plus its real features, no filler steps.";
+            "Intricate machines legitimately need dozens of steps — use up to 40, one tool call per " +
+            "part or feature, no filler steps.";
     }
 }

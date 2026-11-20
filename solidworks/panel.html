@@ -66,6 +66,9 @@
     border:1px solid var(--line); border-radius:14px 14px 4px 14px;
     padding:9px 13px; font-size:13.5px; white-space:pre-wrap; word-break:break-word;
   }
+  .turn .revertbtn { align-self:flex-end; background:none; border:1px solid transparent;
+    border-radius:7px; color:var(--faint); font:inherit; font-size:11px; padding:1px 8px; cursor:pointer; }
+  .turn .revertbtn:hover { border-color:var(--line); color:var(--soft); }
   .forge { display:flex; flex-direction:column; gap:6px; }
 
   /* the named-crew step lines — the honest machinery */
@@ -454,6 +457,10 @@
     t.className = "turn";
     const u = document.createElement("div");
     u.className = "bubble user"; u.textContent = text;
+    const rv = document.createElement("button");
+    rv.className = "revertbtn"; rv.title = "Revert to here — edit and resend from this point";
+    rv.textContent = "↩ revert";
+    t.append(u, rv);
     const f = document.createElement("div"); f.className = "forge";
     const steps = document.createElement("div"); steps.className = "steps";
     const thinking = document.createElement("div"); thinking.className = "thinking";
@@ -901,7 +908,23 @@
   function hideChip() { const chip = $("chip"); chip.style.display = "none"; chip.innerHTML = ""; }
   $("attach").addEventListener("click", () => post({ action: "attach" }));
 
-  // ---- prompt enrichment (Kilo "Enhance Prompt" port) ----
+  // Kilo-style revert: drop this turn and everything after, restore the text for editing.
+  // The host clears its pending thread so the conversation continues from this point.
+  transcript.addEventListener("click", (e) => {
+    const btn = e.target.closest(".revertbtn");
+    if (!btn) return;
+    const turn = btn.closest(".turn");
+    if (!turn) return;
+    const bubble = turn.querySelector(".bubble.user");
+    let nxt = turn.nextElementSibling;
+    while (nxt) { const rm = nxt; nxt = nxt.nextElementSibling; rm.remove(); }
+    turn.remove();
+    if (bubble) { intent.value = bubble.textContent; grow(); }
+    preEnhance = null; $("enhanceUndo").style.display = "none";
+    turn = null; stopWords();
+    intent.focus(); scroll();
+    post({ action: "revert" });
+  });
   let preEnhance = null, enhanceActive = false, enhanceTimer = null, enhanceT0 = 0;
   const ebReset = () => {
     const eb = $("enhance");

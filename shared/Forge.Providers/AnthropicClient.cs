@@ -33,7 +33,8 @@ namespace Forge.Providers
         private static HttpClient CreateClient()
         {
             ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
-            return new HttpClient { Timeout = TimeSpan.FromSeconds(120) };
+            // Thinking models run uncapped (50k+ tokens) — the call stays open as long as they need.
+            return new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
         }
 
         public async Task<ProviderResult> CompleteAsync(IReadOnlyList<ChatMessage> messages, ProviderOptions opts, CancellationToken ct)
@@ -46,25 +47,35 @@ namespace Forge.Providers
             string url = BuildUrl(opts);
             string body = BuildBody(messages, opts, model);
 
-            using (var req = new HttpRequestMessage(HttpMethod.Post, url))
+            // Transient overload (429/5xx incl. 529) retries with backoff; fresh message per
+            // attempt since Framework HttpClient won't resend one. Non-transient errors throw at once.
+            for (int attempt = 0; ; attempt++)
             {
-                if (!string.IsNullOrEmpty(_apiKey))
-                    req.Headers.TryAddWithoutValidation("x-api-key", _apiKey);
-                req.Headers.TryAddWithoutValidation("anthropic-version", ApiVersion);
-                req.Content = new StringContent(body, Encoding.UTF8, "application/json");
-
-                HttpResponseMessage resp;
-                try { resp = await Http.SendAsync(req, ct).ConfigureAwait(false); }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-                catch (TaskCanceledException) { throw new ProviderException("Provider request timed out."); }
-                catch (HttpRequestException ex) { throw new ProviderException("Provider network failure: " + ex.Message, ex); }
-
-                using (resp)
+                using (var req = new HttpRequestMessage(HttpMethod.Post, url))
                 {
-                    string text = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-                    if (!resp.IsSuccessStatusCode)
-                        throw new ProviderException("Provider HTTP " + (int)resp.StatusCode + " (" + resp.StatusCode + "): " + Truncate(text));
-                    return Parse(text, model);
+                    if (!string.IsNullOrEmpty(_apiKey))
+                        req.Headers.TryAddWithoutValidation("x-api-key", _apiKey);
+                    req.Headers.TryAddWithoutValidation("anthropic-version", ApiVersion);
+                    req.Content = new StringContent(body, Encoding.UTF8, "application/json");
+
+                    HttpResponseMessage resp;
+                    try { resp = await Http.SendAsync(req, ct).ConfigureAwait(false); }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                    catch (TaskCanceledException) { throw new ProviderException("Provider request timed out."); }
+                    catch (HttpRequestException ex) { throw new ProviderException("Provider network failure: " + ex.Message, ex); }
+
+                    using (resp)
+                    {
+                        string text = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                        if (resp.IsSuccessStatusCode)
+                            return Parse(text, model);
+                        int code = (int)resp.StatusCode;
+                        bool transient = code == 429 || code == 500 || code == 502 || code == 503 || code == 529;
+                        if (!transient || attempt >= 3)
+                            throw new ProviderException("Provider HTTP " + code + " (" + resp.StatusCode + "): " + Truncate(text));
+                        try { await Task.Delay(TimeSpan.FromSeconds(5 * (attempt + 1)), ct).ConfigureAwait(false); }
+                        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                    }
                 }
             }
         }
