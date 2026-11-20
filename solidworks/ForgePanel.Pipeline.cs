@@ -5409,8 +5409,8 @@ namespace Forge.SolidWorks
             {
                 LogRun(spec.Name, intent, doc, "error", false, 0, plan, ex.GetType().Name, sw.ElapsedMilliseconds);
                 Telemetry.Log("edit_run", success: false, swVersion: SwVer(), opsUsed: OpCounter.Count, errorCode: ex.GetType().Name, questionType: "edit", questionSummary: spec.Name);
-                Send(new { type = "error", message = ex.Message });
-                return new HOutcome { Error = ex.Message };
+                Send(new { type = "error", message = "Couldn't finish '" + spec.Name + "' (" + BoundDetail(ex.Message, 300) + ") — check the model for partial changes, then retry." });
+                return new HOutcome { Error = BoundDetail(ex.Message, 200) };
             }
 
             // confirm-or-ask surfaced by the handler itself (e.g. material: unknown target) — Rule #2.
@@ -5700,7 +5700,7 @@ namespace Forge.SolidWorks
             CreateFromRecipe.RecipeCreateOutcome rc;
             try { rc = await CreateFromRecipe.Run(App, intent, emitR, ct); }
             catch (OperationCanceledException) { if (myIdR == _currentRunId) Send(new { type = "answer", answer = "Interrupted — nothing was built. Edit and resend, or ↩ revert to an earlier prompt.", runId = _currentRunId, handler = "create_recipe" }); return true; }
-            catch (Exception ex) { if (myIdR == _currentRunId) Send(new { type = "answer", answer = "Recipe build failed: " + ex.Message + " — nothing was built; edit and resend.", runId = _currentRunId, handler = "create_recipe" }); return true; }
+            catch (Exception ex) { if (myIdR == _currentRunId) Send(new { type = "answer", answer = "Recipe build failed (" + BoundDetail(ex.Message, 300) + ") — nothing was built; edit and resend.", runId = _currentRunId, handler = "create_recipe" }); return true; }
             if (myIdR != _currentRunId) return true; // superseded: don't attribute our answer to the new run
             if (rc == null || !rc.Attempted) return false; // no provider / not claimable: existing paths keep behaviour
             if (!string.IsNullOrEmpty(rc.Error))
@@ -5750,7 +5750,7 @@ namespace Forge.SolidWorks
             {
                 try { relay.End(true); } catch { }
                 if (myId == _currentRunId)
-                    Send(new { type = "answer", answer = "Build failed: " + ex.Message + " — what built so far stays open; edit and resend.", runId = _currentRunId, handler = "mcp_build" });
+                    Send(new { type = "answer", answer = "Build failed (" + BoundDetail(ex.Message, 300) + ") — what built so far stays open; edit and resend.", runId = _currentRunId, handler = "mcp_build" });
                 return true;
             }
             finally { if (McpBuild.CardSender == mySender) McpBuild.CardSender = null; }

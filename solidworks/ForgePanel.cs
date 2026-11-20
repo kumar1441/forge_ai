@@ -276,13 +276,13 @@ namespace Forge.SolidWorks
                     }
                     catch (Exception ex)
                     {
-                        Send(new { type = "error", message = "Compaction failed: " + ex.Message + " — keeping full history; try again.", localCompact = true });
+                        Send(new { type = "error", message = "Compaction failed (" + BoundDetail(ex.Message, 200) + ") — keeping full history; try again.", localCompact = true });
                     }
                 }
                 else if (action == "usage")   // top-bar context dropdown: today's provider token totals + agent history
                 {
                     try { Send(new { type = "usage", tokensIn = IntentRate.TokensInToday, tokensOut = IntentRate.TokensOutToday, agentMsgs = McpBuild.HistoryCount(), agentTokens = McpBuild.AgentTokCount }); }
-                    catch (Exception ex) { Send(new { type = "usage", error = ex.Message }); }
+                    catch (Exception ex) { Send(new { type = "usage", error = "Couldn't load usage — try again. (detail: " + BoundDetail(ex.Message, 200) + ")" }); }
                 }
                 else if (action == "setCompact")   // Kilo-style auto-compaction controls from the settings cog
                 {
@@ -419,7 +419,7 @@ namespace Forge.SolidWorks
                         catch { }
                         Send(new { type = "files", files = out_ });
                     }
-                    catch (Exception ex) { Send(new { type = "error", message = "File search failed: " + ex.Message + " — try again or type the file name." }); }
+                    catch (Exception ex) { Send(new { type = "error", message = "File search failed (" + BoundDetail(ex.Message, 200) + ") — try again or type the file name." }); }
                 }
                 else if (action == "stop")   // Kilo-style interrupt: cancel the in-flight run/enhance; partial CoT stays
                 {
@@ -472,7 +472,7 @@ namespace Forge.SolidWorks
                             Send(new { type = "historyLoaded", turns = McpBuild.HistoryCount() });
                         }
                     }
-                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't load chat history: " + ex.Message + " — try again." }); }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't load chat history (" + BoundDetail(ex.Message, 200) + ") — try again." }); }
                 }
                 else if (action == "mcpStatus")
                 {
@@ -484,7 +484,7 @@ namespace Forge.SolidWorks
                         try { running = McpBridge.IsRunning; } catch { }
                         Send(new { type = "answer", answer = "MCP server: " + (running ? "running" : "not running (starts on first multi-part build)") + " — `" + (cmd + " " + args).Trim() + "`. Override in %APPDATA%\\Forge\\mcp.json." });
                     }
-                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't read MCP status: " + ex.Message + " — check %APPDATA%\\Forge\\mcp.json and try again." }); }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't read MCP status (" + BoundDetail(ex.Message, 200) + ") — check %APPDATA%\\Forge\\mcp.json and try again." }); }
                 }
                 else if (action == "reset")   // rehearsal/recording: wipe the panel + every pending thread for a clean take
                 {
@@ -552,7 +552,7 @@ namespace Forge.SolidWorks
                         }
                         catch { }
                     }
-                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't save the key: " + ex.Message + " — check the key and try again." }); }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't save the key (" + BoundDetail(ex.Message, 200) + ") — check the key and try again." }); }
                 }
 
                 // Dynamic model list: the panel asks the host to GET {baseUrl}/models with the
@@ -592,7 +592,7 @@ namespace Forge.SolidWorks
                         Send(new { type = "provider", slug = gslug, provider = p, baseUrl = bu, model = (string)cfg["model"], dynamic = IsDynamicProvider(p), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(gslug, p)) });
                         Send(new { type = "rules", allow = McpBuild.AlwaysList(), deny = McpBuild.DenyList() });
                     }
-                    catch (Exception ex) { Send(new { type = "provider", error = ex.Message }); }
+                    catch (Exception ex) { Send(new { type = "provider", error = "Couldn't load provider settings (" + BoundDetail(ex.Message, 200) + ") — try again." }); }
                 }
                 else if (action == "setProvider")
                 {
@@ -628,7 +628,7 @@ namespace Forge.SolidWorks
                         Send(new { type = "provider", slug = slug, provider = p, baseUrl = preset.BaseUrl, model = keptModel ?? preset.Model, dynamic = IsDynamicProvider(p), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(slug, p)) });
                         Send(new { type = "answer", answer = "Provider switched to " + slug + " (" + (keptModel ?? preset.Model) + ") — pick another model from the pill if you like." });
                     }
-                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't switch provider: " + ex.Message + " — check the selection/key and try again." }); }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't switch provider (" + BoundDetail(ex.Message, 200) + ") — check the selection/key and try again." }); }
                 }
                 else if (action == "refreshModels")
                 {
@@ -671,7 +671,7 @@ namespace Forge.SolidWorks
                         Send(new { type = "provider", slug = smslug, provider = sp, baseUrl = sbu, model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(smslug, sp)) });
                         Send(new { type = "answer", answer = "Model switched to " + model.Trim() + " — it applies to the next run." });
                     }
-                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't switch model: " + ex.Message + " — check the selection/key and try again." }); }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't switch model (" + BoundDetail(ex.Message, 200) + ") — check the selection/key and try again." }); }
                 }
 
                 // Settings usage-data toggle (trap.md item 2: off switch easy to find). Host = source of truth:
@@ -688,7 +688,7 @@ namespace Forge.SolidWorks
             {
                 // Telemetry gets the exception TYPE only — never ex.Message (it can contain a file path).
                 Telemetry.Log("crash", success: false, errorCode: ex.GetType().Name, swVersion: SwVer());
-                Send(new { type = "error", message = "Couldn't finish that run: " + ex.Message + " — check the model for partial changes, then retry or say what you expected." });
+                Send(new { type = "error", message = "Couldn't finish that run (" + BoundDetail(ex.Message, 300) + ") — check the model for partial changes, then retry or say what you expected." });
             }
         }
 
@@ -799,7 +799,7 @@ namespace Forge.SolidWorks
             }
             catch (Exception ex)
             {
-                Send(new { type = "error", message = "Couldn't attach that file: " + ex.Message + " — try again." });
+                Send(new { type = "error", message = "Couldn't attach that file (" + BoundDetail(ex.Message, 200) + ") — try again." });
             }
         }
 
@@ -972,12 +972,26 @@ namespace Forge.SolidWorks
 
         // A 401/403 from /models almost always means a wrong or revoked key, not a broken
         // endpoint — report "nokey" so the panel shows key guidance instead of a raw HTTP error.
+        // Anything else is an actionable wrapper, never the raw exception text: a bare
+        // "Model list HTTP 500" or JSON-shape jargon tells the user nothing to act on.
         private static string MapModelsError(Exception ex)
         {
             string m = ex != null ? ex.Message : "";
             if ((m ?? "").Contains(" 401") || (m ?? "").Contains("(401)")) return "nokey";
             if ((m ?? "").Contains(" 403") || (m ?? "").Contains("(403)")) return "nokey";
-            return m;
+            return "Couldn't list models (" + BoundDetail(m, 200) + ") — check the connection/key, then Refresh; or pick the model manually.";
+        }
+
+        // User-facing detail bound: raw exception text stays labeled and capped, never bare.
+        private static string BoundDetail(string s, int max)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(s)) return "unexpected error";
+                s = s.Trim();
+                return s.Length <= max ? s : s.Substring(0, max) + "…";
+            }
+            catch { return "unexpected error"; }
         }
 
         private static async Task<System.Collections.Generic.List<string>> FetchServableModels(string baseUrl, string apiKey)
@@ -990,9 +1004,9 @@ namespace Forge.SolidWorks
                 using (var resp = await http.SendAsync(req).ConfigureAwait(false))
                 {
                     string text = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-                    if (!resp.IsSuccessStatusCode) throw new Exception("Model list HTTP " + (int)resp.StatusCode);
+                    if (!resp.IsSuccessStatusCode) throw new Exception("Model list request failed (HTTP " + (int)resp.StatusCode + " " + resp.StatusCode + ") — the provider refused the list; check the key, then Refresh.");
                     var data = JObject.Parse(text)["data"] as JArray;
-                    if (data == null) throw new Exception("Unexpected model list shape.");
+                    if (data == null) throw new Exception("The provider returned a model list Forge couldn't read — try Refresh again; if it repeats, set the model manually.");
                     foreach (var e in data)
                     {
                         string id = (string)e["id"];
@@ -1127,7 +1141,7 @@ namespace Forge.SolidWorks
             catch (Exception ex)
             {
                 if (myE != _enhanceSeq) return; // superseded: the new Enhance owns the panel
-                string detail = ex.Message;
+                string detail = BoundDetail(ex.Message, 300);
                 if ((detail ?? "").Contains("timed out"))
                     detail = "TIMED OUT after 10 minutes — the model is overloaded or thinking too long; try again or switch to a faster model in the picker";
                 Send(new { type = "error", message = "Enhance failed: " + detail + " — your draft is untouched, just send it as-is." });

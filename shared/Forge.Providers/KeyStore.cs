@@ -50,7 +50,9 @@ namespace Forge.Providers
             }
             catch (CryptographicException ex)
             {
-                throw new CryptographicException("Could not lock the key in Windows secure storage (roaming profile or restricted account?): " + ex.Message, ex);
+                string detail = null;
+                try { detail = ex.Message; if (detail != null && detail.Length > 200) detail = detail.Substring(0, 200) + "…"; } catch { detail = null; }
+                throw new CryptographicException("Could not lock the key in Windows secure storage — use a local Windows account profile (roaming profiles can block it). (detail: " + (detail ?? "secure-storage error") + ")", ex);
             }
             Directory.CreateDirectory(Dir);
             // Atomic write (temp + replace): a crash or a concurrent Save/Load can

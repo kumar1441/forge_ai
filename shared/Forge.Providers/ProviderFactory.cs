@@ -92,15 +92,17 @@ namespace Forge.Providers
         }
 
         /// <summary>
-        /// True unless the model is a known reasoning variant that rejects custom temperatures
-        /// (OpenAI o-series errors on anything but the default; thinking variants ignore it).
+        /// True unless the model is a known reasoning variant that rejects or ignores custom
+        /// temperature (o-series, GPT-5/6 reasoning, codex, thinking variants — per OpenAI docs,
+        /// only defaults are accepted). GPT-4-class models are deliberately INCLUDED: they accept
+        /// custom temperature, matching Kilo's per-model capabilities gate for that family.
         /// When false, callers omit Temperature so the provider default applies.
         /// </summary>
         public static bool SupportsTemperature(string model)
         {
             if (string.IsNullOrWhiteSpace(model)) return true;
             string m = model.Trim().ToLowerInvariant();
-            if (System.Text.RegularExpressions.Regex.IsMatch(m, @"(^|[^a-z0-9])(o[1-9]|gpt-[456]|codex)([^a-z0-9]|$)")) return false;
+            if (System.Text.RegularExpressions.Regex.IsMatch(m, @"(^|[^a-z0-9])(o[1-9]|gpt-[56]|codex)([^a-z0-9]|$)")) return false;
             if (System.Text.RegularExpressions.Regex.IsMatch(m, @"(^|[^a-z0-9])(think|thinking|reason|reasoning|reasoner)([^a-z0-9]|$)")) return false;
             return true;
         }

@@ -842,7 +842,7 @@
   $("histbtn").addEventListener("click", (e) => {
     e.stopPropagation();
     const h = $("history");
-    if (h.style.display === "none") { showPop("history"); renderHistoryList(); $("hsearch").value = ""; renderHistoryList(); setExpanded("histbtn", true); setTimeout(() => $("hsearch").focus(), 0); }
+    if (h.style.display === "none") { showPop("history"); $("hsearch").value = ""; renderHistoryList(); setExpanded("histbtn", true); setTimeout(() => $("hsearch").focus(), 0); }
     else { focusIfHidden(h); h.style.display = "none"; setExpanded("histbtn", false); intent.focus(); }
   });
   $("hsearch").addEventListener("input", renderHistoryList);
@@ -862,9 +862,10 @@
     if (known) sel.value = known;
     curSlug = known || sel.value;
     lastHasKey = (curSlug === "ollama") ? true : !!m.hasKey;
-    const needKeyRow = !m.hasKey && sel.value !== "ollama";
+    const isOllama = curSlug === "ollama";
+    const needKeyRow = !isOllama && !m.hasKey;
     if (row) row.style.display = needKeyRow ? "" : "none";
-    if (sub) sub.textContent = (m.baseUrl || "") + (m.model ? " · " + m.model : "") + (m.hasKey ? " · key saved ✓" : " · no key");
+    if (sub) sub.textContent = (m.baseUrl || "") + (m.model ? " · " + m.model : "") + (isOllama ? " · local, no key needed" : (m.hasKey ? " · key saved ✓" : " · no key"));
   }
   $("setprov").addEventListener("change", () => {
     $("setkey").value = "";
@@ -1019,7 +1020,7 @@
     if (!m) return null;
     return { q: m[1], start: pos - m[1].length - 1 };
   }
-  function menClose() { menOpen = false; $("menpop").style.display = "none"; }
+  function menClose() { try { if (menTimer) { clearTimeout(menTimer); menTimer = null; } } catch (e) {} menOpen = false; $("menpop").style.display = "none"; }
   function renderMenList() {
     const list = $("menlist"); list.innerHTML = "";
     if (!menItems.length) {
@@ -1474,9 +1475,11 @@
     if (state === "done") {
       el.className = "step done";
       el.innerHTML = `<span class="glyph">✓</span><span>${agent ? `<span class="agent">${agent}</span> · ` : ""}${(result || gloss || "").replace(/</g,"&lt;")}</span>`;
+      try { el.title = (result || gloss || "").slice(0, 500); } catch (e) {}
     } else {
       el.className = "step run";
       el.innerHTML = `<span class="glyph">◆</span><span>${agent ? `Deploying <span class="agent">${agent}</span> · ` : ""}${(gloss || "").replace(/</g,"&lt;")}</span>`;
+      try { el.title = (gloss || "").slice(0, 500); } catch (e2) {}
     }
     // Long-run flood guard: past K step lines, older ones collapse behind a summary line.
     try {
@@ -1506,7 +1509,7 @@
           x.style.display = hide ? "none" : "";
           if (hide) x.removeAttribute("data-keep"); else x.dataset.keep = "1";
         });
-        more.dataset.label = `${hidden} earlier steps done — click to expand`;
+        more.dataset.label = `${hidden} earlier steps — click to expand`;
         more.innerHTML = `<span class="glyph">…</span><span>${exp ? "showing all steps — click to collapse" : more.dataset.label}</span>`;
       } else if (more) { more.remove(); delete stepsEl.dataset.exp; }
     } catch (e) {}
@@ -1598,7 +1601,7 @@
 
     else if (m.type === "thinkStart") {
       if (!working || !turn) return; // orphan think after revert/clear — never leave a stray live block
-      if (thinkEl && thinkEl.isConnected) { try { thinkEl.querySelector(".thead").textContent = "Thought — click to expand"; thinkEl.classList.add("collapsed"); } catch (e) {} thinkEl = null; }
+      if (thinkEl && thinkEl.isConnected) { try { const hd0 = thinkEl.querySelector(".thead"); if (hd0) hd0.textContent = thinkEl.classList.contains("collapsed") ? "Thought — long output collapsed, click to expand" : "Thought — click to expand"; thinkEl.classList.add("collapsed"); } catch (e) {} thinkEl = null; }
       clearThinkTimeout();
       thinkEl = document.createElement("div");
       thinkEl.className = "think";
@@ -1622,10 +1625,10 @@
       if (!thinkEl || !thinkEl.isConnected) return;
       const bd = thinkEl.querySelector(".tbody");
       if (bd && m.text) {
-        if ((thinkEl._len || 0) >= 50000) return; // very long single delta: stop appending, header already notes truncation
-        let txt = m.text;
-        if (thinkEl._len + txt.length > 50000) txt = txt.slice(0, 50000 - thinkEl._len);
-        if (!txt.length) return; // exactly at the cap: nothing left to append, no empty text node
+        if ((thinkEl._len || 0) >= 50000) { try { const hcap = thinkEl.querySelector(".thead"); if (hcap && !/truncated at 50k/.test(hcap.textContent)) hcap.textContent += " — truncated at 50k"; thinkEl.classList.add("collapsed"); } catch (e3) {} return; }
+        let txt = m.text, hitCap = false;
+        if (thinkEl._len + txt.length > 50000) { txt = txt.slice(0, 50000 - thinkEl._len); hitCap = true; }
+        if (!txt.length) { try { const hcap2 = thinkEl.querySelector(".thead"); if (hcap2 && !/truncated at 50k/.test(hcap2.textContent)) hcap2.textContent += " — truncated at 50k"; thinkEl.classList.add("collapsed"); } catch (e4) {} return; } // exactly at the cap: nothing left to append, no empty text node
         const last = bd.lastChild; // coalesce into one text node so long runs can't grow unbounded DOM
         if (last && last.nodeType === 3) last.data += txt; else bd.append(document.createTextNode(txt));
         thinkEl._len = (thinkEl._len || 0) + txt.length; // O(1) length tracking, not O(n) textContent scan
@@ -1634,7 +1637,8 @@
         if (hd2) {
           const s = Math.floor((Date.now() - (thinkEl._t0 || Date.now())) / 1000);
           const base = `✨ ${thinkEl._label || "Thinking"}` + (thinkEl._model ? ` · ${thinkEl._model}` : "") + `… (live · ${s}s)`;
-          hd2.textContent = thinkEl.classList.contains("collapsed") ? base + " — long output collapsed, click to expand" : base;
+          const trunc = (hitCap || thinkEl._len >= 50000) ? " — truncated at 50k" : "";
+          hd2.textContent = (thinkEl.classList.contains("collapsed") ? base + " — long output collapsed, click to expand" : base) + trunc;
         }
         const now = Date.now();
         if (!thinkEl._st || now - thinkEl._st > 250) { thinkEl._st = now; scroll(); }
@@ -1651,7 +1655,7 @@
         if (hd) hd.textContent = "Interrupted — partial thinking kept (click to expand)";
         if (!done._manual) done.classList.remove("collapsed");
         } else if (hd) {
-          hd.textContent = `Thought for ${m.seconds || 0}s` + (done.classList.contains("collapsed") ? " — long output collapsed, click to expand" : " — click to collapse");
+          hd.textContent = `Thought for ${m.seconds || 0}s` + (done.classList.contains("collapsed") ? " — long output collapsed, click to expand" : " — click to collapse") + ((done._len || 0) >= 50000 ? " — truncated at 50k" : "");
         }
     }
 
@@ -2394,7 +2398,7 @@
     else if (e.key === "Enter") {
       e.preventDefault();
       const pick = (i >= 0 ? rows[i] : null) || rows.find(r => r.classList.contains("active")) || rows[0];
-      if (pick) { const id = pick.getAttribute("data-id"); pushRecent(id); curModel = id; renderPill(); renderCtx(); if ($("setsub")) $("setsub").textContent = (lastBaseUrl ? lastBaseUrl + " · " : "") + id + (lastHasKey === true ? " · key saved ✓" : lastHasKey === false ? " · no key" : ""); post({ action: "setModel", model: id }); closeModels(); }
+      if (pick) { const id = pick.getAttribute("data-id"); pushRecent(id); curModel = id; renderPill(); renderCtx(); if ($("setsub")) $("setsub").textContent = (lastBaseUrl ? lastBaseUrl + " · " : "") + id + (curSlug === "ollama" ? " · local, no key needed" : lastHasKey === true ? " · key saved ✓" : lastHasKey === false ? " · no key" : ""); post({ action: "setModel", model: id }); closeModels(); }
     }
   });
   $("mrefresh").addEventListener("click", (e) => {

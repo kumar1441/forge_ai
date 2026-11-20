@@ -373,11 +373,15 @@ namespace Forge.SolidWorks
                 return "panel-gone";
             }
             // Approval cards render in the panel: a hostile 100KB args blob must not ride the card.
+            // Truncation keeps the head AND the security-relevant tail: paths, URLs and delete
+            // targets can sit at the end of a long arg list, so dropping the tail would hide the
+            // dangerous part of the approval. Sensitive fields are extracted by name and shown
+            // in full (each capped); head/tail raw prefixes give context.
             JObject cardArgs = args ?? new JObject();
             try
             {
                 string cardJson = cardArgs.ToString(Newtonsoft.Json.Formatting.None);
-                if (cardJson.Length > 4000) cardArgs = JObject.Parse("{\"_note\":\"args truncated for display (" + cardJson.Length + " chars)\"}");
+                if (cardJson.Length > 4000) cardArgs = TruncatedCardArgs(cardArgs, cardJson);
             }
             catch { }
             try { sender(new JObject { ["type"] = "approve", ["id"] = id, ["tool"] = tool, ["args"] = cardArgs }); }
@@ -770,7 +774,7 @@ namespace Forge.SolidWorks
             catch (OperationCanceledException) { outcome.Error = "INTERRUPTED"; return outcome; }
             catch (Exception ex)
             {
-                outcome.Error = "Couldn't start the SolidWorks-MCP server: " + ex.Message + " — restart SolidWorks, then resend.";
+                outcome.Error = "Couldn't start the SolidWorks-MCP server (" + CleanDetail(ex.Message, 300) + ") — restart SolidWorks, then resend.";
                 return outcome;
             }
 
@@ -793,7 +797,7 @@ namespace Forge.SolidWorks
             catch (OperationCanceledException) { outcome.Error = "INTERRUPTED"; return outcome; }
             catch (Exception ex)
             {
-                outcome.Error = "The build planner failed: " + ex.Message + " — try splitting the request into smaller steps.";
+                outcome.Error = "The build planner failed (" + CleanDetail(ex.Message, 300) + ") — try splitting the request into smaller steps.";
                 return outcome;
             }
             var plan = authored.Item1;
@@ -859,7 +863,7 @@ namespace Forge.SolidWorks
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
-                    outcome.Error = "Step " + n_ + " (" + tool + ") transport failed: " + ex.Message + " — what built so far stays open in SolidWorks; fix that step and ask again.";
+                    outcome.Error = "Step " + n_ + " (" + tool + ") transport failed (" + CleanDetail(ex.Message, 300) + ") — what built so far stays open in SolidWorks; fix that step and ask again.";
                     return outcome;
                 }
                 string text = (r.Text ?? "").Length > 600 ? r.Text.Substring(0, 600) + "…" : (r.Text ?? "");
@@ -916,7 +920,7 @@ namespace Forge.SolidWorks
             catch (OperationCanceledException) { outcome.Error = "INTERRUPTED"; return outcome; }
             catch (Exception ex)
             {
-                outcome.Error = "Couldn't start the SolidWorks-MCP server: " + ex.Message + " — restart SolidWorks, then resend.";
+                outcome.Error = "Couldn't start the SolidWorks-MCP server (" + CleanDetail(ex.Message, 300) + ") — restart SolidWorks, then resend.";
                 return outcome;
             }
 
@@ -1088,7 +1092,7 @@ namespace Forge.SolidWorks
                             // abandoned (and none applied twice) — stop throws before any history append.
                             try { r = await McpBridge.CallToolAsync(c.Name, args, 300000, ct); }
                             catch (OperationCanceledException) { throw; }
-                            catch (Exception ex) { r = new McpBridge.ToolResult { Ok = false, Text = "transport failed: " + ex.Message }; }
+                    catch (Exception ex) { r = new McpBridge.ToolResult { Ok = false, Text = "transport failed (" + CleanDetail(ex.Message, 300) + ")" }; }
                         }
                         string text = r.Text ?? "";
                         if (text.Length > 2000) text = text.Substring(0, 2000) + "…(truncated)";
@@ -1182,7 +1186,13 @@ namespace Forge.SolidWorks
             catch (Exception ex)
             {
                 SaveSession(sid);
-                outcome.Error = "The agent loop failed: " + ex.Message + " — try again or split the request.";
+                string why = CleanDetail(ex.Message, 300);
+                // Already-actionable inner messages (e.g. the provider-switch hint) read
+                // doubled under a second prefix — surface them once.
+                if (!string.IsNullOrEmpty(why) && (why.StartsWith("The agent loop") || why.StartsWith("The provider") || why.StartsWith("Provider")))
+                    outcome.Error = why;
+                else
+                    outcome.Error = "The agent loop failed (" + why + ") — try again or split the request.";
                 return outcome;
             }
         }
@@ -1255,14 +1265,25 @@ namespace Forge.SolidWorks
                     // Non-streaming backends (Anthropic): same prompt as one unary call, no live deltas.
                     try { res = await client.CompleteAsync(msgs, opts, ct); }
                     catch (OperationCanceledException) { throw; }
-                    catch (Exception ex2) { return new Tuple<JObject, string>(null, "provider call failed: " + ex2.Message); }
+                    catch (Exception ex2)
+                    {
+                        // Actionable provider errors already say what to do — surface them once.
+                        // Anything else is an internal failure: generic what-to-do, detail logged-only.
+                        var px2 = ex2 as ProviderException;
+                        if (px2 != null) return new Tuple<JObject, string>(null, CleanDetail(px2.Message, 300));
+                        System.Diagnostics.Debug.WriteLine("AuthorPlan unary fallback: " + ex2.GetType().Name + ": " + ex2.Message);
+                        return new Tuple<JObject, string>(null, "the backup provider call failed (" + CleanDetail(ex2.Message, 200) + ") — retry, simplify, or switch model");
+                    }
                 }
                 catch (Exception ex)
                 {
-                    string why = (ex.Message ?? "");
+                    string why = CleanDetail(ex.Message, 300);
                     if (why.Contains("timed out"))
-                        return new Tuple<JObject, string>(null, "TIMED OUT after 10 minutes of thinking — the model is overloaded or the plan is too big; retry, simplify, or switch to a faster model");
-                    return new Tuple<JObject, string>(null, "provider call failed: " + ex.Message);
+                        return new Tuple<JObject, string>(null, "Timed out after 10 minutes of thinking — the model is overloaded or the plan is too big; retry, simplify, or switch to a faster model");
+                    var px = ex as ProviderException;
+                    if (px != null) return new Tuple<JObject, string>(null, why);
+                    System.Diagnostics.Debug.WriteLine("AuthorPlan: " + ex.GetType().Name + ": " + ex.Message);
+                    return new Tuple<JObject, string>(null, "the provider call failed (" + why + ") — retry, simplify, or switch model");
                 }
                 string raw = res != null ? res.Text : null;
                 // A hostile/garbled model reply (MBs, 10k-deep nesting) fails the attempt, never
@@ -1290,6 +1311,69 @@ namespace Forge.SolidWorks
         }
 
         // Plan-error display: garbled-model tool names stay short in user messages. Never throws.
+        // User-facing detail bound: raw exception/provider text stays as a labeled, capped
+        // detail — what-happened + what-to-do live in the prefix/suffix around it, never bare.
+        private static string CleanDetail(string s, int max)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(s)) return "";
+                s = s.Trim();
+                return s.Length <= max ? s : s.Substring(0, max) + "…";
+            }
+            catch { return ""; }
+        }
+
+        // Approval-card truncation that never hides the dangerous part: head prefix for context
+        // plus every security-relevant field (paths, URLs, delete targets) extracted by name,
+        // plus a raw tail so trailing args are still visible. Never throws.
+        private static JObject TruncatedCardArgs(JObject args, string cardJson)
+        {
+            try
+            {
+                var out_ = new JObject { ["_note"] = "args truncated for display (" + cardJson.Length + " chars) — showing head + security-relevant fields" };
+                try { out_["_head"] = cardJson.Substring(0, Math.Min(2000, cardJson.Length)); } catch { }
+                try { out_["_tail"] = cardJson.Substring(Math.Max(0, cardJson.Length - 1000)); } catch { }
+                try
+                {
+                    var sec = SensitiveArgs(args);
+                    if (sec != null && sec.Count > 0) out_["_security"] = sec;
+                }
+                catch { }
+                return out_;
+            }
+            catch { return JObject.Parse("{\"_note\":\"args truncated for display\"}"); }
+        }
+
+        private static JObject SensitiveArgs(JObject args)
+        {
+            var out_ = new JObject();
+            try
+            {
+                if (args == null) return out_;
+                foreach (var kv in args)
+                {
+                    string kn = (kv.Key ?? "").ToLowerInvariant();
+                    bool hit = kn.Contains("path") || kn.Contains("file") || kn.Contains("url") || kn.Contains("uri") ||
+                        kn.Contains("target") || kn.Contains("delete") || kn.Contains("remove") || kn.Contains("dest") ||
+                        kn.Contains("dir") || kn.Contains("folder") || kn.Contains("document") || kn.Contains("name");
+                    if (!hit && kv.Value is JObject)
+                    {
+                        var nested = SensitiveArgs((JObject)kv.Value);
+                        if (nested.Count > 0) out_[kv.Key] = nested;
+                        continue;
+                    }
+                    if (!hit) continue;
+                    string v = "";
+                    try { v = kv.Value != null ? kv.Value.ToString(Newtonsoft.Json.Formatting.None) : ""; } catch { v = ""; }
+                    if (v != null && v.Length > 500) v = v.Substring(0, 500) + "…";
+                    try { out_[kv.Key] = v; } catch { }
+                }
+            }
+            catch { }
+            return out_;
+        }
+
         private static string TruncPlan(string s, int max)
         {
             try
