@@ -302,6 +302,27 @@
     text-align:right; cursor:pointer; padding:4px 6px 0; }
   .settings .sclose:hover { color:var(--ink); }
   .settings .sfoot { font-size:10.5px; color:var(--faint); padding:2px 6px 4px; }
+
+  /* chat history popover (Kilo-style: search + session list + restore/delete) */
+  .history { position:absolute; top:52px; right:14px; z-index:60; width:300px; max-width:92vw;
+    background:var(--raised); border:1px solid var(--line); border-radius:12px; padding:10px;
+    display:flex; flex-direction:column; gap:6px; box-shadow:0 12px 40px rgba(0,0,0,.5); }
+  .history .hsearch { background:var(--bg); border:1px solid var(--line); border-radius:9px;
+    padding:8px 10px; font:inherit; font-size:12.5px; color:var(--ink); outline:none; }
+  .history .hsearch:focus { border-color:var(--accent); }
+  .history .hlist { overflow-y:auto; max-height:320px; display:flex; flex-direction:column; gap:2px; }
+  .history .hrow { display:flex; align-items:center; gap:6px; padding:8px 9px; border-radius:9px; cursor:pointer; }
+  .history .hrow:hover { background:rgba(255,255,255,.05); }
+  .history .hrow.active { background:var(--accent-soft); }
+  .history .hmain { flex:1; min-width:0; }
+  .history .htitle { font-size:13px; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .history .hmeta { font-size:10.5px; color:var(--faint); margin-top:1px; }
+  .history .hdel { background:none; border:none; color:var(--faint); cursor:pointer; font-size:11px; padding:4px; flex:none; }
+  .history .hdel:hover { color:var(--red); }
+  .history .hempty { padding:16px; text-align:center; color:var(--faint); font-size:12.5px; }
+  .history .hnew { background:none; border:1px solid var(--line); border-radius:9px; color:var(--soft);
+    font:inherit; font-size:12.5px; padding:7px; cursor:pointer; }
+  .history .hnew:hover { border-color:var(--accent); color:var(--ink); }
 </style>
 </head>
 <body>
@@ -309,6 +330,7 @@
     <div class="headtop" id="headtop">
       <div class="brand"><b><span>◆</span> Forge</b></div>
       <div class="headacts">
+        <button class="gear" id="histbtn" title="Chat history">🕘</button>
         <button class="gear" id="gearbtn" title="Settings">⚙</button>
         <button class="clearbtn" id="clearbtn" title="Clear the panel for a fresh recording take">Clear</button>
       </div>
@@ -340,6 +362,11 @@
       </div>
       <div class="sfoot">usage data = anonymous hashes only · off = nothing leaves this machine</div>
     </div>
+    <div class="history" id="history" style="display:none">
+      <input class="hsearch" id="hsearch" placeholder="Search chats…" autocomplete="off" />
+      <div class="hlist" id="hlist"></div>
+      <button class="hnew" id="hnew">+ New chat</button>
+    </div>
   </div>
 
   <div class="transcript" id="transcript">
@@ -357,6 +384,7 @@
       <button class="attachbtn modelpick" id="modelpick" title="Switch model"><span class="chev">▲</span><span id="modelname">model</span></button>
       <button class="attachbtn" id="enhance" title="Enhance prompt — rewrite this draft into a concrete build spec">✨ Enhance</button>
       <button class="attachbtn" id="enhanceUndo" title="Restore the draft from before enhancing" style="display:none">↩</button>
+      <button class="attachbtn" id="regen" title="Regenerate — re-run the last prompt">↻</button>
       <div class="modelpop" id="modelpop" style="display:none">
         <input class="msearch" id="msearch" placeholder="Search models…" autocomplete="off" />
         <div class="mlist" id="mlist"></div>
@@ -366,7 +394,7 @@
     </div>
     <div class="ask">
       <textarea id="intent" rows="1"></textarea>
-      <div class="hint"><kbd>Enter</kbd> to run · <kbd>Shift</kbd>+<kbd>Enter</kbd> new line · <kbd>Esc</kbd> cancels</div>
+      <div class="hint"><kbd>Enter</kbd> to run · <kbd>Shift</kbd>+<kbd>Enter</kbd> new line · <kbd>Esc</kbd> interrupts · <kbd>↑</kbd><kbd>↓</kbd> history</div>
     </div>
     <div class="fb" id="fb">
       <span>Useful so far?</span>
@@ -398,7 +426,7 @@
   // Clear the panel for a fresh recording take: wipe the transcript + reset Forge's pending threads.
   function clearPanel() {
     stopWords();
-    working = false; turn = null;
+    working = false; turn = null; sessionId = null;
     transcript.innerHTML = '<div class="empty" id="empty">Forge <b>knows</b> your part.<br>' +
       'Forge <b>understands</b> what you mean.<br>Forge <b>gets it done.</b></div>';
     hideChip();
@@ -408,6 +436,16 @@
     intent.focus();
   }
   $("clearbtn").addEventListener("click", clearPanel);
+  $("histbtn").addEventListener("click", (e) => {
+    e.stopPropagation();
+    const h = $("history");
+    h.style.display = h.style.display === "none" ? "flex" : "none";
+    if (h.style.display !== "none") { renderHistoryList(); $("hsearch").value = ""; renderHistoryList(); setTimeout(() => $("hsearch").focus(), 0); }
+  });
+  $("hsearch").addEventListener("input", renderHistoryList);
+  $("hsearch").addEventListener("keydown", (e) => e.stopPropagation());
+  $("hnew").addEventListener("click", () => { clearPanel(); $("history").style.display = "none"; intent.focus(); });
+  document.addEventListener("click", (e) => { if (!e.target.closest("#history") && !e.target.closest("#histbtn")) $("history").style.display = "none"; });
 
   // ---- settings: gear open/close + theme toggle (persists; default = follow OS) ----
   const settingsEl = $("settings"), themeTgl = $("themetgl"), telmTgl = $("telmtgl");
@@ -451,6 +489,8 @@
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       settingsEl.style.display = "none";
+      if ($("history")) $("history").style.display = "none";
+      if (working) { e.stopPropagation(); post({ action: "stop" }); }
       if ($("modelpop")) closeModels(false);
       const nope = document.querySelector(".gate .nope");   // FDL 4.4: Esc = "Not yet"
       if (nope) nope.click();
@@ -506,6 +546,60 @@
   let turn = null, thinkEl = null;          // { steps, thinking, result } DOM refs for the active Forge turn
   let wordTimer = null;
   let lastPrompt = "";
+
+  // ---- chat history (Kilo-style sessions: search, restore, delete, new) ----
+  let sessionId = null;
+  const sessKey = "forge_sessions";
+  const loadSessions = () => { try { return JSON.parse(localStorage.getItem(sessKey)) || []; } catch (e) { return []; } };
+  const saveSessions = (s) => { try { localStorage.setItem(sessKey, JSON.stringify(s.slice(0, 30))); } catch (e) {} };
+  const ago = (t) => { const m = Math.floor((Date.now() - t) / 60000); if (m < 1) return "just now"; if (m < 60) return m + "m ago"; const h = Math.floor(m / 60); if (h < 24) return h + "h ago"; return Math.floor(h / 24) + "d ago"; };
+  const shortModel = (id) => String(id || "").split("/").pop();
+  function recordTurn(html) {
+    if (!lastPrompt) return;
+    const all = loadSessions();
+    let s = all.find(x => x.id === sessionId);
+    if (!s) { sessionId = "s" + Date.now(); s = { id: sessionId, title: lastPrompt.slice(0, 60), started: Date.now(), turns: [] }; all.unshift(s); }
+    s.updated = Date.now(); s.model = shortModel(curModel);
+    s.turns.push({ q: lastPrompt, a: html || "" });
+    if (s.turns.length > 100) s.turns = s.turns.slice(-100);
+    saveSessions(all);
+  }
+  function renderHistoryList() {
+    const q = ($("hsearch").value || "").toLowerCase();
+    const list = $("hlist"); list.innerHTML = "";
+    const all = loadSessions().filter(s => !q || s.title.toLowerCase().includes(q) || s.turns.some(t => (t.q || "").toLowerCase().includes(q)));
+    if (!all.length) { const em = document.createElement("div"); em.className = "hempty"; em.textContent = q ? "No matches." : "No past chats yet."; list.appendChild(em); return; }
+    all.forEach(s => {
+      const row = document.createElement("div");
+      row.className = "hrow" + (s.id === sessionId ? " active" : "");
+      const main = document.createElement("div"); main.className = "hmain";
+      const tt = document.createElement("div"); tt.className = "htitle"; tt.textContent = s.title;
+      const mt = document.createElement("div"); mt.className = "hmeta";
+      mt.textContent = `${ago(s.updated || s.started)} · ${s.turns.length} turn${s.turns.length === 1 ? "" : "s"}${s.model ? " · " + s.model : ""}`;
+      main.append(tt, mt);
+      const del = document.createElement("button"); del.className = "hdel"; del.title = "Delete"; del.textContent = "✕";
+      del.addEventListener("click", (e) => { e.stopPropagation(); saveSessions(loadSessions().filter(x => x.id !== s.id)); if (s.id === sessionId) sessionId = null; renderHistoryList(); });
+      main.addEventListener("click", () => restoreSession(s.id));
+      row.append(main, del); list.appendChild(row);
+    });
+  }
+  function restoreSession(id) {
+    const s = loadSessions().find(x => x.id === id);
+    if (!s) return;
+    stopWords(); working = false; turn = null; thinkEl = null;
+    transcript.innerHTML = "";
+    s.turns.forEach(t => {
+      const d = document.createElement("div"); d.className = "turn";
+      const u = document.createElement("div"); u.className = "bubble user"; u.textContent = t.q;
+      const rv = document.createElement("button"); rv.className = "revertbtn"; rv.title = "Revert to here — edit and resend from this point"; rv.textContent = "↩ revert";
+      const f = document.createElement("div"); f.className = "forge"; f.innerHTML = t.a || "";
+      d.append(u, rv, f); transcript.appendChild(d);
+    });
+    sessionId = id;
+    hideChip(); hIdx = -1; draftStash = null; preEnhance = null; $("enhanceUndo").style.display = "none";
+    $("history").style.display = "none";
+    renderHistoryList(); scroll(true);
+  }
 
   function nearBottom() { return transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 60; }
   function scroll(force) { if (force || pinned) transcript.scrollTop = transcript.scrollHeight; }
@@ -589,12 +683,14 @@
   // System answers outside a turn (key saved, telemetry toggled, notices) render as system cards.
   function finish(html) {
     stopWords();
+    const wasTurn = !!turn && !!lastPrompt;
     if (turn) {
       turn.thinking.remove();
       if (html) turn.result.innerHTML = html;
     } else if (html) {
       systemCard(html);
     }
+    if (wasTurn) recordTurn(html);
     working = false; turn = null;
     scroll();
   }
@@ -664,7 +760,7 @@
       const tn = (m.model ? String(m.model).split("/").pop() : "");
       thinkEl.innerHTML = "";
       const hd = document.createElement("div"); hd.className = "thead";
-      hd.textContent = "✨ Thinking" + (tn ? " · " + tn : "") + "… (live)";
+      hd.textContent = `✨ ${m.label || "Thinking"}` + (tn ? ` · ${tn}` : "") + "… (live)";
       const bd = document.createElement("div"); bd.className = "tbody";
       thinkEl.append(hd, bd);
       hd.addEventListener("click", () => thinkEl.classList.toggle("collapsed"));
@@ -676,9 +772,15 @@
       if (bd && m.text) { bd.append(document.createTextNode(m.text)); scroll(); }
     }
     else if (m.type === "thinkEnd") {
-      if (!thinkEl) return;
+      if (!thinkEl) { ebReset(); return; }
       const hd = thinkEl.querySelector(".thead");
-      if (hd) hd.textContent = `Thought for ${m.seconds || 0}s — click to collapse`;
+      if (m.interrupted) {
+        if (hd) hd.textContent = "Interrupted — partial thinking kept (click to expand)";
+        thinkEl.classList.remove("collapsed");
+      } else if (hd) {
+        hd.textContent = `Thought for ${m.seconds || 0}s — click to collapse`;
+      }
+      ebReset();
     }
 
     else if (m.type === "enhanced") {      if (preEnhance === null) preEnhance = intent.value;
@@ -1004,6 +1106,10 @@
   }
   function hideChip() { const chip = $("chip"); chip.style.display = "none"; chip.innerHTML = ""; }
   $("attach").addEventListener("click", () => post({ action: "attach" }));
+  $("regen").addEventListener("click", () => {
+    if (!hasBridge || working || !lastPrompt) return;
+    run(lastPrompt);
+  });
 
   // Kilo-style revert: drop this turn and everything after, restore the text for editing.
   // The host clears its pending thread so the conversation continues from this point.
@@ -1013,6 +1119,13 @@
     const turn = btn.closest(".turn");
     if (!turn) return;
     const bubble = turn.querySelector(".bubble.user");
+    let keep = 0; let psib = turn.previousElementSibling;
+    while (psib) { if (psib.classList && psib.classList.contains("turn")) keep++; psib = psib.previousElementSibling; }
+    if (sessionId) {
+      const all = loadSessions();
+      const s = all.find(x => x.id === sessionId);
+      if (s) { s.turns = s.turns.slice(0, keep); s.updated = Date.now(); saveSessions(all); }
+    }
     let nxt = turn.nextElementSibling;
     while (nxt) { const rm = nxt; nxt = nxt.nextElementSibling; rm.remove(); }
     turn.remove();

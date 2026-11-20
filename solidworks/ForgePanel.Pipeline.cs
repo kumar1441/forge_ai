@@ -2897,7 +2897,7 @@ namespace Forge.SolidWorks
         }
 
         // ---- the runner: returns true if the pipeline handled the command; false => let the offline regex path try. ----
-        private async Task<bool> RunViaPipeline(string intent)
+        private async Task<bool> RunViaPipeline(string intent, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken))
         {
             var doc = App?.ActiveDoc as IModelDoc2;
             if (doc == null) return false;   // no doc: let the legacy path show its guidance
@@ -5071,13 +5071,13 @@ namespace Forge.SolidWorks
             // MCP BUILD (multi-part / assembly from scratch) — runs BEFORE recipe: tangled creates the
             // deterministic paths can't split go to the SolidWorks-MCP server (its own COM session against the
             // running SolidWorks). Explicit "mcp" asks, assembly builds, and 3+-step compounds land here.
-            if (await TryRunMcpBuild(intent)) return true;
+            if (await TryRunMcpBuild(intent, ct)) return true;
 
             // RECIPE CREATE (multi-feature from scratch) — runs BEFORE compound: a refused-class create
             // ("bracket with 4 holes and filleted edges") becomes an LLM-authored feature recipe executed by
             // RecipeExecutor (native tree, fail-closed verify, doc stays open). Bare primitives and confident
             // two-step compounds keep their deterministic paths; keyless chat falls through to the honest refusal.
-            if (await TryRunCreateRecipe(intent)) return true;
+            if (await TryRunCreateRecipe(intent, ct)) return true;
 
             // COMPOUND CREATE ("create X and add Y on top") — runs FIRST, before the per-shape intercepts below AND before
             // the guardrail each shape's Run() carries: no single bare-primitive handler or CreateGuardrail refusal can
@@ -5605,11 +5605,68 @@ namespace Forge.SolidWorks
             return true;
         }
 
+        // Streams an LLM's chain-of-thought into the panel live (Kilo-style thinking block):
+        // reasoning deltas are marshalled to the UI thread and flushed at most twice a second so a
+        // 50k-token think doesn't flood the WebView. On interrupt the partial block is left standing.
+        private class ThinkRelay
+        {
+            private readonly System.Threading.SynchronizationContext _ui;
+            private readonly Action<object> _send;
+            private readonly System.Diagnostics.Stopwatch _sw;
+            private readonly System.Text.StringBuilder _buf = new System.Text.StringBuilder();
+            private readonly string _label;
+            private DateTime _lastFlush = DateTime.MinValue;
+
+            public ThinkRelay(string label, Action<object> send)
+            {
+                _label = label ?? "Thinking";
+                _send = send;
+                try { _ui = System.Threading.SynchronizationContext.Current; } catch { }
+                _sw = System.Diagnostics.Stopwatch.StartNew();
+            }
+            public void Start(string model)
+            {
+                Post(new { type = "thinkStart", model = model, label = _label });
+            }
+            public void OnDelta(string kind, string text)
+            {
+                if (kind != "reasoning" || string.IsNullOrEmpty(text)) return;
+                bool flush = false;
+                lock (_buf)
+                {
+                    _buf.Append(text);
+                    if ((DateTime.UtcNow - _lastFlush).TotalMilliseconds >= 500) { _lastFlush = DateTime.UtcNow; flush = true; }
+                }
+                if (flush) Flush();
+            }
+            public void Flush()
+            {
+                string chunk;
+                lock (_buf) { chunk = _buf.ToString(); _buf.Clear(); }
+                if (chunk.Length > 0) Post(new { type = "think", text = chunk });
+            }
+            public void End(bool interrupted)
+            {
+                Flush();
+                try { _sw.Stop(); } catch { }
+                Post(new { type = "thinkEnd", seconds = (int)_sw.Elapsed.TotalSeconds, interrupted = interrupted });
+            }
+            private void Post(object msg)
+            {
+                try
+                {
+                    if (_ui != null) _ui.Post(_ => { try { _send(msg); } catch { } }, null);
+                    else _send(msg);
+                }
+                catch { }
+            }
+        }
+
         // RECIPE CREATE runner: refused-class creates (guardrail cue present, not a confident 2-step
         // compound) are authored into a feature recipe by the user's own provider and built natively.
         // Returns true when claimed (success OR honest error); false falls through to the existing
         // deterministic create paths + guardrail refusal (bare primitives, keyless chat).
-        private async Task<bool> TryRunCreateRecipe(string intent)
+        private async Task<bool> TryRunCreateRecipe(string intent, System.Threading.CancellationToken ct)
         {
             if (!CreateFromRecipe.IsRecipeCreate(intent)) return false;
             if (ProviderFactoryAvailable() == false) return false;
@@ -5617,7 +5674,9 @@ namespace Forge.SolidWorks
             try { PanelCapture.Log("parse", new { intent, action = "create_recipe", confidence = 1.0, routed = "create_recipe", source = "recipe-create" }); } catch { }
             Func<string, string, string, string, Task> emitR = async (a, g, s, r) =>
             { Send(new { type = "step", agent = a, gloss = g, state = s, result = r }); await Task.Delay(60); };
-            var rc = await CreateFromRecipe.Run(App, intent, emitR);
+            CreateFromRecipe.RecipeCreateOutcome rc;
+            try { rc = await CreateFromRecipe.Run(App, intent, emitR, ct); }
+            catch (OperationCanceledException) { Send(new { type = "answer", answer = "Interrupted — nothing was built. Edit and resend, or ↩ revert to an earlier prompt.", runId = _currentRunId, handler = "create_recipe" }); return true; }
             if (rc == null || !rc.Attempted) return false; // no provider / not claimable: existing paths keep behaviour
             if (!string.IsNullOrEmpty(rc.Error))
             {
@@ -5637,7 +5696,7 @@ namespace Forge.SolidWorks
         // MCP BUILD runner: explicit "mcp" asks, assembly from-scratch builds, and 3+-step compounds
         // execute as LLM-authored tool plans against the SolidWorks-MCP server. True when claimed
         // (success OR honest error); false falls through (bare/single-part -> recipe/deterministic paths).
-        private async Task<bool> TryRunMcpBuild(string intent)
+        private async Task<bool> TryRunMcpBuild(string intent, System.Threading.CancellationToken ct)
         {
             if (!McpBuild.IsMcpCreate(intent)) return false;
             if (ProviderFactoryAvailable() == false) return false;
@@ -5645,11 +5704,23 @@ namespace Forge.SolidWorks
             try { PanelCapture.Log("parse", new { intent, action = "mcp_build", confidence = 1.0, routed = "mcp_build", source = "mcp-build" }); } catch { }
             Func<string, string, string, string, Task> emitM = async (a, g, s, r) =>
             { Send(new { type = "step", agent = a, gloss = g, state = s, result = r }); await Task.Delay(60); };
-            var mc = await McpBuild.Run(intent, emitM);
+            var relay = new ThinkRelay("Planning", msg => Send(msg));
+            relay.Start(Forge.Providers.ProviderFactory.CurrentModel());
+            McpBuild.McpBuildOutcome mc;
+            try { mc = await McpBuild.Run(intent, emitM, ct, relay.OnDelta); relay.End(false); }
+            catch (OperationCanceledException)
+            {
+                relay.End(true);
+                Send(new { type = "answer", answer = "Interrupted — partial thinking is kept above. ↩ revert a turn, or edit and resend.", runId = _currentRunId, handler = "mcp_build" });
+                return true;
+            }
             if (mc == null || !mc.Attempted) return false; // no provider: existing paths keep behaviour
             if (!string.IsNullOrEmpty(mc.Error))
             {
-                Send(new { type = "answer", answer = mc.Error, runId = _currentRunId, handler = "mcp_build" });
+                if (mc.Error == "INTERRUPTED")
+                    Send(new { type = "answer", answer = "Interrupted — partial thinking is kept above. ↩ revert a turn, or edit and resend.", runId = _currentRunId, handler = "mcp_build" });
+                else
+                    Send(new { type = "answer", answer = mc.Error, runId = _currentRunId, handler = "mcp_build" });
                 return true;
             }
             Send(new { type = "answer", answer = mc.Summary, runId = _currentRunId, handler = "mcp_build" });

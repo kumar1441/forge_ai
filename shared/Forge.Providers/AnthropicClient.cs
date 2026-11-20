@@ -70,7 +70,7 @@ namespace Forge.Providers
                         if (resp.IsSuccessStatusCode)
                             return Parse(text, model);
                         int code = (int)resp.StatusCode;
-                        bool transient = code == 429 || code == 500 || code == 502 || code == 503 || code == 529;
+                        bool transient = code == 408 || code == 429 || code == 500 || code == 502 || code == 503 || code == 504 || code == 529;
                         if (!transient || attempt >= 3)
                             throw new ProviderException("Provider HTTP " + code + " (" + resp.StatusCode + "): " + Truncate(text));
                         try { await Task.Delay(TimeSpan.FromSeconds(5 * (attempt + 1)), ct).ConfigureAwait(false); }

@@ -65,7 +65,7 @@ namespace Forge.SolidWorks
         }
 
         public static async Task<RecipeCreateOutcome> Run(
-            ISldWorks app, string intent, Func<string, string, string, string, Task> emit)
+            ISldWorks app, string intent, Func<string, string, string, string, Task> emit, System.Threading.CancellationToken ct)
         {
             var outcome = new RecipeCreateOutcome();
             if (!IsRecipeCreate(intent)) return outcome;
@@ -84,7 +84,7 @@ namespace Forge.SolidWorks
             JObject recipeJson;
             try
             {
-                recipeJson = await AuthorRecipe(client, intent);
+                recipeJson = await AuthorRecipe(client, intent, ct);
                 if (recipeJson == null)
                 {
                     outcome.Error = "I couldn't turn that into a build plan — try splitting it into smaller steps (e.g. the plate first, then the holes).";
@@ -177,7 +177,7 @@ namespace Forge.SolidWorks
             return null;
         }
 
-        private static async Task<JObject> AuthorRecipe(IProviderClient client, string intent)
+        private static async Task<JObject> AuthorRecipe(IProviderClient client, string intent, System.Threading.CancellationToken ct)
         {
             var opts = new ProviderOptions { MaxTokens = 2500, Temperature = 0, Model = ProviderFactory.CurrentModel() };
             string user = "User said: \"" + (intent ?? "").Trim() + "\"\n\nOutput ONLY the recipe JSON object. No markdown fences, no commentary.";
@@ -189,7 +189,8 @@ namespace Forge.SolidWorks
                     new ChatMessage { Role = "user", Content = attempt == 0 ? user : user + " JSON object only." }
                 };
                 ProviderResult res;
-                try { res = await client.CompleteAsync(msgs, opts, CancellationToken.None); }
+                try { res = await client.CompleteAsync(msgs, opts, ct); }
+                catch (OperationCanceledException) { throw; }
                 catch { return null; }
                 string err;
                 var recipe = SafeJsonExtractor.ExtractResponseEnvelope(res != null ? res.Text : null, out err);

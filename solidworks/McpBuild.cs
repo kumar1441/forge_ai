@@ -69,7 +69,7 @@ namespace Forge.SolidWorks
             public string Error;
         }
 
-        public static async Task<McpBuildOutcome> Run(string intent, Func<string, string, string, string, Task> emit)
+        public static async Task<McpBuildOutcome> Run(string intent, Func<string, string, string, string, Task> emit, System.Threading.CancellationToken ct, Action<string, string> onThink)
         {
             var outcome = new McpBuildOutcome();
             if (!IsMcpCreate(intent)) return outcome;
@@ -113,7 +113,8 @@ namespace Forge.SolidWorks
 
             await emit("Builder", "planning " + lines.Count + " available modelling tools", "run", null);
             Tuple<JObject, string> authored;
-            try { authored = await AuthorPlan(client, intent, lines); }
+            try { authored = await AuthorPlan(client, intent, lines, ct, onThink); }
+            catch (OperationCanceledException) { outcome.Error = "INTERRUPTED"; return outcome; }
             catch (Exception ex)
             {
                 outcome.Error = "The build planner failed (" + ex.GetType().Name + ") — try splitting the request into smaller steps.";
@@ -147,6 +148,7 @@ namespace Forge.SolidWorks
             int n_ = 0;
             foreach (var s in steps)
             {
+                ct.ThrowIfCancellationRequested();
                 var so = (JObject)s;
                 string tool = (string)so["tool"];
                 var args = so["args"] as JObject ?? new JObject();
@@ -193,7 +195,7 @@ namespace Forge.SolidWorks
             return null;
         }
 
-        private static async Task<Tuple<JObject, string>> AuthorPlan(IProviderClient client, string intent, List<string> catalog)
+        private static async Task<Tuple<JObject, string>> AuthorPlan(IProviderClient client, string intent, List<string> catalog, System.Threading.CancellationToken ct, Action<string, string> onThink)
         {
             // Finite cap: uncapped lets reasoning models think forever and the call never returns.
             // Verified live: capped calls complete; uncapped hang past the 10-minute timeout.
@@ -202,13 +204,15 @@ namespace Forge.SolidWorks
             string lastDiag = "no attempts made";
             for (int attempt = 0; attempt < 2; attempt++)
             {
+                ct.ThrowIfCancellationRequested();
                 var msgs = new List<ChatMessage>
                 {
                     new ChatMessage { Role = "system", Content = PlanSystemPrompt + "\n\nAvailable tools:\n" + string.Join("\n", catalog.ToArray()) },
                     new ChatMessage { Role = "user", Content = attempt == 0 ? user : user + " JSON object only." }
                 };
                 ProviderResult res;
-                try { res = await client.CompleteAsync(msgs, opts, CancellationToken.None); }
+                try { res = await client.CompleteStreamingAsync(msgs, opts, ct, onThink); }
+                catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
                     string why = (ex.Message ?? "");

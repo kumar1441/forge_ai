@@ -84,6 +84,8 @@ namespace Forge.SolidWorks
         private static bool _noticesShown;   // crash-recovery + update notice, once per session
         private static bool _firstrunShown;  // onboarding overlay, once per process (panel also gates on localStorage)
         private string _currentRunId;        // per-command id: ties thumbs feedback + corrections to the run
+        private static System.Threading.CancellationTokenSource _runCts;     // current Generate run (Esc/stop cancels it)
+        private static System.Threading.CancellationTokenSource _enhanceCts; // current Enhance call (Esc/stop cancels it)
 
         // Central post-run logging for EVERY live handler: masked event -> the data spine (fills the telemetry store +
         // Layer-3 replay + crash-recovery close), plus correction capture (rephrase pairing + arms undo).
@@ -208,6 +210,11 @@ namespace Forge.SolidWorks
                 else if (action == "enhance") await EnhancePrompt((string)msg.text);
                 else if (action == "attach") DoAttach();
                 else if (action == "clearAttach") { _attachedFile = null; Send(new { type = "attachCleared" }); }
+                else if (action == "stop")   // Kilo-style interrupt: cancel the in-flight run/enhance; partial CoT stays
+                {
+                    try { if (_runCts != null) _runCts.Cancel(); } catch { }
+                    try { if (_enhanceCts != null) _enhanceCts.Cancel(); } catch { }
+                }
                 else if (action == "revert")   // Kilo-style revert: drop the pending thread so the resent prompt starts clean
                 {
                     _pendingIntent = null; _pendingConfirm = null;
@@ -563,6 +570,9 @@ namespace Forge.SolidWorks
                 Send(new { type = "error", message = "Enhance needs an LLM provider — save a key in the welcome screen first, then try again." });
                 return;
             }
+            try { if (_enhanceCts != null) _enhanceCts.Cancel(); } catch { }
+            _enhanceCts = new System.Threading.CancellationTokenSource();
+            var ect = _enhanceCts.Token;
             try
             {
                 var msgs = new List<ChatMessage>
@@ -576,10 +586,10 @@ namespace Forge.SolidWorks
                 string picked = ProviderFactory.CurrentModel();
                 var ui = System.Threading.SynchronizationContext.Current;
                 var watch = System.Diagnostics.Stopwatch.StartNew();
-                Send(new { type = "thinkStart", model = picked });
+                Send(new { type = "thinkStart", model = picked, label = "Enhancing" });
                 var res = await client.CompleteStreamingAsync(msgs,
                     new ProviderOptions { MaxTokens = 32000, Temperature = 0.2, Model = picked },
-                    System.Threading.CancellationToken.None,
+                    ect,
                     (kind, delta) =>
                     {
                         if (kind != "reasoning" || string.IsNullOrEmpty(delta)) return;
@@ -596,6 +606,11 @@ namespace Forge.SolidWorks
                 if (string.IsNullOrWhiteSpace(clean)) throw new Exception("empty enhancement");
                 try { IntentRate.Note(res.TokIn, res.TokOut); } catch { }
                 Send(new { type = "enhanced", text = clean });
+            }
+            catch (OperationCanceledException)
+            {
+                try { Send(new { type = "thinkEnd", seconds = 0, interrupted = true }); } catch { }
+                Send(new { type = "answer", answer = "Enhance interrupted — partial thinking is kept above. Edit and resend, or ✨ again." });
             }
             catch (Exception ex)
             {
@@ -660,7 +675,11 @@ namespace Forge.SolidWorks
             "Vague scope is banned: 'pattern holes where applicable' must become exact counts, sizes, positions.";
 
         private async Task Generate(string intent)
-        {            _currentRunId = Guid.NewGuid().ToString("N").Substring(0, 12);   // tags this run for thumbs feedback + correction capture
+        {
+            _currentRunId = Guid.NewGuid().ToString("N").Substring(0, 12);   // tags this run for thumbs feedback + correction capture
+            try { if (_runCts != null) _runCts.Cancel(); } catch { }
+            _runCts = new System.Threading.CancellationTokenSource();
+            var runCt = _runCts.Token;
 
             // DEMO ROUTE â€” authoritative, and BEFORE anything that can `await`/yield (the one-time UpdateNotice
             // below does a network call). flat-pattern-DXF / drawing-package / interference route here so (a) a
@@ -698,8 +717,8 @@ namespace Forge.SolidWorks
             // enriched build spec is full of fastener callouts (M3/M4/M5) and mate words ("mount") that
             // those matchers would otherwise claim with no doc open ("Open your assembly first"). Verb-gated
             // (create/make/build/...), so edit flows keep theirs. Needs no open document.
-            if (await TryRunMcpBuild(intent)) return;
-            if (await TryRunCreateRecipe(intent)) return;
+            if (await TryRunMcpBuild(intent, runCt)) return;
+            if (await TryRunCreateRecipe(intent, runCt)) return;
 
             // Bulk resize fasteners (Demo #6, M6â†’M8) â€” route AUTHORITATIVELY before the cloud parse. A clear
             // "replace all the M6 bolts with M8" must ACT, never fall to the parser's spurious "bolt sizes not
@@ -729,7 +748,7 @@ namespace Forge.SolidWorks
             //   â€” and future ones â€” get parse -> confirm-or-ask -> preview -> execute -> verify -> log uniformly.
             //   Returns false only when the cloud parser is unreachable or the action is unknown; then the
             //   per-handler regex blocks below run as the OFFLINE fallback (and the legacy variant path after them).
-            if (await RunViaPipeline(intent)) return;
+            if (await RunViaPipeline(intent, runCt)) return;
 
             // Auto-mate â€” the first "doer". Works on an ASSEMBLY, so intercept here BEFORE ActivePart()
             // (which only accepts parts). Deploys the Gauge â†’ Torque â†’ Sentinel crew with live narration.
