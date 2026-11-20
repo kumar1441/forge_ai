@@ -112,16 +112,18 @@ namespace Forge.SolidWorks
             }
 
             await emit("Builder", "planning " + lines.Count + " available modelling tools", "run", null);
-            JObject plan;
-            try { plan = await AuthorPlan(client, intent, lines); }
+            Tuple<JObject, string> authored;
+            try { authored = await AuthorPlan(client, intent, lines); }
             catch (Exception ex)
             {
                 outcome.Error = "The build planner failed (" + ex.GetType().Name + ") — try splitting the request into smaller steps.";
                 return outcome;
             }
+            var plan = authored.Item1;
             if (plan == null)
             {
-                outcome.Error = "I couldn't turn that into a tool plan — rephrase with concrete parts and dims.";
+                string why = string.IsNullOrEmpty(authored.Item2) ? "" : " (" + authored.Item2 + ")";
+                outcome.Error = "I couldn't turn that into a tool plan" + why + " — rephrase with concrete parts and dims.";
                 return outcome;
             }
 
@@ -191,10 +193,13 @@ namespace Forge.SolidWorks
             return null;
         }
 
-        private static async Task<JObject> AuthorPlan(IProviderClient client, string intent, List<string> catalog)
+        private static async Task<Tuple<JObject, string>> AuthorPlan(IProviderClient client, string intent, List<string> catalog)
         {
-            var opts = new ProviderOptions { MaxTokens = 4000, Temperature = 0 };
+            // Generous cap: reasoning models spend tokens thinking before emitting JSON — a tight
+            // cap slices the plan mid-object and extraction fails closed.
+            var opts = new ProviderOptions { MaxTokens = 16000, Temperature = 0 };
             string user = "User said: \"" + (intent ?? "").Trim() + "\"\n\nOutput ONLY the plan JSON. No markdown fences, no commentary.";
+            string lastDiag = "no attempts made";
             for (int attempt = 0; attempt < 2; attempt++)
             {
                 var msgs = new List<ChatMessage>
@@ -204,17 +209,27 @@ namespace Forge.SolidWorks
                 };
                 ProviderResult res;
                 try { res = await client.CompleteAsync(msgs, opts, CancellationToken.None); }
-                catch { return null; }
+                catch (Exception ex) { return new Tuple<JObject, string>(null, "provider call failed: " + ex.GetType().Name + " " + ex.Message); }
+                string raw = res != null ? res.Text : null;
                 string err;
-                var plan = SafeJsonExtractor.ExtractResponseEnvelope(res != null ? res.Text : null, out err);
+                var plan = SafeJsonExtractor.ExtractResponseEnvelope(raw, out err);
+                if (plan != null && !(plan["steps"] is JArray) && plan["tool_calls"] is JArray)
+                    plan["steps"] = plan["tool_calls"];
                 if (plan != null && plan["steps"] is JArray)
                 {
                     try { IntentRate.Note(res.TokIn, res.TokOut); } catch { }
                     try { GroundTruth.Trace?.Invoke("mcp-build: planned model=" + res.Model); } catch { }
-                    return plan;
+                    return new Tuple<JObject, string>(plan, null);
+                }
+                lastDiag = err ?? "no steps array";
+                if (!string.IsNullOrWhiteSpace(raw))
+                {
+                    string head = raw.Trim();
+                    if (head.Length > 220) head = head.Substring(0, 220) + "…";
+                    lastDiag += "; model said: " + head;
                 }
             }
-            return null;
+            return new Tuple<JObject, string>(null, lastDiag);
         }
 
         private const string PlanSystemPrompt =

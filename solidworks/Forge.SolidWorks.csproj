@@ -87,6 +87,10 @@
       <Link>panel.html</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="forge.bmp">
+      <Link>forge.bmp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
   <!-- WebView2's native loader ships under runtimes\win-x64\native\. A net48 COM add-in hosted in SLDWORKS.exe does

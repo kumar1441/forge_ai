@@ -90,8 +90,18 @@ namespace Forge.SolidWorks
 
         private void CreateTaskPane()
         {
-            // Empty icon path is allowed; SolidWorks shows a default tab.
-            _taskpaneView = SwApp.CreateTaskpaneView2("", "Forge");
+            // Forge icon ships beside the DLL (forge.bmp, copied by the build). Missing file ->
+            // fall back to the default tab exactly as before.
+            string icon = "";
+            try
+            {
+                string bmp = System.IO.Path.Combine(
+                    System.IO.Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location),
+                    "forge.bmp");
+                if (System.IO.File.Exists(bmp)) icon = bmp;
+            }
+            catch { }
+            _taskpaneView = SwApp.CreateTaskpaneView2(icon, "Forge");
             _panel = (ForgePanel)_taskpaneView.AddControl(PanelProgId, "");
         }
 
