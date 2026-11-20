@@ -965,7 +965,7 @@ namespace Forge.SolidWorks
             SaveSession(sid);
             await CompactHistoryIfNeeded(client, sid, model, ct);
 
-            var opts = new ProviderOptions { MaxTokens = 16000, Temperature = ProviderFactory.SupportsTemperature(model) ? 0 : (double?)null, Model = model, ToolsJson = toolsJson, ToolChoice = "auto" };
+            var opts = new ProviderOptions { MaxTokens = 16000, Model = model, ToolsJson = toolsJson, ToolChoice = "auto" };
             var log = new List<string>();
             int executed = 0;
             int succeeded = 0; // tool calls that returned Ok: the success line reports these, never attempts
@@ -1034,59 +1034,6 @@ namespace Forge.SolidWorks
                         return outcome;
                     }
 
-                    // Doom-loop guard (Kilo parity): the same single tool+args three times in a row
-                    // means the model is stuck — ask whether to keep going instead of burning
-                    // the run to the breaker or stopping dead. Per-call sequence with full-argument
-                    // equality (reads included): each call in a batch extends the window.
-                    {
-                        foreach (var sc in res.ToolCalls)
-                            DoomWindow.Add((sc.Name ?? "") + "\n" + (sc.ArgumentsJson ?? ""));
-                        while (DoomWindow.Count > 3) DoomWindow.RemoveAt(0);
-                        bool loop = DoomWindow.Count == 3 &&
-                            string.Equals(DoomWindow[0], DoomWindow[1], StringComparison.Ordinal) &&
-                            string.Equals(DoomWindow[1], DoomWindow[2], StringComparison.Ordinal);
-                        if (loop)
-                        {
-                            // Ask under a real tool name whenever the window names exactly one tool
-                            // (single call or a batch repeating the same tool) so "always" persists a
-                            // real rule; mixed batches keep the synthetic label (never persisted).
-                            // Kilo parity: no window reset on approve — the very next identical call
-                            // re-asks instead of granting two free repeats.
-                            string doomTool = "(repeat loop)";
-                            {
-                                var distinct = new System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal);
-                                foreach (var sc in res.ToolCalls) { if (!string.IsNullOrWhiteSpace(sc.Name)) distinct.Add(sc.Name); }
-                                if (distinct.Count == 1) { foreach (var dn in distinct) doomTool = dn; }
-                            }
-                            string verdict;
-                            try
-                            {
-                                verdict = await AskApproval(doomTool,
-                                    new JObject { ["repeated_call"] = res.ToolCalls.Count == 1 ? (res.ToolCalls[0].Name ?? "?") : (res.ToolCalls.Count + " calls"), ["times"] = 3, ["note"] = "The model repeated the same call 3 times, so it looks stuck — approve to let it continue, reject to stop and rephrase." },
-                                    emit, ct, cardSender,
-                                    "Stuck in a loop on " + doomTool + " — approval needed to continue");
-                            }
-                            catch (OperationCanceledException) { throw; }
-                            if (verdict == "panel-gone")
-                            {
-                                outcome.Error = "Stopped: the model repeated the same call 3 times and the panel is gone — resend to continue.";
-                                SaveSession(sid);
-                                return outcome;
-                            }
-                            if (verdict != "approve")
-                            {
-                                outcome.Error = "Stopped: the model repeated the same call 3 times (" +
-                                    (res.ToolCalls.Count == 1 ? (res.ToolCalls[0].Name ?? "?") : res.ToolCalls.Count + " calls") + "). What built so far stays open; rephrase to break the cycle.";
-                                SaveSession(sid);
-                                return outcome;
-                            }
-                            // Kilo parity: the window is NOT cleared on approve, so the very next
-                            // identical call re-asks immediately instead of granting free repeats.
-                            try { await emit("Builder", "continuing anyway — watching for another loop", "run", null); }
-                            catch { }
-                        }
-                    }
-
                     // Record the assistant turn (with tool calls) so the next iteration observes it.
                     // mark bounds this iteration's tail so a cancel can drop a dangling
                     // tool_calls turn (no tool results yet) instead of persisting it.
@@ -1152,6 +1099,45 @@ namespace Forge.SolidWorks
                         // truncated history.
                         ct.ThrowIfCancellationRequested();
                         lock (session.Msgs) { session.Msgs.Add(new JObject { ["role"] = "tool", ["tool_call_id"] = cid, ["content"] = (r.Ok ? "" : "FAILED: ") + text }); AgentMsgCount = session.Msgs.Count; }
+                        // Doom-loop guard (Kilo parity): only COMPLETED calls count — extend the
+                        // per-call window after each tool result lands and ask on three identical
+                        // consecutive calls. Reads count too: a polling loop is still a loop.
+                        // No window reset on approve: the very next identical call re-asks.
+                        bool loop = false;
+                        lock (DoomWindow)
+                        {
+                            DoomWindow.Add((c.Name ?? "") + "\n" + argRaw);
+                            while (DoomWindow.Count > 3) DoomWindow.RemoveAt(0);
+                            loop = DoomWindow.Count == 3 &&
+                                string.Equals(DoomWindow[0], DoomWindow[1], StringComparison.Ordinal) &&
+                                string.Equals(DoomWindow[1], DoomWindow[2], StringComparison.Ordinal);
+                        }
+                        if (loop)
+                        {
+                            string verdict;
+                            try
+                            {
+                                verdict = await AskApproval(c.Name ?? "(repeat loop)",
+                                    new JObject { ["repeated_call"] = c.Name ?? "?", ["times"] = 3, ["note"] = "The model repeated the same call 3 times, so it looks stuck — approve to let it continue, reject to stop and rephrase." },
+                                    emit, ct, cardSender,
+                                    "Stuck in a loop on " + (c.Name ?? "a tool") + " — approval needed to continue");
+                            }
+                            catch (OperationCanceledException) { throw; }
+                            if (verdict == "panel-gone")
+                            {
+                                outcome.Error = "Stopped: the model repeated the same call 3 times and the panel is gone — resend to continue.";
+                                SaveSession(sid);
+                                return outcome;
+                            }
+                            if (verdict != "approve")
+                            {
+                                outcome.Error = "Stopped: the model repeated the same call 3 times (" + (c.Name ?? "?") + "). What built so far stays open; rephrase to break the cycle.";
+                                SaveSession(sid);
+                                return outcome;
+                            }
+                            try { await emit("Builder", "continuing anyway — watching for another loop", "run", null); }
+                            catch { }
+                        }
                         if (!r.Ok)
                         {
                             // Don't stop: feed the failure back and let the model re-plan around it.
@@ -1237,7 +1223,8 @@ namespace Forge.SolidWorks
             // Finite cap: uncapped lets reasoning models think forever and the call never returns.
             // Verified live: capped calls complete; uncapped hang past the 10-minute timeout.
             // Model is the run's snapshot (caller's Resolve), never a fresh CurrentModel read.
-            var opts = new ProviderOptions { MaxTokens = 32000, Temperature = ProviderFactory.SupportsTemperature(model) ? 0 : (double?)null, Model = model };
+            // No Temperature: provider default, like Kilo (temp only forced for enhance rewrites).
+            var opts = new ProviderOptions { MaxTokens = 32000, Model = model };
             // The intent is untrusted data (framed as such below, dims verbatim — even inch
             // marks survive); the 2000-char cap keeps a pasted blob from becoming a token blowup.
             string safe = (intent ?? "").Trim();

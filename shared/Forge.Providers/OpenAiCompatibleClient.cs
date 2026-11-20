@@ -131,7 +131,9 @@ namespace Forge.Providers
             if (opts != null)
             {
                 if (opts.MaxTokens.HasValue) j["max_tokens"] = opts.MaxTokens.Value;
-                if (opts.Temperature.HasValue) j["temperature"] = opts.Temperature.Value;
+                // Central gate (callers with hardcoded Temperature=0 still omit it here): reasoning
+                // variants reject custom temperatures, so unsupported models send no field at all.
+                if (opts.Temperature.HasValue && ProviderFactory.SupportsTemperature(model)) j["temperature"] = opts.Temperature.Value;
                 if (!string.IsNullOrWhiteSpace(opts.ToolsJson))
                 {
                     // tool_choice without a tools array is a 400 on strict gateways: only send
@@ -205,7 +207,9 @@ namespace Forge.Providers
             if (opts != null)
             {
                 if (opts.MaxTokens.HasValue) j["max_tokens"] = opts.MaxTokens.Value;
-                if (opts.Temperature.HasValue) j["temperature"] = opts.Temperature.Value;
+                // Central gate (callers with hardcoded Temperature=0 still omit it here): reasoning
+                // variants reject custom temperatures, so unsupported models send no field at all.
+                if (opts.Temperature.HasValue && ProviderFactory.SupportsTemperature(model)) j["temperature"] = opts.Temperature.Value;
                 if (!string.IsNullOrWhiteSpace(opts.ToolsJson))
                 {
                     // tool_choice without a tools array is a 400 on strict gateways: only send

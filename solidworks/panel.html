@@ -546,6 +546,7 @@
   const post = (o) => { if (!hasBridge) return false; try { window.chrome.webview.postMessage(JSON.stringify(o)); return true; } catch (e) { return false; } };
   const needBridgeMsg = (what) => `${what} needs SolidWorks — you're in preview mode, so nothing was sent. Your draft is kept. Open SolidWorks to use it for real.`;
   let lastHasKey = null; // set by provider messages; null = unknown yet
+  let lastNoKeyPrompt = null; // slug last guided to Settings, so the no-key card shows once per provider
   const needsKey = () => curSlug && curSlug !== "ollama" && lastHasKey === false;
   const $ = (id) => document.getElementById(id);
   const transcript = $("transcript");
@@ -879,7 +880,7 @@
   });
   $("setkeysave").addEventListener("click", () => {
     const k = $("setkey").value.trim();
-    if (!k) return;
+    if (!k) { systemCard("Paste a key first, then hit Save — the field is empty."); return; }
     if (!hasBridge) { systemCard(needBridgeMsg("Saving keys") + " Keys are stored by the SolidWorks host (DPAPI) — reconnect there to save."); return; }
     post({ action: "saveKey", provider: $("setprov").value, key: k });
     post({ action: "getProvider" }); // refresh key state + model list immediately after save
@@ -1209,7 +1210,7 @@
       transcript.insertBefore(block, rt[rt.length - 10]);
     }
     renderHistoryList(); scroll(true); intent.focus();
-    try { transcript.querySelectorAll(".appr:not(.done)").forEach(box => { box.classList.add("done"); box.querySelectorAll("button").forEach(x => { x.disabled = true; }); }); } catch (e) {}
+    try { transcript.querySelectorAll(".appr:not(.done)").forEach(box => { box.classList.add("done"); box.querySelectorAll("button").forEach(x => { x.disabled = true; }); const hd = box.querySelector(".ahead"); if (hd && hd.firstChild) hd.firstChild.textContent = "🔶 Expired — run ended"; }); } catch (e) {}
     try { transcript.querySelectorAll(".think .thead").forEach(hd => { if (/live/.test(hd.textContent || "")) { hd.textContent = "Thought (restored — click to expand)"; const th = hd.closest(".think"); if (th) th.classList.add("collapsed"); } }); } catch (e2) {}
     if (!s.turns.length) systemCard("This saved chat is empty — nothing to show. Send a prompt to start it again.");
     else {
@@ -1301,7 +1302,8 @@
           const pv = args[0].toLowerCase();
           if (!$("setprov").querySelector(`option[value="${pv}"]`)) { systemCard(`Unknown provider <b>${pv.replace(/</g, "&lt;")}</b> — pick one in Settings.`); showPop("settings"); break; }
           $("setprov").value = pv;
-          curSlug = pv; curModel = null; renderPill(); renderCtx();
+          $("setkey").value = "";
+          curSlug = pv; lastHasKey = pv === "ollama" ? true : null; curModel = null; renderPill(); renderCtx();
           if ($("setkeyrow")) $("setkeyrow").style.display = pv === "ollama" ? "none" : "";
           if ($("setsub")) $("setsub").textContent = pv + " · …";
           chatModels = []; renderModelList($("msearch") ? $("msearch").value : "");
@@ -1686,6 +1688,7 @@
       menItems = (m.files || []).slice(0, 50);
       menIdx = 0;
       if (menQuery()) { menOpen = true; showPop("menpop"); renderMenList(); }
+      else menClose(); // async reply outlived the @ query — never leave a stale popover open
     }
 
     else if (m.type === "enhanced") {
@@ -1739,6 +1742,7 @@
         renderSettings(m);
         renderCtx();
         $("mrefresh").style.display = curDynamic ? "" : "none";
+        if (!m.hasKey && m.slug && m.slug !== "ollama" && lastNoKeyPrompt !== m.slug) { lastNoKeyPrompt = m.slug; systemCard(`No key saved for <b>${m.slug}</b> — paste it in Settings → API key, hit Save, then pick a model.`); }
         if (curDynamic && !chatModels.length) post({ action: "refreshModels" });
       } else if (m.error === "nokey") {
         lastHasKey = false;
@@ -1910,7 +1914,7 @@
       else if (model) curModel = model;
       curSlug = next;
       if (curSlug === "ollama") lastHasKey = true;
-      renderPill(); renderCtx(); renderSettings({ slug: curSlug, hasKey: lastHasKey === true });
+      renderPill(); renderCtx(); renderSettings({ slug: curSlug, hasKey: lastHasKey === true, model: curModel, baseUrl: lastBaseUrl });
     };
     const render = () => {
       o.innerHTML = `<button class="obskip" id="obskipall">Skip</button>${page===1?page1:page===2?page2:page3}${dots()}`;

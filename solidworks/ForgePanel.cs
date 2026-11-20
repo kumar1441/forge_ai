@@ -550,12 +550,15 @@ namespace Forge.SolidWorks
                     try { provider = (string)msg.provider; } catch { }
                     string fslug = (provider ?? "").Trim().ToLowerInvariant();
                     var preset = ProviderPresetFor(fslug);
+                    // Ollama serves /models with no key (same exemption as refreshModels): only
+                    // keyed providers fail closed here.
+                    bool flocal = string.Equals(fslug, "ollama", StringComparison.OrdinalIgnoreCase);
                     if (string.IsNullOrWhiteSpace(key)) key = StoredProviderKeyForSlug(fslug, preset.Provider);
-                    if (string.IsNullOrWhiteSpace(key))
+                    if (string.IsNullOrWhiteSpace(key) && !flocal)
                     { Send(new { type = "models", models = new string[0], error = "nokey" }); return; }
                     try
                     {
-                        var ids = await FetchServableModels(preset.BaseUrl, key.Trim());
+                        var ids = await FetchServableModels(preset.BaseUrl, (key ?? "").Trim());
                         Send(new { type = "models", models = ids, selected = preset.Model });
                     }
                     catch (Exception ex) { Send(new { type = "models", models = new string[0], error = MapModelsError(ex) }); }

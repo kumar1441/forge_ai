@@ -122,7 +122,9 @@ namespace Forge.Providers
             var j = new JObject();
             j["model"] = model;
             j["max_tokens"] = (opts != null && opts.MaxTokens.HasValue) ? opts.MaxTokens.Value : 1024;
-            if (opts != null && opts.Temperature.HasValue) j["temperature"] = opts.Temperature.Value;
+            // Central gate (callers with hardcoded Temperature=0 still omit it here): reasoning
+            // variants reject custom temperatures, so unsupported models send no field at all.
+            if (opts != null && opts.Temperature.HasValue && ProviderFactory.SupportsTemperature(model)) j["temperature"] = opts.Temperature.Value;
 
             var system = new StringBuilder();
             var arr = new JArray();
