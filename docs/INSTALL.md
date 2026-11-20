@@ -130,7 +130,7 @@ The dispatcher (`slashRun`) supports exactly: `/clear` (= `/new`: fresh chat, re
 
 ### Auto-approve
 
-Settings holds `Auto-approve` (master) plus `Read tools`, `Build tools`, `Destructive` (persisted as `forge_appr_*`, pushed via `setAutoApprove`). Tool category is host-derived (read/build/destructive by name prefix). When a call needs consent the panel shows an approval card (`🔶 Approval needed`, truncated JSON args) with `Approve` / `Always allow` / `Reject`; the verdict posts `approveReply`. `/allow <tool>` adds to `%APPDATA%\Forge\approvals.json`, `/deny <tool>` adds to `%APPDATA%\Forge\denials.json`, `/undeny <tool>` removes from denials; the Settings cog lists both files' contents with per-item remove buttons.
+Settings holds `Auto-approve` (master) plus `Read tools`, `Build tools`, `Destructive` (persisted as `forge_appr_*`, pushed via `setAutoApprove`). Tool category is host-derived (read/build/destructive by name prefix). When a call needs consent the panel shows an approval card (`🔶 Approval needed`, truncated JSON args) with `Approve` / `Always allow` / `Reject`; the verdict posts `approveReply`. `/allow <tool>` and `/deny <tool>` append ordered rules to `%APPDATA%\Forge\agent\approval-rules.json` (last match wins); `/undeny <tool>` removes them; the Settings cog lists allowed and denied patterns with per-item remove buttons.
 
 ### @-mentions
 

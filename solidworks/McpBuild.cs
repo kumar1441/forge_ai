@@ -70,7 +70,9 @@ namespace Forge.SolidWorks
 
         public static void LoadApprovals()
         {
-            lock (Rules) { Rules.Clear(); }
+            // Stage off-lock, swap under one lock: a concurrent Add/Unallow landing
+            // between Clear and fill would otherwise be wiped.
+            var staged = new List<Rule>();
             bool loaded = false;
             try
             {
@@ -78,23 +80,20 @@ namespace Forge.SolidWorks
                 if (File.Exists(p))
                 {
                     var arr = JArray.Parse(File.ReadAllText(p));
-                    lock (Rules)
+                    foreach (var t in arr)
                     {
-                        foreach (var t in arr)
-                        {
-                            var o = t as JObject;
-                            string pat = o != null ? (string)o["pattern"] : (string)t;
-                            string act = o != null ? (string)o["action"] : "allow";
-                            if (string.IsNullOrWhiteSpace(pat)) continue;
-                            if (act != "allow" && act != "deny") act = "allow";
-                            Rules.Add(new Rule { Pattern = pat.Trim(), Action = act });
-                        }
+                        var o = t as JObject;
+                        string pat = o != null ? (string)o["pattern"] : (string)t;
+                        string act = o != null ? (string)o["action"] : "allow";
+                        if (string.IsNullOrWhiteSpace(pat)) continue;
+                        if (act != "allow" && act != "deny") act = "allow";
+                        staged.Add(new Rule { Pattern = pat.Trim(), Action = act });
                     }
                     loaded = true;
                 }
             }
-            catch { }
-            if (loaded) return;
+            catch { staged.Clear(); loaded = false; }
+            if (loaded) { lock (Rules) { Rules.Clear(); Rules.AddRange(staged); } return; }
             // One-time migration from the legacy split files (allows first, denies appended
             // so historical deny-wins ties keep working under last-match-wins).
             try
@@ -103,7 +102,7 @@ namespace Forge.SolidWorks
                 if (File.Exists(p))
                 {
                     var arr = JArray.Parse(File.ReadAllText(p));
-                    lock (Rules) { foreach (var t in arr) { string s = (string)t; if (!string.IsNullOrWhiteSpace(s)) Rules.Add(new Rule { Pattern = s.Trim(), Action = "allow" }); } }
+                    foreach (var t in arr) { string s = (string)t; if (!string.IsNullOrWhiteSpace(s)) staged.Add(new Rule { Pattern = s.Trim(), Action = "allow" }); }
                 }
             }
             catch { }
@@ -113,11 +112,12 @@ namespace Forge.SolidWorks
                 if (File.Exists(p))
                 {
                     var arr = JArray.Parse(File.ReadAllText(p));
-                    lock (Rules) { foreach (var t in arr) { string s = (string)t; if (!string.IsNullOrWhiteSpace(s)) Rules.Add(new Rule { Pattern = s.Trim(), Action = "deny" }); } }
+                    foreach (var t in arr) { string s = (string)t; if (!string.IsNullOrWhiteSpace(s)) staged.Add(new Rule { Pattern = s.Trim(), Action = "deny" }); }
                 }
             }
             catch { }
-            if (Rules.Count > 0) SaveApprovals();
+            lock (Rules) { Rules.Clear(); Rules.AddRange(staged); }
+            if (staged.Count > 0) SaveApprovals();
         }
 
         public static void AddAlwaysAllow(string tool)
@@ -142,8 +142,12 @@ namespace Forge.SolidWorks
         {
             lock (Rules)
             {
+                // Last-match-wins, same as ApprovalFor: a pattern denied after being
+                // allowed (legacy migration) must not show up in both lists.
+                var eff = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var r in Rules) eff[r.Pattern] = r.Action;
                 var out_ = new System.Collections.Generic.List<string>();
-                foreach (var r in Rules) if (r.Action == "allow") out_.Add(r.Pattern);
+                foreach (var kv in eff) if (kv.Value == "allow") out_.Add(kv.Key);
                 return out_;
             }
         }
@@ -152,8 +156,10 @@ namespace Forge.SolidWorks
         {
             lock (Rules)
             {
+                var eff = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var r in Rules) eff[r.Pattern] = r.Action;
                 var out_ = new System.Collections.Generic.List<string>();
-                foreach (var r in Rules) if (r.Action == "deny") out_.Add(r.Pattern);
+                foreach (var kv in eff) if (kv.Value == "deny") out_.Add(kv.Key);
                 return out_;
             }
         }
@@ -286,6 +292,9 @@ namespace Forge.SolidWorks
                 return new McpBridge.ToolResult { Ok = false, Text = "Tool '" + tool + "' is on your deny list — work around it or remove the denial." };
             if (IsApproved(tool)) return null;
             string verdict = await AskApproval(tool, args, emit, ct);
+            // Panel-gone is fail-closed with its own text: it is not a user reject.
+            if (verdict == "panel-gone")
+                return new McpBridge.ToolResult { Ok = false, Text = "Stopped: the panel is gone so the approval card can't be answered — resend to continue." };
             // A deny landing while the card was pending wins over a later approve click.
             if (verdict == "approve" && ApprovalFor(tool) == "deny")
                 return new McpBridge.ToolResult { Ok = false, Text = "Tool '" + tool + "' is on your deny list — work around it or remove the denial." };
@@ -340,7 +349,9 @@ namespace Forge.SolidWorks
                 if (tcs.Task.IsCompleted) verdict = await tcs.Task;
                 else throw new OperationCanceledException(ct);
             }
-            finally { lock (PendingApprovals) { PendingApprovals.Remove(id); } }
+            // ApprovalToolById rides with PendingApprovals: leaving it behind leaks one
+            // entry per cancelled/timed-out card (ResolveApproval only cleans on reply).
+            finally { lock (PendingApprovals) { PendingApprovals.Remove(id); } lock (ApprovalToolById) { ApprovalToolById.Remove(id); } }
             return verdict;
         }
 
@@ -479,6 +490,7 @@ namespace Forge.SolidWorks
                     try { kv.Value.TrySetResult("reject"); } catch { }
                 PendingApprovals.Clear();
             }
+            lock (ApprovalToolById) { ApprovalToolById.Clear(); }
         }
 
         public static int HistoryCount()
@@ -906,9 +918,10 @@ namespace Forge.SolidWorks
             var opts = new ProviderOptions { MaxTokens = 16000, Temperature = 0, Model = model, ToolsJson = toolsJson, ToolChoice = "auto" };
             var log = new List<string>();
             int executed = 0;
+            var DoomWindow = new System.Collections.Generic.List<string>(); // per-run rolling window, Kilo parity
             int mark = 0; // Msgs.Count before this iteration's assistant turn (dangling-tail trim bound)
-            string lastCallSig = null;
-            int repeatCount = 0;
+            // Rolling window of the last single calls seen (name + FULL arguments, exact equality),
+            // Kilo parity: three identical consecutive calls = doom loop. Reads count too.
             try
             {
                 // No fixed turn cap: compaction bounds the context, so the loop runs until the model
@@ -958,22 +971,18 @@ namespace Forge.SolidWorks
                         return outcome;
                     }
 
-                    // Doom-loop guard (Kilo parity): the same tool+args three times in a row
+                    // Doom-loop guard (Kilo parity): the same single tool+args three times in a row
                     // means the model is stuck — ask whether to keep going instead of burning
-                    // the run to the breaker or stopping dead. Reads count too: a completed
-                    // read repeated 3x is a polling loop, not progress.
+                    // the run to the breaker or stopping dead. Per-call sequence with full-argument
+                    // equality (reads included): each call in a batch extends the window.
                     {
-                        var sigParts = new System.Collections.Generic.List<string>();
                         foreach (var sc in res.ToolCalls)
-                        {
-                            string a = sc.ArgumentsJson ?? "";
-                            if (a.Length > 500) a = a.Substring(0, 500); // sig only: full args still execute
-                            sigParts.Add((sc.Name ?? "") + "|" + a);
-                        }
-                        sigParts.Sort(System.StringComparer.Ordinal);
-                        string sig = sigParts.Count > 0 ? string.Join(";", sigParts.ToArray()) : null;
-                        if (sig != null && sig == lastCallSig) { repeatCount++; } else if (sig != null) { repeatCount = 1; lastCallSig = sig; } else { repeatCount = 0; lastCallSig = null; }
-                        if (repeatCount >= 3)
+                            DoomWindow.Add((sc.Name ?? "") + "\n" + (sc.ArgumentsJson ?? ""));
+                        while (DoomWindow.Count > 3) DoomWindow.RemoveAt(0);
+                        bool loop = DoomWindow.Count == 3 &&
+                            string.Equals(DoomWindow[0], DoomWindow[1], StringComparison.Ordinal) &&
+                            string.Equals(DoomWindow[1], DoomWindow[2], StringComparison.Ordinal);
+                        if (loop)
                         {
                             string verdict;
                             try
@@ -996,7 +1005,7 @@ namespace Forge.SolidWorks
                                 SaveSession(sid);
                                 return outcome;
                             }
-                            repeatCount = 0; lastCallSig = null;
+                            lock (DoomWindow) { DoomWindow.Clear(); }
                             try { await emit("Builder", "continuing anyway — watching for another loop", "run", null); }
                             catch { }
                         }

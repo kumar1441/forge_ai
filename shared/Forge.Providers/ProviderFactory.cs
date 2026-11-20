@@ -70,8 +70,8 @@ namespace Forge.Providers
 
         /// <summary>
         /// Cheap model for rewrite chores (enhance, compaction summaries) — Kilo parity: small
-        /// model first, main-model fallback. Only returns models known to exist; otherwise null
-        /// and the caller keeps the current model.
+        /// model first, main-model fallback. Only providers with a known-cheap mapping resolve here
+        /// (intentional subset; elsewhere the caller keeps the current model).
         /// </summary>
         public static string GetSmallModel(string provider, string baseUrl)
         {

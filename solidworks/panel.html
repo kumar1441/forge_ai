@@ -584,8 +584,9 @@
   // Popover exclusivity: the five popovers share screen space, so opening one hides the rest.
   // (findbar is a bar, not a popover — only closePops full-resets touch it.)
   function closeOthers(except) {
-    ["settings", "history", "ctxpop", "modelpop", "menpop"].forEach(id => { if (id !== except) { const el = $(id); if (el && !popHidden(el)) { focusIfHidden(el); el.style.display = "none"; } } });
+    ["settings", "history", "ctxpop", "modelpop", "menpop"].forEach(id => { if (id !== except) { const el = $(id); if (el && !popHidden(el)) { focusIfHidden(el); el.style.display = "none"; } setExpanded(id === "settings" ? "gearbtn" : id === "history" ? "histbtn" : id === "ctxpop" ? "ctxpill" : id === "modelpop" ? "modelpick" : null, false); } });
     if (except !== "menpop") menOpen = false;
+    if (except !== "ctxpop") { setExpanded("ctxarrow", false); }
   }
   function showPop(id) { closeOthers(id); const el = $(id); if (el) el.style.display = "flex"; if (id === "settings") { setExpanded("gearbtn", true); setTimeout(() => { try { $("setprov").focus(); } catch (e) {} }, 0); } if (id === "history") setExpanded("histbtn", true); if (id === "ctxpop") { setExpanded("ctxpill", true); setExpanded("ctxarrow", true); } if (id === "modelpop") setExpanded("modelpick", true); }
   // Always-allow / deny lists (Kilo parity: surfaced in settings with remove buttons).
@@ -818,9 +819,10 @@
   function renderSettings(m) {
     const sel = $("setprov"), row = $("setkeyrow"), sub = $("setsub");
     if (!sel) return;
-    if (m.slug && sel.querySelector(`option[value="${m.slug}"]`)) sel.value = m.slug;
-    curSlug = m.slug || sel.value;
-    lastHasKey = (m.slug === "ollama") ? true : (!!m.hasKey || lastHasKey);
+    const known = m.slug && sel.querySelector(`option[value="${m.slug}"]`) ? m.slug : null;
+    if (known) sel.value = known;
+    curSlug = known || sel.value;
+    lastHasKey = (curSlug === "ollama") ? true : !!m.hasKey;
     const needKeyRow = !m.hasKey && sel.value !== "ollama";
     if (row) row.style.display = needKeyRow ? "" : "none";
     if (sub) sub.textContent = (m.baseUrl || "") + (m.model ? " · " + m.model : "") + (m.hasKey ? " · key saved ✓" : " · no key");
@@ -835,6 +837,7 @@
     if (!hasBridge) { systemCard(needBridgeMsg("Switching providers")); return; }
     if (needsKey()) { systemCard(`No key saved for <b>${curSlug}</b> — paste it in Settings → API key, hit Save, then pick a model.`); showPop("settings"); }
     post({ action: "setProvider", provider: $("setprov").value });
+    setTimeout(() => { if ($("mcount") && $("mcount").textContent === "Loading…") { $("mcount").textContent = "Couldn't load models."; $("mcount").title = "No reply — check the key, then hit Refresh."; } }, 8000);
   });
   $("setkeysave").addEventListener("click", () => {
     const k = $("setkey").value.trim();
@@ -842,6 +845,7 @@
     if (!hasBridge) { systemCard(needBridgeMsg("Saving keys") + " Keys are stored by the SolidWorks host (DPAPI) — reconnect there to save."); return; }
     post({ action: "saveKey", provider: $("setprov").value, key: k });
     post({ action: "getProvider" }); // refresh key state + model list immediately after save
+    lastHasKey = true; renderSettings({ slug: $("setprov").value, hasKey: true, model: curModel });
     $("setkey").value = "";
   });
   $("setkey").addEventListener("keydown", (e) => {
@@ -1016,6 +1020,10 @@
     });
   }
   function menCheck() {
+    if (mentionPaths.length && !mentionPaths.every(p => intent.value.includes("@" + p.name))) {
+      for (let i = mentionPaths.length - 1; i >= 0; i--) if (!intent.value.includes("@" + mentionPaths[i].name)) mentionPaths.splice(i, 1);
+      renderChips();
+    }
     const q = menQuery();
     if (!q) { if (menOpen) menClose(); return; }
     if (!hasBridge) {
@@ -1199,7 +1207,8 @@
       case "provider":
         if (args[0]) {
           const pv = args[0].toLowerCase();
-          if ($("setprov").querySelector(`option[value="${pv}"]`)) $("setprov").value = pv;
+          if (!$("setprov").querySelector(`option[value="${pv}"]`)) { systemCard(`Unknown provider <b>${pv.replace(/</g, "&lt;")}</b> — pick one in Settings.`); showPop("settings"); break; }
+          $("setprov").value = pv;
           curSlug = pv; curModel = null; renderPill(); renderCtx();
           chatModels = []; renderModelList($("msearch") ? $("msearch").value : "");
           if (!hasBridge) { systemCard(needBridgeMsg("Switching providers")); break; }
@@ -1592,10 +1601,13 @@
           if (m.selected) sel.value = m.selected;
           if (st) st.textContent = m.models.length + " models served right now — pick one.";
         }
-      } else if (m.error && m.error !== "nokey") {
+      } else if (m.error === "nokey") {
+        $("mcount").textContent = "Needs a key — see Settings.";
+        $("mcount").title = "Paste a key in Settings → API key, hit Save, then Refresh.";
+      } else if (m.error) {
         $("mcount").textContent = "Couldn't load models.";
         $("mcount").title = `${m.error} — check the key, then hit Refresh.`;
-      }
+      } else { $("mcount").title = ""; }
     }
 
     else if (m.type === "usage") {
@@ -1717,6 +1729,7 @@
     const t = document.createElement("div"); t.className = "turn"; t.innerHTML = html;
     transcript.append(t);
     if (wasBottom) scroll();
+    return t;
   }
 
   // FDL 4.9 PresenceRow — avatar dots in the header
@@ -1772,9 +1785,11 @@
       <button class="obpill" id="obfinish">Start using Forge</button>`;
     const applyLocalProvider = (slug, model) => {
       if (slug && $("setprov").querySelector(`option[value="${slug}"]`)) $("setprov").value = slug;
-      curSlug = slug || curSlug || $("setprov").value;
-      if (model) curModel = model;
-      lastHasKey = curSlug === "ollama" ? true : lastHasKey;
+      const next = slug || curSlug || $("setprov").value;
+      if (next !== curSlug && !model) curModel = null;
+      else if (model) curModel = model;
+      curSlug = next;
+      if (curSlug === "ollama") lastHasKey = true;
       renderPill(); renderCtx(); renderSettings({ slug: curSlug, hasKey: lastHasKey === true });
     };
     const render = () => {
@@ -1792,6 +1807,7 @@
           post(msg);
           try { post({ action: "getProvider" }); } catch (e) {} // key state + pill refresh before first chat
           o.dataset.saved = "1";
+          lastHasKey = true;
           applyLocalProvider(slug, msg.model || null);
         } else if (pr) {
           try { post({ action: "setProvider", provider: pr.value }); } catch (e) {}
@@ -1801,7 +1817,11 @@
       const tryFetch = () => {
         const pr = o.querySelector("#obprov"), kv = o.querySelector("#obkey"), st = o.querySelector("#obmstat");
         const md = o.querySelector("#obmodel");
-        if (!pr || pr.value !== "nvidia" || !kv || !kv.value.trim()) return;
+        if (!pr || pr.value !== "nvidia" || !kv) return;
+        if (!kv.value.trim()) {
+          if (st) st.textContent = "Paste a key to load live models, or Continue with the default.";
+          return;
+        }
         if (!hasBridge) {
           if (st) st.textContent = "Preview mode — model list needs SolidWorks. Save and Continue; you can pick a model after reconnecting.";
           if (md) { md.innerHTML = ""; const d = document.createElement("option"); d.value = ""; d.textContent = "Default model (preview)"; md.appendChild(d); }
@@ -1809,11 +1829,15 @@
         }
         if (st) st.textContent = "Loading models…";
         post({ action: "fetchModels", provider: "nvidia", key: kv.value.trim() });
+        setTimeout(() => { const s2 = o.querySelector("#obmstat"); if (s2 && s2.textContent === "Loading models…") s2.textContent = "Couldn't load models — check the key, then hit Load models, or Continue with the default."; }, 8000);
       };
       const syncProv = () => {
         const pr = o.querySelector("#obprov"), md = o.querySelector("#obmodel"),
-              rl = o.querySelector("#obreload"), st = o.querySelector("#obmstat");
+              rl = o.querySelector("#obreload"), st = o.querySelector("#obmstat"),
+              kv = o.querySelector("#obkey");
         const isNv = pr && pr.value === "nvidia";
+        const noKey = pr && pr.value === "ollama";
+        if (kv) kv.style.display = noKey ? "none" : "";
         if (md) md.style.display = isNv ? "" : "none";
         if (rl) rl.style.display = isNv ? "" : "none";
         if (st) st.style.display = isNv ? "" : "none";
@@ -1835,6 +1859,7 @@
       if (sa) sa.addEventListener("click", done);
       const k = o.querySelector("#obkey");
       if (k) k.addEventListener("keydown", (e) => { if (e.key === "Enter") { doSave(); page++; render(); } });
+      try { const f = o.querySelector(page === 1 ? "#obprov" : page === 2 ? "#obnext" : "#obfinish"); if (f && o.isConnected) f.focus(); } catch (e) {}
     };
     const done = () => {
         const pr = o.querySelector("#obprov");
@@ -1842,6 +1867,7 @@
         try { safeSet("forge_onboarded","1"); } catch (e) {} try { if (o.dataset.saved) post({ action: "getProvider" }); } catch (e2) {} o.remove(); refresh(); intent.focus(); };
     render();
     transcript.appendChild(o);
+    try { const f = o.querySelector("#obprov"); if (f) f.focus(); } catch (e) {}
   }
   // the host tells us it's a fresh run; until it does, the standalone preview still shows onboarding once
   if (!hasBridge && !safeGet("forge_onboarded")) showOnboard();
@@ -1973,10 +1999,10 @@
     removed.unshift(top); top.remove();
     if (pendingCompact && !document.contains(pendingCompact.body)) pendingCompact = null;
     if (thinkEl && !thinkEl.isConnected) thinkEl = null;
-    if (removed.length) lastReverted = { nodes: removed, refNext: nxt || null, sid: sessionId, turns: savedTurns, keep: keepCount };
-    else lastReverted = null;
     if (bubble) { intent.value = bubble.textContent; grow(); }
-    systemCard("Rewound conversation here — the CAD model itself is unchanged. Edit and resend to continue from this point.");
+    const banner = systemCard("Rewound conversation here — the CAD model itself is unchanged. Edit and resend to continue from this point.");
+    if (removed.length) lastReverted = { nodes: removed, refNext: banner || null, sid: sessionId, turns: savedTurns, keep: keepCount };
+    else lastReverted = null;
     preEnhance = null; $("enhanceUndo").style.display = "none";
     turn = null; thinkEl = null; working = false; stopWords();
     clearFind(); closePops();
@@ -2084,8 +2110,10 @@
     if (showRecents) groups.push({ label: "🕘 Recent", rows: recents, clearable: true });
     const rest = query ? items : items.filter(id => !isFav(id));
     // Kilo parity: group the live list by vendor when several vendors are present.
-    // Prefer the known provider slug (fav/recents carry it); fall back to the model id prefix.
+    // Prefer the model id prefix ("vendor/name"); fall back to the stored provider slug.
     const vendorFor = (id) => {
+      const s = String(id || ""), i = s.indexOf("/");
+      if (i > 0) return s.slice(0, i);
       const rec = getRecents().find(r => r.m === id);
       if (rec && rec.p) return rec.p;
       const fav = getFavs().find(f => f.m === id);
@@ -2105,7 +2133,10 @@
         clr.textContent = " · clear";
         clr.style.cssText = "cursor:pointer;text-transform:none;letter-spacing:0";
         clr.title = "Clear recent models";
-        clr.addEventListener("click", (e) => { e.stopPropagation(); setRecents([]); renderModelList($("msearch").value); });
+        clr.tabIndex = 0; clr.setAttribute("role", "button");
+        const clearRec = (e) => { e.stopPropagation(); setRecents([]); renderModelList($("msearch").value); $("msearch").focus(); };
+        clr.addEventListener("click", clearRec);
+        clr.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); clearRec(e); } });
         gl.appendChild(clr);
       }
       g.rows.forEach(id => {

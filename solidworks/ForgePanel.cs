@@ -991,9 +991,9 @@ namespace Forge.SolidWorks
             try { if (_enhanceCts != null) _enhanceCts.Dispose(); } catch { }
             _enhanceCts = new System.Threading.CancellationTokenSource();
             var ect = _enhanceCts.Token;
-            // Small model for rewrites (Kilo parity): cheap + fast, falls back to the picked model
-            // when no known-cheap model exists for this provider. Temp 0.7 like Kilo (rewrite
-            // wants a little variance, not determinism).
+            // Small model for rewrites: cheap + fast, falls back to the picked model
+            // when no known-cheap model exists for this provider. Temp 0.7: rewrites
+            // want a little variance, not determinism.
             string eprovider = null, ebase = null;
             try { var ecfg = ReadForgeConfig(); eprovider = (string)ecfg["provider"]; ebase = (string)ecfg["baseUrl"]; } catch { }
             string esmall = ProviderFactory.GetSmallModel(eprovider, ebase);
