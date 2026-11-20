@@ -40,7 +40,7 @@ namespace Forge.SolidWorks
             if (ctxText.Length > 12000) ctxText = ctxText.Substring(0, 12000);
             string user = "Context:\n" + ctxText + "\n\nUser said: \"" + (prompt ?? "").Trim() + "\"\n\nReturn the parse JSON.";
 
-            var opts = new ProviderOptions { MaxTokens = 1500, Temperature = 0 };
+            var opts = new ProviderOptions { MaxTokens = 1500, Temperature = 0, Model = ProviderFactory.CurrentModel() };
             for (int attempt = 0; attempt < 2; attempt++) // one JSON-repair retry, then give up
             {
                 try

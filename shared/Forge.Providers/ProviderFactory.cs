@@ -42,6 +42,18 @@ namespace Forge.Providers
             }
         }
 
+        /// <summary>The model currently selected (model picker writes config.json["model"]).</summary>
+        public static string CurrentModel()
+        {
+            try
+            {
+                JObject cfg = ReadConfig();
+                string m = cfg != null ? (string)cfg["model"] : null;
+                return string.IsNullOrWhiteSpace(m) ? null : m.Trim();
+            }
+            catch { return null; }
+        }
+
         private static JObject ReadConfig()
         {
             try

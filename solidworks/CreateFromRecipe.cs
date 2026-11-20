@@ -179,7 +179,7 @@ namespace Forge.SolidWorks
 
         private static async Task<JObject> AuthorRecipe(IProviderClient client, string intent)
         {
-            var opts = new ProviderOptions { MaxTokens = 2500, Temperature = 0 };
+            var opts = new ProviderOptions { MaxTokens = 2500, Temperature = 0, Model = ProviderFactory.CurrentModel() };
             string user = "User said: \"" + (intent ?? "").Trim() + "\"\n\nOutput ONLY the recipe JSON object. No markdown fences, no commentary.";
             for (int attempt = 0; attempt < 2; attempt++)
             {

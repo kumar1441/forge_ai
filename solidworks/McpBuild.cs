@@ -197,7 +197,7 @@ namespace Forge.SolidWorks
         {
             // Finite cap: uncapped lets reasoning models think forever and the call never returns.
             // Verified live: capped calls complete; uncapped hang past the 10-minute timeout.
-            var opts = new ProviderOptions { MaxTokens = 32000, Temperature = 0 };
+            var opts = new ProviderOptions { MaxTokens = 32000, Temperature = 0, Model = ProviderFactory.CurrentModel() };
             string user = "User said: \"" + (intent ?? "").Trim() + "\"\n\nOutput ONLY the plan JSON. No markdown fences, no commentary.";
             string lastDiag = "no attempts made";
             for (int attempt = 0; attempt < 2; attempt++)

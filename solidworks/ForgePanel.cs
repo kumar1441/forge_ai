@@ -532,7 +532,7 @@ namespace Forge.SolidWorks
                     new ChatMessage { Role = "user", Content = "Draft request to enhance, not answer:\n\n" + text.Trim() }
                 };
                 var res = await client.CompleteAsync(msgs,
-                    new ProviderOptions { MaxTokens = 32000, Temperature = 0.2 },
+                    new ProviderOptions { MaxTokens = 32000, Temperature = 0.2, Model = ProviderFactory.CurrentModel() },
                     System.Threading.CancellationToken.None);
                 string clean = CleanEnhanced(res != null ? res.Text : null);
                 if (string.IsNullOrWhiteSpace(clean)) throw new Exception("empty enhancement");
