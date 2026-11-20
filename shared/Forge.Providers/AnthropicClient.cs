@@ -24,7 +24,7 @@ namespace Forge.Providers
         public AnthropicClient(string apiKey, string baseUrl = "https://api.anthropic.com/v1", string defaultModel = null)
         {
             _apiKey = apiKey ?? "";
-            _baseUrl = (baseUrl ?? "").TrimEnd('/');
+            _baseUrl = string.IsNullOrWhiteSpace(baseUrl) ? "https://api.anthropic.com/v1" : baseUrl.TrimEnd('/');
             _defaultModel = defaultModel;
         }
 
@@ -32,8 +32,10 @@ namespace Forge.Providers
 
         private static HttpClient CreateClient()
         {
-            ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+            try { ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12; } catch { }
             // Thinking models run uncapped (50k+ tokens) — the call stays open as long as they need.
+            // Static lifetime is intentional (avoids socket exhaustion); DNS staleness is accepted —
+            // a base-URL host change requires process restart. Do not switch to per-call clients.
             return new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
         }
 
@@ -44,14 +46,20 @@ namespace Forge.Providers
             if (string.IsNullOrWhiteSpace(model))
                 throw new ProviderException("No model configured for provider " + Id + " — set \"model\" in config.json or pass ProviderOptions.Model.");
 
-            string url = BuildUrl(opts);
-            string body = BuildBody(messages, opts, model);
+            string url;
+            string body;
+            try { url = BuildUrl(opts); body = BuildBody(messages, opts, model); }
+            catch (ProviderException) { throw; }
+            catch (Exception ex) { throw new ProviderException("Provider request failed to build: " + ex.Message, ex); }
 
             // Transient overload (429/5xx incl. 529) retries with backoff; fresh message per
             // attempt since Framework HttpClient won't resend one. Non-transient errors throw at once.
             for (int attempt = 0; ; attempt++)
             {
-                using (var req = new HttpRequestMessage(HttpMethod.Post, url))
+                HttpRequestMessage req;
+                try { req = new HttpRequestMessage(HttpMethod.Post, url); }
+                catch (Exception ex) { throw new ProviderException("Provider misconfigured: " + ex.Message, ex); }
+                using (req)
                 {
                     if (!string.IsNullOrEmpty(_apiKey))
                         req.Headers.TryAddWithoutValidation("x-api-key", _apiKey);
@@ -63,10 +71,14 @@ namespace Forge.Providers
                     catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                     catch (TaskCanceledException) { throw new ProviderException("Provider request timed out."); }
                     catch (HttpRequestException ex) { throw new ProviderException("Provider network failure: " + ex.Message, ex); }
+                    catch (InvalidOperationException ex) { throw new ProviderException("Provider misconfigured: " + ex.Message, ex); }
 
                     using (resp)
                     {
-                        string text = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                        string text;
+                        try { text = await resp.Content.ReadAsStringAsync().ConfigureAwait(false); }
+                        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                        catch (OperationCanceledException) { throw new ProviderException("Provider request timed out."); }
                         if (resp.IsSuccessStatusCode)
                             return Parse(text, model);
                         int code = (int)resp.StatusCode;
@@ -83,7 +95,9 @@ namespace Forge.Providers
         public Task<ProviderResult> CompleteStreamingAsync(
             IReadOnlyList<ChatMessage> messages, ProviderOptions opts, CancellationToken ct, System.Action<string, string> onDelta)
         {
-            throw new ProviderException("Streaming is not supported for the Anthropic provider yet — pick an OpenAI-compatible model for live thinking.");
+            // Faulted task (not a synchronous throw) so `var t = ...; await t` callers see the same error.
+            try { throw new ProviderException("Streaming is not supported for the Anthropic provider yet — pick an OpenAI-compatible model for live thinking."); }
+            catch (ProviderException ex) { var tcs = new TaskCompletionSource<ProviderResult>(); tcs.SetException(ex); return tcs.Task; }
         }
 
         private string BuildUrl(ProviderOptions opts)
@@ -129,21 +143,60 @@ namespace Forge.Providers
             try { j = JObject.Parse(text); }
             catch (Exception ex) { throw new ProviderException("Provider returned non-JSON: " + Truncate(text), ex); }
 
-            var content = j["content"] as JArray;
-            var first = content != null && content.Count > 0 ? content[0] : null;
-            string outText = first != null ? (string)first["text"] : null;
-            if (string.IsNullOrEmpty(outText))
-                throw new ProviderException("Provider returned no content.");
+            // A 200 with an error envelope must surface the message, not "no content".
+            var apiErr = j["error"];
+            if (apiErr != null && apiErr.Type != JTokenType.Null)
+            {
+                string em = (apiErr as JObject) != null ? (string)((JObject)apiErr)["message"] : null;
+                throw new ProviderException("Provider error: " + (em ?? apiErr.ToString()));
+            }
 
-            long tokIn = (long?)(j["usage"]?["input_tokens"]) ?? 0;
-            long tokOut = (long?)(j["usage"]?["output_tokens"]) ?? 0;
+            var content = j["content"] as JArray;
+            // Concatenate every text block: tool_use blocks carry no text and the answer
+            // may span several blocks, so first-only drops content.
+            // Tool-use-only turns carry no text: collect tool_use blocks so the agent
+            // loop can act instead of failing with "no content".
+            var sb = new StringBuilder();
+            var toolCalls = new System.Collections.Generic.List<ToolCall>();
+            if (content != null)
+                foreach (var b in content)
+                {
+                    var bo = b as JObject;
+                    if (bo == null) continue;
+                    string t = (string)bo["text"];
+                    if (!string.IsNullOrEmpty(t)) sb.Append(t);
+                    if ((string)bo["type"] == "tool_use")
+                    {
+                        JToken input = bo["input"];
+                        string argStr = "";
+                        try
+                        {
+                            if (input != null && input.Type != JTokenType.Null)
+                                argStr = input.Type == JTokenType.String ? (string)input : input.ToString(Newtonsoft.Json.Formatting.None);
+                        }
+                        catch { argStr = ""; }
+                        toolCalls.Add(new ToolCall { Id = (string)bo["id"], Name = (string)bo["name"], ArgumentsJson = argStr ?? "" });
+                    }
+                }
+            string outText = sb.Length > 0 ? sb.ToString() : null;
+            if (string.IsNullOrEmpty(outText) && toolCalls.Count == 0)
+                throw new ProviderException("Provider returned no content. " + Truncate(text));
+
+            long tokIn = 0, tokOut = 0;
+            try
+            {
+                tokIn = (long?)(j["usage"]?["input_tokens"]) ?? 0;
+                tokOut = (long?)(j["usage"]?["output_tokens"]) ?? 0;
+            }
+            catch { }
 
             return new ProviderResult
             {
-                Text = outText,
+                Text = outText ?? "",
                 TokIn = tokIn,
                 TokOut = tokOut,
-                Model = (string)j["model"] ?? fallbackModel
+                Model = (string)j["model"] ?? fallbackModel,
+                ToolCalls = toolCalls.Count > 0 ? toolCalls : null
             };
         }
 

@@ -30,6 +30,7 @@ namespace Forge.SolidWorks
         private string _pendingIntent; // the conversation so far when Forge has asked a question
         private string _lastRelayedClarify; // the last cloud clarify the panel relayed (repeat dead-end guard)
         private string _attachedFile;  // a file the user handed Forge via the attach button (e.g. the 2nd version for Compare)
+        private readonly System.Collections.Generic.List<string> _mentionedFiles = new System.Collections.Generic.List<string>();  // @-mentioned paths for the current prompt
         private Timer _bifrost;        // polls the cross-tool feed for changes from other tools
         private string _bifrostSince;  // poll cursor (newest event seen)
         private readonly System.Collections.Generic.HashSet<string> _bifrostSeen = new System.Collections.Generic.HashSet<string>();
@@ -196,17 +197,35 @@ namespace Forge.SolidWorks
 
         private async void OnWebMessage(object sender, CoreWebView2WebMessageReceivedEventArgs e)
         {
-            string raw = e.TryGetWebMessageAsString();
-            dynamic msg;
+            string raw = null;
+            try { raw = e.TryGetWebMessageAsString(); } catch { return; }
+            dynamic msg = null;
             try { msg = JsonConvert.DeserializeObject<dynamic>(raw); }
             catch { return; }
+            if (msg == null) return;
 
-            string action = (string)msg.action;
+            // Non-object payloads ("\"generate\"", "[1,2]", "42") have no .action: the binder
+            // throws outside any handler try, which would escape this async-void into SW.
+            string action = null;
+            try { action = (string)msg.action; }
+            catch { return; }
+            if (string.IsNullOrEmpty(action)) return;
             try { PanelCapture.Log("in", new { action, raw }); } catch { }
             try
             {
                 if (action == "readModel") ReadModel();
-                else if (action == "generate") await Generate((string)msg.intent, (string)msg.sid);
+                else if (action == "generate")
+                {
+                    // Garbage fields degrade to empty, never to a binder throw: a missing sid
+                    // keeps the "default" chat, a non-array paths is ignored, a null intent
+                    // short-circuits inside Generate.
+                    string gIntent = null, gSid = null;
+                    Newtonsoft.Json.Linq.JArray gPaths = null;
+                    try { gIntent = (string)msg.intent; } catch { }
+                    try { gSid = (string)msg.sid; } catch { }
+                    try { gPaths = msg.paths as Newtonsoft.Json.Linq.JArray; } catch { }
+                    await Generate(gIntent, gSid, gPaths);
+                }
                 else if (action == "enhance") await EnhancePrompt((string)msg.text);
                 // Transcript compaction (Kilo parity): summarize older turns so long sessions stay readable.
                 // Unary call is fine — summaries are short and fast. Plain-text summary, fences stripped.
@@ -248,8 +267,139 @@ namespace Forge.SolidWorks
                     try { Send(new { type = "usage", tokensIn = IntentRate.TokensInToday, tokensOut = IntentRate.TokensOutToday, agentMsgs = McpBuild.HistoryCount(), agentTokens = McpBuild.AgentTokCount }); }
                     catch (Exception ex) { Send(new { type = "usage", error = ex.Message }); }
                 }
+                else if (action == "setCompact")   // Kilo-style auto-compaction controls from the settings cog
+                {
+                    try
+                    {
+                        bool on = true; int at = 60;
+                        try { on = (bool)msg.on; } catch { }
+                        try { at = (int)msg.at; } catch { }
+                        McpBuild.CompactOn = on;
+                        McpBuild.CompactAt = at <= 0 ? 0 : at;
+                    }
+                    catch { }
+                }
+                else if (action == "setAutoApprove")   // Kilo-style approval policy from the settings cog
+                {
+                    try
+                    {
+                        try { McpBuild.ApproveMaster = (bool)msg.master; } catch { }
+                        try { McpBuild.ApproveRead = (bool)msg.read; } catch { }
+                        try { McpBuild.ApproveBuild = (bool)msg.build; } catch { }
+                        try { McpBuild.ApproveDestructive = (bool)msg.destructive; } catch { }
+                    }
+                    catch { }
+                }
+                else if (action == "approveReply")   // verdict on a paused approval card: approve / always / reject
+                {
+                    try { McpBuild.ResolveApproval((string)msg.id, (string)msg.decision); }
+                    catch { }
+                }
+                else if (action == "allowTool")   // slash /allow + settings ✕ on denied list: always-allow (or remove)
+                {
+                    try
+                    {
+                        string t = (string)msg.tool;
+                        bool remove = false;
+                        try { remove = (bool)msg.remove; } catch { }
+                        if (!string.IsNullOrWhiteSpace(t))
+                        {
+                            if (remove) McpBuild.Unallow(t.Trim());
+                            else McpBuild.AddAlwaysAllow(t.Trim());
+                            Send(new { type = "rules", allow = McpBuild.AlwaysList(), deny = McpBuild.DenyList() });
+                            if (!remove) Send(new { type = "answer", answer = "Always allowing '" + t.Trim() + "' from here on." });
+                        }
+                    }
+                    catch { }
+                }
+                else if (action == "denyTool")   // slash /deny|/undeny: block (or unblock) one tool outright
+                {
+                    try
+                    {
+                        string t = (string)msg.tool;
+                        bool denied = true;
+                        try { denied = (bool)msg.denied; } catch { }
+                    if (!string.IsNullOrWhiteSpace(t) && McpBuild.SetDenied(t.Trim(), denied))
+                    {
+                        Send(new { type = "rules", allow = McpBuild.AlwaysList(), deny = McpBuild.DenyList() });
+                        Send(new { type = "answer", answer = denied ? "Denied '" + t.Trim() + "' — the agent will work around it." : "Un-denied '" + t.Trim() + "' — back to normal policy." });
+                    }
+                    }
+                    catch { }
+                }
                 else if (action == "attach") DoAttach();
-                else if (action == "clearAttach") { _attachedFile = null; Send(new { type = "attachCleared" }); }
+                else if (action == "clearAttach") { _attachedFile = null; lock (_mentionedFiles) { _mentionedFiles.Clear(); } Send(new { type = "attachCleared" }); }
+
+                // @-mention file search (Kilo parity): open SolidWorks documents first (most likely
+                // targets), then the active document's folder (depth 2, CAD files first), filtered by q.
+                else if (action == "files")
+                {
+                    try
+                    {
+                        string q = "";
+                        try { q = ((string)msg.q ?? "").Trim().ToLowerInvariant(); } catch { }
+                        var out_ = new Newtonsoft.Json.Linq.JArray();
+                        var seen = new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+                        try
+                        {
+                            var app = SwAddin.SwApp;
+                            if (app != null)
+                            {
+                                object docs = null;
+                                try { docs = app.GetDocuments(); } catch { }
+                                var arr = docs as object[];
+                                if (arr != null) foreach (var d in arr)
+                                {
+                                    var md = d as IModelDoc2;
+                                    string p = null;
+                                    try { p = md != null ? md.GetPathName() : null; } catch { }
+                                    if (string.IsNullOrWhiteSpace(p) || !System.IO.File.Exists(p)) continue;
+                                    string nm = System.IO.Path.GetFileName(p);
+                                    if (!string.IsNullOrEmpty(q) && nm.ToLowerInvariant().IndexOf(q, System.StringComparison.Ordinal) < 0) continue;
+                                    if (seen.Add(p)) out_.Add(new Newtonsoft.Json.Linq.JObject { ["name"] = nm, ["path"] = p, ["open"] = true });
+                                    if (out_.Count >= 50) break;
+                                }
+                            }
+                        }
+                        catch { }
+                        try
+                        {
+                            string dir = null;
+                            try
+                            {
+                                var app2 = SwAddin.SwApp;
+                                var doc = app2 != null ? app2.ActiveDoc as IModelDoc2 : null;
+                                string pn = doc != null ? doc.GetPathName() : null;
+                                if (!string.IsNullOrWhiteSpace(pn)) dir = System.IO.Path.GetDirectoryName(pn);
+                            }
+                            catch { }
+                            if (string.IsNullOrWhiteSpace(dir)) dir = System.IO.Directory.GetCurrentDirectory();
+                            if (System.IO.Directory.Exists(dir) && out_.Count < 50)
+                            {
+                                var files = System.IO.Directory.GetFiles(dir, "*", System.IO.SearchOption.TopDirectoryOnly);
+                                var sub = new string[0];
+                                try { sub = System.IO.Directory.GetDirectories(dir); } catch { }
+                                var all = new System.Collections.Generic.List<string>(files);
+                                foreach (var s in sub)
+                                {
+                                    if (all.Count >= 200) break;
+                                    try { all.AddRange(System.IO.Directory.GetFiles(s, "*", System.IO.SearchOption.TopDirectoryOnly)); } catch { }
+                                }
+                                all.Sort((a, b) => CadScore(b).CompareTo(CadScore(a)));
+                                foreach (var f in all)
+                                {
+                                    if (out_.Count >= 50) break;
+                                    string nm = System.IO.Path.GetFileName(f);
+                                    if (!string.IsNullOrEmpty(q) && nm.ToLowerInvariant().IndexOf(q, System.StringComparison.Ordinal) < 0) continue;
+                                    if (seen.Add(f)) out_.Add(new Newtonsoft.Json.Linq.JObject { ["name"] = nm, ["path"] = f, ["open"] = false });
+                                }
+                            }
+                        }
+                        catch { }
+                        Send(new { type = "files", files = out_ });
+                    }
+                    catch (Exception ex) { Send(new { type = "error", message = "File search failed: " + ex.Message }); }
+                }
                 else if (action == "stop")   // Kilo-style interrupt: cancel the in-flight run/enhance; partial CoT stays
                 {
                     try { if (_runCts != null) _runCts.Cancel(); } catch { }
@@ -257,15 +407,35 @@ namespace Forge.SolidWorks
                 }
                 else if (action == "revert")   // Kilo-style revert: drop the pending thread + truncate the agent chat so the resent prompt starts clean
                 {
+                    // Stop the in-flight run first: otherwise it keeps appending answers after the truncate.
+                    try { if (_runCts != null) _runCts.Cancel(); } catch { }
                     _pendingIntent = null; _pendingConfirm = null;
                     _lastImpactTarget = null; _lastImpactPrimary = null; _lastImpactDependents = null;
                     try
                     {
-                        string rsid = null; int keep = 0;
+                        string rsid = null;
                         try { rsid = (string)msg.sid; } catch { }
-                        try { keep = (int)msg.keep; } catch { }
-                        if (!string.IsNullOrWhiteSpace(rsid)) McpBuild.TruncateHistory(rsid, keep);
-                        else McpBuild.ClearHistory();
+                        // keep arrives as int normally, but a string/double/null from the panel
+                        // must never silently become 0 (which wipes to the system prompt).
+                        int keep = 0; bool haveKeep = false;
+                        try
+                        {
+                            // msg.keep is a dynamic JToken: `is long` never matches a JValue, so
+                            // convert instead of type-testing (int, double, and numeric strings all land).
+                            var k = msg.keep;
+                            if (k != null)
+                            {
+                                bool ok = false; int v = 0;
+                                try { string ks = (string)k; ok = !string.IsNullOrWhiteSpace(ks) && int.TryParse(ks.Trim(), out v); }
+                                catch { ok = false; }
+                                if (!ok) { try { double kd = (double)k; v = (int)kd; ok = true; } catch { ok = false; } }
+                                if (ok) { keep = v; haveKeep = true; }
+                            }
+                        }
+                        catch { haveKeep = false; }
+                        if (string.IsNullOrWhiteSpace(rsid)) McpBuild.ClearHistory();
+                        else if (!haveKeep) Send(new { type = "error", message = "Revert needs a turn count — history untouched." });
+                        else McpBuild.TruncateHistory(rsid, keep);
                     }
                     catch { }
                 }
@@ -285,9 +455,11 @@ namespace Forge.SolidWorks
                 }
                 else if (action == "reset")   // rehearsal/recording: wipe the panel + every pending thread for a clean take
                 {
+                    try { if (_runCts != null) _runCts.Cancel(); } catch { }
+                    try { if (_enhanceCts != null) _enhanceCts.Cancel(); } catch { }
                     _pendingIntent = null; _attachedFile = null; _pendingConfirm = null;
                     _lastImpactTarget = null; _lastImpactPrimary = null; _lastImpactDependents = null;
-                    try { McpBuild.ClearHistory(); } catch { } // fresh agent conversation
+                    try { McpBuild.ClearHistory(); } catch { } // fresh agent conversation (+ fails orphaned approval gates)
                     Send(new { type = "attachCleared" });
                 }
                 else if (action == "highlight") HighlightByName(msg);
@@ -370,6 +542,7 @@ namespace Forge.SolidWorks
                         string p = (string)cfg["provider"];
                         string bu = (string)cfg["baseUrl"];
                         Send(new { type = "provider", slug = PresetSlugFor(p, bu), provider = p, baseUrl = bu, model = (string)cfg["model"], dynamic = IsDynamicProvider(p), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKey(p)) });
+                        Send(new { type = "rules", allow = McpBuild.AlwaysList(), deny = McpBuild.DenyList() });
                     }
                     catch (Exception ex) { Send(new { type = "provider", error = ex.Message }); }
                 }
@@ -444,6 +617,88 @@ namespace Forge.SolidWorks
                 Telemetry.Log("crash", success: false, errorCode: ex.GetType().Name, swVersion: SwVer());
                 Send(new { type = "error", message = ex.Message });
             }
+        }
+
+        private static int CadScore(string path)
+        {
+            string e = "";
+            try { e = System.IO.Path.GetExtension(path).ToLowerInvariant(); } catch { }
+            if (e == ".sldprt" || e == ".sldasm") return 3;
+            if (e == ".slddrw" || e == ".step" || e == ".stp" || e == ".iges" || e == ".igs" || e == ".stl" || e == ".dxf" || e == ".dwg") return 2;
+            return 1;
+        }
+
+        // Resolve @-mentions typed (or restored) in the prompt: exact posted paths first, then
+        // @tokens matched against open docs + the active-doc folder. Feeds Compare-class handlers.
+        private System.Collections.Generic.List<string> ResolveMentions(string intent, Newtonsoft.Json.Linq.JArray posted)
+        {
+            var found = new System.Collections.Generic.List<string>();
+            var seen = new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+            System.Action<string> add = p =>
+            {
+                try
+                {
+                    if (string.IsNullOrWhiteSpace(p) || !System.IO.File.Exists(p)) return;
+                    string full = System.IO.Path.GetFullPath(p);
+                    if (seen.Add(full)) found.Add(full);
+                }
+                catch { }
+            };
+            try
+            {
+                if (posted != null) foreach (var t in posted)
+                {
+                    string s = t != null ? t.ToString() : null;
+                    if (!string.IsNullOrWhiteSpace(s)) add(s);
+                }
+            }
+            catch { }
+            try
+            {
+                var m = System.Text.RegularExpressions.Regex.Matches(intent ?? "", @"@([^\s@]+)");
+                if (m.Count > 0)
+                {
+                    var open = new System.Collections.Generic.List<string>();
+                    try
+                    {
+                        var app = SwAddin.SwApp;
+                        object docs = app != null ? app.GetDocuments() : null;
+                        var arr = docs as object[];
+                        if (arr != null) foreach (var d in arr)
+                        {
+                            var md = d as IModelDoc2;
+                            string p = null;
+                            try { p = md != null ? md.GetPathName() : null; } catch { }
+                            if (!string.IsNullOrWhiteSpace(p)) open.Add(p);
+                        }
+                    }
+                    catch { }
+                    string dir = null;
+                    try
+                    {
+                        var app2 = SwAddin.SwApp;
+                        var doc = app2 != null ? app2.ActiveDoc as IModelDoc2 : null;
+                        string pn = doc != null ? doc.GetPathName() : null;
+                        if (!string.IsNullOrWhiteSpace(pn)) dir = System.IO.Path.GetDirectoryName(pn);
+                    }
+                    catch { }
+                    foreach (System.Text.RegularExpressions.Match t in m)
+                    {
+                        string tok = t.Groups[1].Value.TrimEnd(',', '.', ';', ')', ']', '"', '\'');
+                        if (string.IsNullOrWhiteSpace(tok)) continue;
+                        if (System.IO.File.Exists(tok)) { add(tok); continue; }
+                        string hit = open.Find(p => string.Equals(System.IO.Path.GetFileName(p), tok, System.StringComparison.OrdinalIgnoreCase));
+                        if (hit != null) { add(hit); continue; }
+                        if (!string.IsNullOrWhiteSpace(dir))
+                        {
+                            string cand = System.IO.Path.Combine(dir, tok);
+                            if (System.IO.File.Exists(cand)) add(cand);
+                        }
+                    }
+                }
+            }
+            catch { }
+            return found;
         }
 
         // The attach affordance (panel-testing.md): the ONLY way a real user hands Forge a specific file without
@@ -635,6 +890,7 @@ namespace Forge.SolidWorks
                 return;
             }
             try { if (_enhanceCts != null) _enhanceCts.Cancel(); } catch { }
+            try { if (_enhanceCts != null) _enhanceCts.Dispose(); } catch { }
             _enhanceCts = new System.Threading.CancellationTokenSource();
             var ect = _enhanceCts.Token;
             try
@@ -651,19 +907,30 @@ namespace Forge.SolidWorks
                 var ui = System.Threading.SynchronizationContext.Current;
                 var watch = System.Diagnostics.Stopwatch.StartNew();
                 Send(new { type = "thinkStart", model = picked, label = "Enhancing" });
-                var res = await client.CompleteStreamingAsync(msgs,
-                    new ProviderOptions { MaxTokens = 32000, Temperature = 0.2, Model = picked },
-                    ect,
-                    (kind, delta) =>
-                    {
-                        if (kind != "reasoning" || string.IsNullOrEmpty(delta)) return;
-                        try
+                ProviderResult res;
+                try
+                {
+                    res = await client.CompleteStreamingAsync(msgs,
+                        new ProviderOptions { MaxTokens = 32000, Temperature = 0.2, Model = picked },
+                        ect,
+                        (kind, delta) =>
                         {
-                            if (ui != null) ui.Post(_ => { try { Send(new { type = "think", text = delta }); } catch { } }, null);
-                            else Send(new { type = "think", text = delta });
-                        }
-                        catch { }
-                    });
+                            if (kind != "reasoning" || string.IsNullOrEmpty(delta)) return;
+                            try
+                            {
+                                if (ui != null) ui.Post(_ => { try { Send(new { type = "think", text = delta }); } catch { } }, null);
+                                else Send(new { type = "think", text = delta });
+                            }
+                            catch { }
+                        });
+                }
+                catch (ProviderException px) when ((px.Message ?? "").Contains("Streaming is not supported"))
+                {
+                    // Non-streaming backends (Anthropic): same prompt as one unary call, no live deltas.
+                    res = await client.CompleteAsync(msgs,
+                        new ProviderOptions { MaxTokens = 32000, Temperature = 0.2, Model = picked },
+                        ect);
+                }
                 watch.Stop();
                 Send(new { type = "thinkEnd", seconds = (int)watch.Elapsed.TotalSeconds });
                 string clean = CleanEnhanced(res != null ? res.Text : null);
@@ -693,10 +960,12 @@ namespace Forge.SolidWorks
             if (m.Success) s = m.Groups[2].Value.Trim();
 
             // Strip chain-of-thought / instruction-echo preamble: drop leading lines until the actual
-            // request starts (a build verb or spec noun), then remove any narration / rule-echo lines.
+            // request starts (a build verb, spec noun, or question), then remove narration / rule-echo lines.
+            // Never return null for non-empty input: a rewrite the filters don't recognize is still more
+            // useful than an "empty enhancement" error, so fall back to the fence-stripped text.
             string[] lines = s.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.None);
             var buildRx = new System.Text.RegularExpressions.Regex(
-                @"^\s*(build|create|make|design|modify|change|add|assemble|machine|model|overall|envelope|part|assembly)\b",
+                @"^\s*(build|create|make|design|modify|change|add|assemble|machine|model|overall|envelope|part|assembly|what|which|how|when|where|why|is|are|can|do|does|should)\b|\?\s*$",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             var narrRx = new System.Text.RegularExpressions.Regex(
                 @"^\s*(the user wants|the draft|key rules|rules?:|here'?s|here is|let me|i('ll| will| need to| should)|okay|sure|draft:|enhanced (prompt|request)?\s*:|plan:|explanation:)",
@@ -717,6 +986,7 @@ namespace Forge.SolidWorks
             while (kept.Count > 0 && string.IsNullOrWhiteSpace(kept[0])) kept.RemoveAt(0);
             while (kept.Count > 0 && string.IsNullOrWhiteSpace(kept[kept.Count - 1])) kept.RemoveAt(kept.Count - 1);
             s = string.Join("\n", kept.ToArray()).Trim();
+            if (string.IsNullOrWhiteSpace(s) && !string.IsNullOrWhiteSpace(text)) s = text.Trim(); // fail-open, never null
             return string.IsNullOrWhiteSpace(s) ? null : s;
         }
 
@@ -728,7 +998,7 @@ namespace Forge.SolidWorks
             "to improve, never answer or execute it. Content rules: keep the user's intent and features; where dims " +
             "are missing assume sensible standard values and mark them inline ('assuming 220x220 bed', " +
             "'M5 clearance unless stated'); metric hole/thread callouts; simple holes, patterns, fillets; " +
-            "questions become requests without answers. " +
+            "a question draft becomes a clearer request (or clearer question) — never answered. " +
             "SCALE THE DETAIL TO THE BUILD'S COMPLEXITY — a printer is not a pedal, and nothing is capped: " +
             "single simple part (bracket, plate): dims + holes + fillets, as short as the part allows; " +
             "multi-part assembly: per-part dims, interfaces and mates, fastener standards, as long as needed; " +
@@ -738,12 +1008,26 @@ namespace Forge.SolidWorks
             "with which fasteners); end with build order; take as many words as the machine needs, no length limit. " +
             "Vague scope is banned: 'pattern holes where applicable' must become exact counts, sizes, positions.";
 
-        private async Task Generate(string intent, string sid)
+        private async Task Generate(string intent, string sid, Newtonsoft.Json.Linq.JArray postedPaths)
         {
             _currentRunId = Guid.NewGuid().ToString("N").Substring(0, 12);   // tags this run for thumbs feedback + correction capture
+            string myRun = _currentRunId; // a newer send supersedes this run: abandon silently when stale
+            if (string.IsNullOrWhiteSpace(intent)) intent = "";
+            if (string.IsNullOrWhiteSpace(sid)) sid = null; // McpBuild falls back to "default"
             try { if (_runCts != null) _runCts.Cancel(); } catch { }
+            try { if (_runCts != null) _runCts.Dispose(); } catch { }
             _runCts = new System.Threading.CancellationTokenSource();
             var runCt = _runCts.Token;
+
+            // @-mentioned files ride with the prompt (posted paths + @tokens in the text). The first
+            // doubles as the attach-button file so Compare-class handlers pick it up with no doc open.
+            try
+            {
+                var mentions = ResolveMentions(intent, postedPaths);
+                lock (_mentionedFiles) { _mentionedFiles.Clear(); _mentionedFiles.AddRange(mentions); }
+                if (string.IsNullOrWhiteSpace(_attachedFile) && mentions.Count > 0) _attachedFile = mentions[0];
+            }
+            catch { }
 
             // DEMO ROUTE â€” authoritative, and BEFORE anything that can `await`/yield (the one-time UpdateNotice
             // below does a network call). flat-pattern-DXF / drawing-package / interference route here so (a) a
@@ -782,7 +1066,9 @@ namespace Forge.SolidWorks
             // those matchers would otherwise claim with no doc open ("Open your assembly first"). Verb-gated
             // (create/make/build/...), so edit flows keep theirs. Needs no open document.
             if (await TryRunMcpBuild(intent, runCt, sid)) return;
+            if (myRun != _currentRunId) return; // superseded while awaiting: the new run owns the panel
             if (await TryRunCreateRecipe(intent, runCt)) return;
+            if (myRun != _currentRunId) return;
 
             // Bulk resize fasteners (Demo #6, M6â†’M8) â€” route AUTHORITATIVELY before the cloud parse. A clear
             // "replace all the M6 bolts with M8" must ACT, never fall to the parser's spurious "bolt sizes not
@@ -812,7 +1098,18 @@ namespace Forge.SolidWorks
             //   â€” and future ones â€” get parse -> confirm-or-ask -> preview -> execute -> verify -> log uniformly.
             //   Returns false only when the cloud parser is unreachable or the action is unknown; then the
             //   per-handler regex blocks below run as the OFFLINE fallback (and the legacy variant path after them).
-            if (await RunViaPipeline(intent, runCt, sid)) return;
+            bool piped = false;
+            try { piped = await RunViaPipeline(intent, runCt, sid); }
+            catch (OperationCanceledException)
+            {
+                // Stop/revert during the pipeline: stay silent when a newer run owns the
+                // panel, otherwise report the interrupt once.
+                if (myRun != _currentRunId) return;
+                Send(new { type = "answer", answer = "Interrupted — nothing further ran. Edit and resend.", runId = _currentRunId });
+                return;
+            }
+            if (myRun != _currentRunId) return;
+            if (piped) return;
 
             // Auto-mate â€” the first "doer". Works on an ASSEMBLY, so intercept here BEFORE ActivePart()
             // (which only accepts parts). Deploys the Gauge â†’ Torque â†’ Sentinel crew with live narration.
@@ -1373,15 +1670,28 @@ namespace Forge.SolidWorks
 
         private void Send(object payload)
         {
-            try { PanelCapture.Log("out", payload); } catch { }
-            // Send as a STRING: the panel does JSON.parse(e.data). PostWebMessageAsJson would make
-            // e.data an already-parsed object, so JSON.parse throws and every message is dropped
-            // (that was the "stuck on On itâ€¦" bug â€” the panel never got the done/status messages).
-            string json = JsonConvert.SerializeObject(payload);
-            if (_web.InvokeRequired)
-                _web.BeginInvoke(new Action(() => _web.CoreWebView2.PostWebMessageAsString(json)));
-            else
-                _web.CoreWebView2?.PostWebMessageAsString(json);
+            // Never throws: every caller runs on paths that end in async-void (OnWebMessage) or
+            // fire-and-forget emits, where a torn-down WebView2 (ObjectDisposedException /
+            // InvalidOperationException) would otherwise escape to SolidWorks and take it down.
+            try
+            {
+                try { PanelCapture.Log("out", payload); } catch { }
+                // Send as a STRING: the panel does JSON.parse(e.data). PostWebMessageAsJson would make
+                // e.data an already-parsed object, so JSON.parse throws and every message is dropped
+                // (that was the "stuck on On itâ€¦" bug â€” the panel never got the done/status messages).
+                string json = JsonConvert.SerializeObject(payload);
+                var web = _web;
+                if (web == null || web.IsDisposed) return;
+                try
+                {
+                    if (web.InvokeRequired)
+                        web.BeginInvoke(new Action(() => { try { web.CoreWebView2?.PostWebMessageAsString(json); } catch { } }));
+                    else
+                        web.CoreWebView2?.PostWebMessageAsString(json);
+                }
+                catch { /* control torn down mid-post */ }
+            }
+            catch { }
         }
     }
 }

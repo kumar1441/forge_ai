@@ -242,9 +242,45 @@
   .modelpop .mrefresh { background:none; border:1px solid var(--line); border-radius:7px; color:var(--soft);
     font:inherit; font-size:11.5px; padding:3px 9px; cursor:pointer; }
   .modelpop .mrefresh:hover { border-color:var(--accent); color:var(--ink); }
+  /* @-mention file picker (Kilo-style) + mention chips */
+  .attachrow .menpop { position:absolute; bottom:calc(100% + 8px); left:0; z-index:70; width:300px; max-width:92vw;
+    background:var(--raised); border:1px solid var(--line); border-radius:12px;
+    display:flex; flex-direction:column; overflow:hidden; box-shadow:0 12px 40px rgba(0,0,0,.5); }
+  .menpop .mlist { overflow-y:auto; max-height:260px; padding:4px; }
+  .menpop .mrow { display:flex; align-items:center; gap:8px; padding:7px 10px; border-radius:8px;
+    cursor:pointer; font-size:13px; color:var(--ink); }
+  .menpop .mrow:hover, .menpop .mrow.kb { background:rgba(255,255,255,.05); }
+  .menpop .mrow.kb { outline:1px solid var(--accent); }
+  .menpop .mrow .mname { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .menpop .mrow .mname small { display:block; color:var(--faint); font-size:10.5px; }
+  .menpop .mrow .mtag { font-size:10px; color:var(--accent); flex:none; }
+  .menpop .mfoot { padding:6px 10px; border-top:1px solid var(--line); font-size:11px; color:var(--faint); }
+  .menpop .mempty { padding:14px 12px; text-align:center; color:var(--faint); font-size:12.5px; }
+  .mchips { display:flex; flex-wrap:wrap; gap:6px; padding:0 14px 6px; }
+  .mchips:empty { display:none; }
+  .mchip { display:inline-flex; align-items:center; gap:6px; background:var(--accent-soft);
+    border:1px solid var(--line); border-radius:8px; padding:2px 4px 2px 9px;
+    font-size:12px; color:var(--ink); max-width:100%; }
+  .mchip span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .mchip .x { cursor:pointer; border:none; background:none; color:var(--accent-ink); font-size:13px; padding:0 2px; opacity:.7; }
+  .mchip .x:hover { opacity:1; }
+
   .modelpop .mempty { padding:18px 12px; text-align:center; color:var(--faint); font-size:12.5px; }
 
-  /* transcript compaction (Kilo-style: older turns collapse into an expandable summary) */
+  /* approval card (Kilo-style: approve once / always / reject a paused tool call) */
+  .appr { border:1px solid var(--amber, #b98a2f); border-radius:12px; background:var(--surface);
+    padding:10px 12px; font-size:12.5px; }
+  .appr .ahead { display:flex; align-items:center; gap:8px; color:var(--soft); margin-bottom:6px; }
+  .appr .atool { font-weight:700; color:var(--ink); }
+  .appr .aargs { white-space:pre-wrap; word-break:break-word; color:var(--faint); font-size:11.5px;
+    max-height:120px; overflow-y:auto; background:var(--bg); border-radius:8px; padding:6px 8px; margin-bottom:8px; }
+  .appr .abtns { display:flex; gap:6px; }
+  .appr .abtns button { flex:1; border:1px solid var(--line); border-radius:8px; background:var(--raised);
+    color:var(--ink); font:inherit; font-size:12px; padding:6px; cursor:pointer; }
+  .appr .abtns button:hover { border-color:var(--accent); }
+  .appr .abtns button.go { border-color:var(--accent); }
+  .appr.done { opacity:.65; }
+  .appr.done .abtns button { pointer-events:none; opacity:.5; }
   .compact { border:1px dashed var(--line); border-radius:12px; background:var(--surface); overflow:hidden; }
   .compact .chead { padding:8px 12px; cursor:pointer; color:var(--faint); font-size:11.5px; user-select:none; }
   .compact .chead:hover { color:var(--soft); }
@@ -289,9 +325,10 @@
   .settings .srow { display:flex; align-items:center; justify-content:space-between; gap:10px;
     padding:7px 6px; font-size:12.5px; color:var(--ink); }
   .settings .srow label { color:var(--soft); }
-  .settings select, .settings input[type="password"] { background:var(--bg); border:1px solid var(--line);
+  .settings select, .settings input[type="password"], .settings input[type="number"] { background:var(--bg); border:1px solid var(--line);
     border-radius:8px; color:var(--ink); font:inherit; font-size:12px; padding:4px 6px; outline:none; max-width:128px; }
-  .settings select:focus, .settings input[type="password"]:focus { border-color:var(--accent); }
+  .settings select:focus, .settings input[type="password"]:focus, .settings input[type="number"]:focus { border-color:var(--accent); }
+  .settings input[type="number"] { width:64px; }
   .settings .skeywrap { display:flex; gap:4px; align-items:center; }
   .settings .skeywrap input { width:86px; }
   .settings .skeywrap button { background:none; border:1px solid var(--line); border-radius:7px; color:var(--soft);
@@ -309,6 +346,14 @@
     text-align:right; cursor:pointer; padding:4px 6px 0; }
   .settings .sclose:hover { color:var(--ink); }
   .settings .sfoot { font-size:10.5px; color:var(--faint); padding:2px 6px 4px; }
+  .settings .rules { display:flex; flex-direction:column; gap:4px; padding:2px 6px; }
+  .settings .rules .rlab { font-size:10.5px; color:var(--faint); }
+  .settings .rules .rlist { display:flex; flex-wrap:wrap; gap:4px; }
+  .settings .rules .ritem { display:inline-flex; align-items:center; gap:5px; background:var(--bg);
+    border:1px solid var(--line); border-radius:7px; padding:1px 3px 1px 8px; font-size:11px; color:var(--soft); }
+  .settings .rules .ritem button { background:none; border:none; color:var(--faint); cursor:pointer; font-size:11px; padding:0 3px; }
+  .settings .rules .ritem button:hover { color:var(--red); }
+  .settings .rules .rempty { font-size:10.5px; color:var(--faint); }
 
   /* top-bar context pill + usage dropdown (Kilo-style) */
   .ctxpill { background:var(--raised); border:1px solid var(--line); border-right:none; border-radius:8px 0 0 8px;
@@ -362,7 +407,7 @@
     <div class="headtop" id="headtop">
       <div class="brand"><b><span>◆</span> Forge</b></div>
       <div class="headacts">
-        <button class="ctxpill" id="ctxpill" title="Session context used — click for exact usage">0%</button><button class="gear ctxarrow" id="ctxarrow" title="Usage details">▾</button>
+        <button class="ctxpill" id="ctxpill" title="Local storage used — click for exact usage">0%</button><button class="gear ctxarrow" id="ctxarrow" title="Usage details">▾</button>
         <button class="gear" id="searchbtn" title="Search this chat">🔍</button>
         <button class="gear" id="compactbtn" title="Compact older turns">🗜</button>
         <button class="gear" id="histbtn" title="Chat history">🕘</button>
@@ -379,18 +424,41 @@
       <div class="ssep"></div>
       <div class="srow"><label>Provider</label>
         <select id="setprov">
-          <option value="deepseek">DeepSeek</option>
-          <option value="openrouter">OpenRouter</option>
-          <option value="nvidia">NVIDIA NIM</option>
+          <option value="deepseek">DeepSeek — free starter credit</option>
+          <option value="openrouter">OpenRouter — one key, every model</option>
+          <option value="nvidia">NVIDIA NIM — free models API</option>
           <option value="openai">OpenAI</option>
           <option value="anthropic">Anthropic</option>
-          <option value="ollama">Ollama (local)</option>
+          <option value="ollama">Ollama — local, no key needed</option>
         </select>
       </div>
       <div class="srow" id="setkeyrow" style="display:none"><label>API key</label>
         <span class="skeywrap"><input type="password" id="setkey" placeholder="paste key" autocomplete="off" /><button id="setkeysave" title="Save key (DPAPI-encrypted)">Save</button></span>
       </div>
       <div class="ssub" id="setsub"></div>
+      <div class="ssep"></div>
+      <div class="srow"><label>Auto-compact</label>
+        <span class="toggle"><input type="checkbox" id="compacttgl" checked /><span class="tk"></span></span>
+      </div>
+      <div class="srow" id="compactatrow"><label>Compact at</label>
+        <span class="skeywrap"><input type="number" id="compactat" min="10" step="10" value="60" title="Agent messages kept before summarizing" /><span style="font-size:11px;color:var(--faint)">msgs</span></span>
+      </div>
+      <div class="ssep"></div>
+      <div class="srow"><label>Auto-approve</label>
+        <span class="toggle"><input type="checkbox" id="apprtgl" checked /><span class="tk"></span></span>
+      </div>
+      <div class="srow"><label>· Read tools</label>
+        <span class="toggle"><input type="checkbox" id="apprread" checked /><span class="tk"></span></span>
+      </div>
+      <div class="srow"><label>· Build tools</label>
+        <span class="toggle"><input type="checkbox" id="apprbuild" checked /><span class="tk"></span></span>
+      </div>
+      <div class="srow"><label>· Destructive</label>
+        <span class="toggle"><input type="checkbox" id="apprdest" /><span class="tk"></span></span>
+      </div>
+      <div class="ssub">auto-approve: read + build run free, destructive asks first</div>
+      <div class="rules"><span class="rlab">Always allowed</span><span class="rlist" id="allowlist"><span class="rempty">none</span></span></div>
+      <div class="rules"><span class="rlab">Denied</span><span class="rlist" id="denylist"><span class="rempty">none</span></span></div>
       <div class="ssep"></div>
       <div class="srow"><label>Usage data</label>
         <span class="toggle"><input type="checkbox" id="telmtgl" /><span class="tk"></span></span>
@@ -403,7 +471,7 @@
       <button class="hnew" id="hnew">+ New chat</button>
     </div>
     <div class="ctxpop" id="ctxpop" style="display:none">
-      <div class="crow"><span>Session context</span><b id="ctxpct">–</b></div>
+      <div class="crow"><span>Storage used</span><b id="ctxpct">–</b></div>
       <div class="cbar"><i id="ctxbar" style="width:0%"></i></div>
       <div class="crow"><span>Local storage</span><b id="ctxstore">–</b></div>
       <div class="crow"><span>Turns (live / stored)</span><b id="ctxturns">–</b></div>
@@ -425,7 +493,9 @@
     <div class="empty" id="empty">
       Forge <b>knows</b> your part.<br>
       Forge <b>understands</b> what you mean.<br>
-      Forge <b>gets it done.</b>
+      Forge <b>gets it done.</b><br>
+      <button class="attachbtn" id="emptytry" data-prompt="make the bore 25mm" title="Insert an example prompt to get started">Try: “make the bore 25mm”</button><br>
+      or type <b>/help</b> for commands
     </div>
   </div>
 
@@ -443,10 +513,15 @@
         <div class="mfoot"><span id="mcount"></span><button class="mrefresh" id="mrefresh" title="Reload the live model list">↻ Refresh</button></div>
       </div>
       <span class="chip" id="chip" style="display:none"></span>
+      <div class="menpop" id="menpop" style="display:none">
+        <div class="mlist" id="menlist"></div>
+        <div class="mfoot"><span id="mencount"></span></div>
+      </div>
     </div>
+    <div class="mchips" id="mchips" style="display:none"></div>
     <div class="ask">
       <textarea id="intent" rows="1"></textarea>
-      <div class="hint"><kbd>Enter</kbd> to run · <kbd>Shift</kbd>+<kbd>Enter</kbd> new line · <kbd>Esc</kbd> interrupts · <kbd>↑</kbd><kbd>↓</kbd> history</div>
+      <div class="hint"><kbd>Enter</kbd> to run · <kbd>Shift</kbd>+<kbd>Enter</kbd> new line · <kbd>Esc</kbd> interrupts · <kbd>↑</kbd><kbd>↓</kbd> history · <kbd>/</kbd> commands</div>
     </div>
     <div class="fb" id="fb">
       <span>Useful so far?</span>
@@ -470,25 +545,124 @@
     "Ratcheting","Whirring","Clanking","Cranking","Sprocketing","Kerchunking"];
 
   const grow = () => { intent.style.height = "auto"; intent.style.height = Math.min(intent.scrollHeight,200) + "px"; };
+  // Quota-safe localStorage write: on QuotaExceeded, prune chat sessions/history then retry once.
+  function safeSet(k, v) {
+    try { localStorage.setItem(k, v); return; } catch (e) {}
+    try {
+      const all = JSON.parse(localStorage.getItem("forge_sessions") || "[]");
+      if (Array.isArray(all) && all.length > 1) {
+        all.forEach(s => { if (Array.isArray(s.turns) && s.turns.length > 20) s.turns = s.turns.slice(-20); });
+        localStorage.setItem("forge_sessions", JSON.stringify(all.slice(0, 10)));
+      } else { try { localStorage.removeItem("forge_history"); } catch (e2) {} }
+    } catch (e3) {}
+    try { localStorage.setItem(k, v); } catch (e4) { renderCtx(); }
+  }
+  function closePops() {
+    ["settings", "history", "ctxpop", "modelpop", "menpop"].forEach(id => { const el = $(id); if (el) el.style.display = "none"; });
+    menOpen = false;
+    if ($("findbar") && $("findbar").style.display !== "none") toggleFind(false);
+  }
+  // Always-allow / deny lists (Kilo parity: surfaced in settings with remove buttons).
+  const allowKey = "forge_allow_list", denyKey = "forge_deny_list";
+  const loadList = (k) => { try { const v = JSON.parse(localStorage.getItem(k)); return Array.isArray(v) ? v.filter(x => typeof x === "string") : []; } catch (e) { return []; } };
+  function renderRules(hostAllow, hostDeny) {
+    const al = hostAllow || loadList(allowKey), dl = hostDeny || loadList(denyKey);
+    const paint = (id, arr, rm) => {
+      const box = $(id); if (!box) return; box.innerHTML = "";
+      if (!arr.length) { const s = document.createElement("span"); s.className = "rempty"; s.textContent = "none"; box.appendChild(s); return; }
+      arr.slice(0, 20).forEach(t => {
+        const it = document.createElement("span"); it.className = "ritem"; it.textContent = t;
+        const x = document.createElement("button"); x.textContent = "✕"; x.title = "Remove";
+        x.addEventListener("click", (e) => { e.stopPropagation(); rm(t); });
+        it.appendChild(x); box.appendChild(it);
+      });
+    };
+    paint("allowlist", al, (t) => { safeSet(allowKey, JSON.stringify(loadList(allowKey).filter(x => x !== t))); renderRules(); post({ action: "allowTool", tool: t, remove: true }); });
+    paint("denylist", dl, (t) => { safeSet(denyKey, JSON.stringify(loadList(denyKey).filter(x => x !== t))); renderRules(); post({ action: "denyTool", tool: t, denied: false }); });
+  }
+  function trackAllow(t) { const l = loadList(allowKey); if (!l.includes(t)) { l.push(t); safeSet(allowKey, JSON.stringify(l.slice(-30))); } renderRules(); }
+  function trackDeny(t, denied) {
+    const l = loadList(denyKey).filter(x => x !== t);
+    if (denied) l.push(t);
+    safeSet(denyKey, JSON.stringify(l.slice(-30))); renderRules();
+  }
   intent.addEventListener("input", () => { grow(); preEnhance = null; $("enhanceUndo").style.display = "none"; });
 
-  function refresh() { post({ action: "readModel" }); post({ action: "getProvider" }); renderCtx(); }
+  // ---- auto-approval policy (Kilo parity: master + per-category, persisted, pushed to host) ----
+  const apprKey = (k, d) => { try { const v = localStorage.getItem(k); return v === null ? d : v === "1"; } catch (e) { return d; } };
+  function loadApprCfg() {
+    $("apprtgl").checked = apprKey("forge_appr_master", true);
+    $("apprread").checked = apprKey("forge_appr_read", true);
+    $("apprbuild").checked = apprKey("forge_appr_build", true);
+    $("apprdest").checked = apprKey("forge_appr_dest", false);
+    syncApprRow();
+  }
+  function syncApprRow() {
+    const on = $("apprtgl").checked;
+    ["apprread", "apprbuild", "apprdest"].forEach(id => { const r = $(id).closest(".srow"); if (r) r.style.opacity = on ? "" : ".4"; });
+  }
+  function pushApprCfg() {
+    const cfg = { master: $("apprtgl").checked, read: $("apprread").checked, build: $("apprbuild").checked, destructive: $("apprdest").checked };
+    try {
+      localStorage.setItem("forge_appr_master", cfg.master ? "1" : "0");
+      localStorage.setItem("forge_appr_read", cfg.read ? "1" : "0");
+      localStorage.setItem("forge_appr_build", cfg.build ? "1" : "0");
+      localStorage.setItem("forge_appr_dest", cfg.destructive ? "1" : "0");
+    } catch (e) {}
+    syncApprRow();
+    post({ action: "setAutoApprove", master: cfg.master, read: cfg.read, build: cfg.build, destructive: cfg.destructive });
+  }
+  ["apprtgl", "apprread", "apprbuild", "apprdest"].forEach(id => $(id).addEventListener("change", pushApprCfg));
+  loadApprCfg();
+  renderRules();
+
+  function refresh() {
+    post({ action: "readModel" }); post({ action: "getProvider" });
+    try {
+      post({
+        action: "setAutoApprove",
+        master: localStorage.getItem("forge_appr_master") !== "0",
+        read: localStorage.getItem("forge_appr_read") !== "0",
+        build: localStorage.getItem("forge_appr_build") !== "0",
+        destructive: localStorage.getItem("forge_appr_dest") === "1"
+      });
+    } catch (e) {}
+    try {
+      const on = localStorage.getItem("forge_compact_on");
+      const at = localStorage.getItem("forge_compact_at");
+      post({ action: "setCompact", on: on === null ? true : on === "1", at: at === null ? 60 : (parseInt(at, 10) || 0) });
+    } catch (e2) {}
+    renderCtx();
+  }
   window.addEventListener("DOMContentLoaded", refresh);
 
   // Clear the panel for a fresh recording take: wipe the transcript + reset Forge's pending threads.
   function clearPanel() {
+    if (working || enhanceActive) { try { post({ action: "stop" }); } catch (e) {} }
     stopWords();
-    working = false; turn = null; sessionId = null;
-    post({ action: "reset" }); // fresh agent conversation host-side too
+    working = false; turn = null; thinkEl = null; sessionId = null; lastPrompt = "";
+    pendingCompact = null; lastReverted = null;
+    try { post({ action: "reset" }); } catch (e) {} // fresh agent conversation host-side too
+    clearFind(); closePops();
     transcript.innerHTML = '<div class="empty" id="empty">Forge <b>knows</b> your part.<br>' +
-      'Forge <b>understands</b> what you mean.<br>Forge <b>gets it done.</b></div>';
+      'Forge <b>understands</b> what you mean.<br>Forge <b>gets it done.</b><br>' +
+      '<button class="attachbtn" id="emptytry" data-prompt="make the bore 25mm" title="Insert an example prompt to get started">Try: “make the bore 25mm”</button><br>' +
+      'or type <b>/help</b> for commands</div>';
     hideChip();
+    mentionPaths.length = 0; renderChips(); menClose();
     hIdx = -1; draftStash = null;
+    preEnhance = null; $("enhanceUndo").style.display = "none"; ebReset();
     intent.value = ""; grow();
-    post({ action: "reset" });
     intent.focus();
   }
   $("clearbtn").addEventListener("click", clearPanel);
+  // Fresh-load / cleared empty state: the example button inserts a runnable prompt.
+  document.addEventListener("click", (e) => {
+    const b = e.target.closest("#emptytry");
+    if (!b) return;
+    intent.value = b.dataset.prompt || "";
+    grow(); intent.focus();
+  });
   // ---- top bar: context pill + usage dropdown (Kilo-style) + transcript search ----
   let usage = { in: 0, out: 0 };
   function storageBytes() {
@@ -501,7 +675,7 @@
     const cap = 5 * 1024 * 1024, used = storageBytes();
     const pct = Math.min(99, Math.floor(used / cap * 100));
     $("ctxpill").textContent = pct + "%";
-    $("ctxpill").title = `Session context used (${fmtKB(used)} of ~5 MB local storage) — click for exact usage`;
+    $("ctxpill").title = `Local storage used (${fmtKB(used)} of ~5 MB local storage) — click for exact usage`;
     let live = 0; try { live = transcript.querySelectorAll(":scope > .turn").length; } catch (e) {}
     let stored = 0; try { stored = loadSessions().reduce((a, s) => a + s.turns.length, 0); } catch (e2) {}
     $("ctxpct").textContent = pct + "%";
@@ -522,6 +696,7 @@
   $("ctxarrow").addEventListener("click", (e) => { e.stopPropagation(); toggleCtx(); });
   $("compactbtn").addEventListener("click", () => compactTranscript(false));
   document.addEventListener("click", (e) => { if (!e.target.closest("#ctxpop") && !e.target.closest("#ctxpill") && !e.target.closest("#ctxarrow")) $("ctxpop").style.display = "none"; });
+  document.addEventListener("click", (e) => { if (menOpen && !e.target.closest("#menpop") && e.target !== intent) menClose(); });
 
   // transcript find: highlight all matches, jump between them
   let findMarks = [], findIdx = -1;
@@ -533,7 +708,8 @@
   function paintFind() {
     findMarks.forEach(m => m.classList.remove("cur"));
     if (findIdx >= 0 && findMarks[findIdx]) { findMarks[findIdx].classList.add("cur"); try { findMarks[findIdx].scrollIntoView({ block: "center" }); } catch (e) {} }
-    $("fcount").textContent = findMarks.length ? `${findIdx + 1}/${findMarks.length}` : ( $("findinput").value ? "0" : "" );
+    $("fcount").textContent = findMarks.length ? `${findIdx + 1}/${findMarks.length}` : ( $("findinput").value ? "none" : "" );
+    $("fcount").title = findMarks.length ? "" : "No matches — keep typing, or Esc closes search";
   }
   function runFind() {
     clearFind();
@@ -542,7 +718,15 @@
     const ql = q.toLowerCase();
     const walker = document.createTreeWalker(transcript, NodeFilter.SHOW_TEXT);
     const nodes = []; let n;
-    while ((n = walker.nextNode())) { if (n.nodeValue.toLowerCase().includes(ql)) nodes.push(n); }
+    while ((n = walker.nextNode())) {
+      // Skip text hidden inside collapsed compact blocks — jumping there shows nothing.
+      let el = n.parentElement, hidden = false;
+      while (el && el !== transcript) {
+        if (el.classList && el.classList.contains("cbody") && el.style.display === "none") { hidden = true; break; }
+        el = el.parentElement;
+      }
+      if (!hidden && n.nodeValue.toLowerCase().includes(ql)) nodes.push(n);
+    }
     nodes.forEach(tn => {
       const frag = document.createDocumentFragment();
       const val = tn.nodeValue, low = val.toLowerCase();
@@ -555,7 +739,7 @@
       if (i < val.length) frag.append(document.createTextNode(val.slice(i)));
       tn.replaceWith(frag);
     });
-    if (findMarks.length) { findIdx = 0; paintFind(); } else { $("fcount").textContent = "0"; }
+    if (findMarks.length) { findIdx = 0; paintFind(); } else { $("fcount").textContent = "none"; $("fcount").title = "No matches — keep typing, or Esc closes search"; }
   }
   function toggleFind(force) {
     const f = $("findbar");
@@ -581,67 +765,112 @@
     if (h.style.display !== "none") { renderHistoryList(); $("hsearch").value = ""; renderHistoryList(); setTimeout(() => $("hsearch").focus(), 0); }
   });
   $("hsearch").addEventListener("input", renderHistoryList);
-  $("hsearch").addEventListener("keydown", (e) => e.stopPropagation());
+  $("hsearch").addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Escape") { $("history").style.display = "none"; intent.focus(); } });
   $("hnew").addEventListener("click", () => { clearPanel(); $("history").style.display = "none"; intent.focus(); });
   document.addEventListener("click", (e) => { if (!e.target.closest("#history") && !e.target.closest("#histbtn")) $("history").style.display = "none"; });
 
   // ---- settings: gear open/close + theme toggle (persists; default = follow OS) ----
   const settingsEl = $("settings"), themeTgl = $("themetgl"), telmTgl = $("telmtgl");
-
   // ---- settings provider picker (Kilo-style): dropdown + key field when the pick has no key ----
   let curSlug = null;
   function renderSettings(m) {
     const sel = $("setprov"), row = $("setkeyrow"), sub = $("setsub");
     if (!sel) return;
     if (m.slug && sel.querySelector(`option[value="${m.slug}"]`)) sel.value = m.slug;
-    curSlug = sel.value;
+    curSlug = m.slug || sel.value;
     const needsKey = !m.hasKey && sel.value !== "ollama";
     if (row) row.style.display = needsKey ? "" : "none";
     if (sub) sub.textContent = (m.baseUrl || "") + (m.model ? " · " + m.model : "") + (m.hasKey ? " · key saved ✓" : " · no key");
   }
   $("setprov").addEventListener("change", () => {
     $("setkey").value = "";
+    curSlug = $("setprov").value; // optimistic: pill/ctx stop showing the previous provider
+    curModel = null; renderPill(); renderCtx();
     chatModels = []; renderModelList($("msearch") ? $("msearch").value : "");
+    if ($("mcount")) $("mcount").textContent = "Loading…";
     post({ action: "setProvider", provider: $("setprov").value });
   });
   $("setkeysave").addEventListener("click", () => {
     const k = $("setkey").value.trim();
     if (!k) return;
     post({ action: "saveKey", provider: $("setprov").value, key: k });
+    post({ action: "getProvider" }); // refresh key state + model list immediately after save
     $("setkey").value = "";
   });
   $("setkey").addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); $("setkeysave").click(); }
+    if (e.key === "Escape") { settingsEl.style.display = "none"; intent.focus(); }
     e.stopPropagation();
   });
+
+  // ---- auto-compaction controls (Kilo parity: threshold + off switch, persisted, pushed to host) ----
+  const autoCompactOn = () => { try { return localStorage.getItem("forge_compact_on") !== "0"; } catch (e) { return true; } };
+  function loadCompactCfg() {
+    try {
+      const on = localStorage.getItem("forge_compact_on");
+      const at = localStorage.getItem("forge_compact_at");
+      $("compacttgl").checked = on === null ? true : on === "1";
+      let n = at === null ? 60 : parseInt(at, 10);
+      if (isNaN(n) || n < 10) n = 60;
+      $("compactat").value = n;
+    } catch (e) {}
+    syncCompactRow();
+  }
+  function syncCompactRow() { const r = $("compactatrow"); if (r) r.style.opacity = $("compacttgl").checked ? "" : ".4"; }
+  function pushCompactCfg() {
+    // The toggle alone enables/disables — the number is just the threshold (floored, never magic).
+    let at = parseInt($("compactat").value, 10); if (isNaN(at) || at < 10) at = 10;
+    $("compactat").value = at;
+    try {
+      localStorage.setItem("forge_compact_on", $("compacttgl").checked ? "1" : "0");
+      localStorage.setItem("forge_compact_at", String(at));
+    } catch (e) {}
+    syncCompactRow();
+    post({ action: "setCompact", on: $("compacttgl").checked, at: at });
+  }
+  $("compacttgl").addEventListener("change", pushCompactCfg);
+  $("compactat").addEventListener("change", pushCompactCfg);
+  loadCompactCfg();
   function applyTheme() {
-    const saved = localStorage.getItem("forge_theme");            // "dark" | "light" | null = follow OS
+    let saved = null; try { saved = localStorage.getItem("forge_theme"); } catch (e) {}            // "dark" | "light" | null = follow OS
     const osLight = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches;
     const dark = saved ? saved !== "light" : !osLight;
     document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
     themeTgl.checked = saved === "dark" || (!saved && !osLight);
   }
-  $("gearbtn").addEventListener("click", (e) => { e.stopPropagation(); settingsEl.style.display = settingsEl.style.display === "none" ? "flex" : "none"; });
-  $("sclose").addEventListener("click", () => settingsEl.style.display = "none");
+  $("gearbtn").addEventListener("click", (e) => {
+    e.stopPropagation();
+    const open = settingsEl.style.display === "none";
+    settingsEl.style.display = open ? "flex" : "none";
+    if (open) $("setprov").focus(); else intent.focus();
+  });
+  $("sclose").addEventListener("click", () => { settingsEl.style.display = "none"; intent.focus(); });
   document.addEventListener("click", (e) => { if (!e.target.closest("#settings") && !e.target.closest("#gearbtn")) settingsEl.style.display = "none"; });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
-      settingsEl.style.display = "none";
-      if ($("history")) $("history").style.display = "none";
-      if ($("ctxpop")) $("ctxpop").style.display = "none";
-      if ($("findbar") && $("findbar").style.display !== "none") toggleFind(false);
-      if (working || enhanceActive) { e.stopPropagation(); post({ action: "stop" }); }
-      if ($("modelpop")) closeModels(false);
-      const nope = document.querySelector(".gate .nope");   // FDL 4.4: Esc = "Not yet"
+      if (document.getElementById("onboard")) return; // onboarding is modal — Esc must not yank focus behind it
+      if (menOpen) { menClose(); intent.focus(); return; }
+      closePops();
+      if (working || enhanceActive) { e.stopPropagation(); post({ action: "stop" }); if (enhanceActive) ebReset(); intent.focus(); return; }
+      if ($("modelpop") && $("modelpop").style.display !== "none") { closeModels(false); return; }
+      const nope = document.querySelector(".gate .nope, .appr:not(.done) .abtns button:last-child");
       if (nope) nope.click();
+      intent.focus(); // every popover close lands back in the composer
     }
   });
-  themeTgl.addEventListener("change", () => { localStorage.setItem("forge_theme", themeTgl.checked ? "dark" : "light"); applyTheme(); });
+  themeTgl.addEventListener("change", () => { try { localStorage.setItem("forge_theme", themeTgl.checked ? "dark" : "light"); } catch (e) {} applyTheme(); });
   telmTgl.addEventListener("change", () => post({ action: "telemetry", on: telmTgl.checked }));
   applyTheme();
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 
   intent.addEventListener("keydown", (e) => {
+    // @-mention popover owns Enter/Tab/arrows/Esc while open (Kilo parity).
+    if (menOpen) {
+      if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); menAccept(menIdx); return; }
+      if (e.key === "ArrowDown") { e.preventDefault(); if (menItems.length) { menIdx = (menIdx + 1) % menItems.length; renderMenList(); } return; }
+      if (e.key === "ArrowUp") { e.preventDefault(); if (menItems.length) { menIdx = (menIdx + menItems.length - 1) % menItems.length; renderMenList(); } return; }
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); menClose(); return; }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       const text = intent.value.trim();
@@ -678,11 +907,79 @@
 
   let working = false;
 
+  // ---- @-mention files (Kilo-style): @ triggers a host file search, pick to attach ----
+  let menOpen = false, menItems = [], menIdx = 0, menTimer = null, menStart = -1;
+  const mentionPaths = []; // {name, path} for this draft; sent with generate, cleared on send
+  function menQuery() {
+    const pos = intent.selectionStart || 0;
+    const before = intent.value.slice(0, pos);
+    const m = before.match(/(?:^|\s)@([^\s@]*)$/);
+    if (!m) return null;
+    return { q: m[1], start: pos - m[1].length - 1 };
+  }
+  function menClose() { menOpen = false; $("menpop").style.display = "none"; }
+  function renderMenList() {
+    const list = $("menlist"); list.innerHTML = "";
+    if (!menItems.length) {
+      const em = document.createElement("div"); em.className = "mempty";
+      em.textContent = "No matching files — click to 📎 attach one instead.";
+      em.style.cursor = "pointer"; em.title = "Attach a file instead";
+      em.addEventListener("click", () => { menClose(); post({ action: "attach" }); intent.focus(); });
+      list.appendChild(em);
+    }
+    menItems.forEach((it, i) => {
+      const row = document.createElement("div");
+      row.className = "mrow" + (i === menIdx ? " kb" : "");
+      row.innerHTML = `<span class="mname"></span>${it.open ? `<span class="mtag">open</span>` : ""}`;
+      row.querySelector(".mname").textContent = it.name;
+      const sm = document.createElement("small"); sm.textContent = it.path;
+      row.querySelector(".mname").appendChild(sm);
+      row.addEventListener("click", () => menAccept(i));
+      list.appendChild(row);
+    });
+    $("mencount").textContent = menItems.length ? `${menItems.length} file${menItems.length === 1 ? "" : "s"}` : "";
+    const act = list.querySelector(".mrow.kb");
+    if (act) act.scrollIntoView({ block: "nearest" });
+  }
+  function menAccept(i) {
+    const it = menItems[i];
+    const q = menQuery(); // recompute: the debounced files reply may predate the latest keystroke
+    if (q) menStart = q.start;
+    if (!it || menStart < 0) { menClose(); return; }
+    const pos = intent.selectionStart || 0;
+    intent.value = intent.value.slice(0, menStart + 1) + it.name + " " + intent.value.slice(pos);
+    const caret = menStart + 1 + it.name.length + 1;
+    if (!mentionPaths.some(p => p.path === it.path)) mentionPaths.push({ name: it.name, path: it.path });
+    renderChips();
+    menClose(); grow(); intent.focus();
+    try { intent.setSelectionRange(caret, caret); } catch (e) {}
+  }
+  function renderChips() {
+    const box = $("mchips"); box.innerHTML = "";
+    box.style.display = mentionPaths.length ? "flex" : "none";
+    mentionPaths.forEach(p => {
+      const c = document.createElement("span"); c.className = "mchip";
+      const t = document.createElement("span"); t.textContent = "@" + p.name; t.title = p.path;
+      const x = document.createElement("button"); x.className = "x"; x.textContent = "✕"; x.title = "Remove";
+      x.addEventListener("click", () => { const k = mentionPaths.findIndex(q => q.path === p.path); if (k >= 0) mentionPaths.splice(k, 1); renderChips(); });
+      c.append(t, x); box.appendChild(c);
+    });
+  }
+  function menCheck() {
+    if (!hasBridge) return;
+    const q = menQuery();
+    if (!q) { if (menOpen) menClose(); return; }
+    menStart = q.start;
+    clearTimeout(menTimer);
+    menTimer = setTimeout(() => post({ action: "files", q: q.q }), 250);
+  }
+  intent.addEventListener("input", menCheck);
+
   // prompt history (persists; unsent draft stashed while browsing)
   let histList = [];
-  try { histList = JSON.parse(localStorage.getItem("forge_history")) || []; } catch (e) { histList = []; }
+  try { const v = JSON.parse(localStorage.getItem("forge_history")); histList = Array.isArray(v) ? v : []; } catch (e) { histList = []; }
   let hIdx = -1, draftStash = null;
-  const histSave = () => { try { localStorage.setItem("forge_history", JSON.stringify(histList.slice(-100))); } catch (e) {} };
+  const histSave = () => { try { safeSet("forge_history", JSON.stringify(histList.slice(-100))); } catch (e) {} };
   let turn = null, thinkEl = null;          // { steps, thinking, result } DOM refs for the active Forge turn
   let wordTimer = null;
   let lastPrompt = "";
@@ -690,8 +987,8 @@
   // ---- chat history (Kilo-style sessions: search, restore, delete, new) ----
   let sessionId = null;
   const sessKey = "forge_sessions";
-  const loadSessions = () => { try { return JSON.parse(localStorage.getItem(sessKey)) || []; } catch (e) { return []; } };
-  const saveSessions = (s) => { try { localStorage.setItem(sessKey, JSON.stringify(s.slice(0, 30))); } catch (e) {} };
+  const loadSessions = () => { try { const v = JSON.parse(localStorage.getItem(sessKey)); return Array.isArray(v) ? v : []; } catch (e) { return []; } };
+  const saveSessions = (s) => { try { safeSet(sessKey, JSON.stringify(s.slice(0, 30))); } catch (e) {} };
   const ago = (t) => { const m = Math.floor((Date.now() - t) / 60000); if (m < 1) return "just now"; if (m < 60) return m + "m ago"; const h = Math.floor(m / 60); if (h < 24) return h + "h ago"; return Math.floor(h / 24) + "d ago"; };
   const shortModel = (id) => String(id || "").split("/").pop();
   function recordTurn(html) {
@@ -708,7 +1005,18 @@
     const q = ($("hsearch").value || "").toLowerCase();
     const list = $("hlist"); list.innerHTML = "";
     const all = loadSessions().filter(s => !q || s.title.toLowerCase().includes(q) || s.turns.some(t => (t.q || "").toLowerCase().includes(q)));
-    if (!all.length) { const em = document.createElement("div"); em.className = "hempty"; em.textContent = q ? "No matches." : "No past chats yet."; list.appendChild(em); return; }
+    if (!all.length) {
+      const em = document.createElement("div"); em.className = "hempty";
+      if (q) {
+        em.textContent = "No matches — ";
+        const b = document.createElement("button"); b.className = "hnew"; b.textContent = "clear search";
+        b.addEventListener("click", (ev) => { ev.stopPropagation(); $("hsearch").value = ""; renderHistoryList(); $("hsearch").focus(); });
+        em.appendChild(b);
+      } else {
+        em.textContent = "No past chats yet — send a prompt and it lands here.";
+      }
+      list.appendChild(em); return;
+    }
     all.forEach(s => {
       const row = document.createElement("div");
       row.className = "hrow" + (s.id === sessionId ? " active" : "");
@@ -718,7 +1026,7 @@
       mt.textContent = `${ago(s.updated || s.started)} · ${s.turns.length} turn${s.turns.length === 1 ? "" : "s"}${s.model ? " · " + s.model : ""}`;
       main.append(tt, mt);
       const del = document.createElement("button"); del.className = "hdel"; del.title = "Delete"; del.textContent = "✕";
-      del.addEventListener("click", (e) => { e.stopPropagation(); saveSessions(loadSessions().filter(x => x.id !== s.id)); if (s.id === sessionId) sessionId = null; renderHistoryList(); });
+      del.addEventListener("click", (e) => { e.stopPropagation(); saveSessions(loadSessions().filter(x => x.id !== s.id)); if (s.id === sessionId) sessionId = null; renderHistoryList(); $("hsearch").focus(); });
       main.addEventListener("click", () => restoreSession(s.id));
       row.append(main, del); list.appendChild(row);
     });
@@ -726,13 +1034,15 @@
   function restoreSession(id) {
     const s = loadSessions().find(x => x.id === id);
     if (!s) return;
-    stopWords(); working = false; turn = null; thinkEl = null;
+    if (working || enhanceActive) { try { post({ action: "stop" }); } catch (e) {} }
+    stopWords(); working = false; turn = null; thinkEl = null; pendingCompact = null; lastReverted = null; ebReset();
+    clearFind(); closePops();
     transcript.innerHTML = "";
     s.turns.forEach(t => {
       const d = document.createElement("div"); d.className = "turn";
       const u = document.createElement("div"); u.className = "bubble user"; u.textContent = t.q;
-      const rv = document.createElement("button"); rv.className = "revertbtn"; rv.title = "Revert to here — edit and resend from this point"; rv.textContent = "↩ revert";
-      const f = document.createElement("div"); f.className = "forge"; f.innerHTML = t.a || "";
+    const rv = document.createElement("button"); rv.className = "revertbtn"; rv.title = "Revert to here — edit and resend from this point (/unrevert restores this once)"; rv.textContent = "↩ revert";
+    const f = document.createElement("div"); f.className = "forge"; f.innerHTML = t.a || "";
       d.append(u, rv, f); transcript.appendChild(d);
     });
     sessionId = id;
@@ -764,6 +1074,7 @@
   function run(text) {
     if (text.startsWith("/")) { intent.value = ""; grow(); slashRun(text); return; }
     if (working) return;
+    closePops(); clearFind();
     working = true;
     lastPrompt = text;
     if (!sessionId) sessionId = "s" + Date.now();
@@ -776,7 +1087,7 @@
     const u = document.createElement("div");
     u.className = "bubble user"; u.textContent = text;
     const rv = document.createElement("button");
-    rv.className = "revertbtn"; rv.title = "Revert to here — edit and resend from this point";
+    rv.className = "revertbtn"; rv.title = "Revert to here — edit and resend from this point (/unrevert restores this once)";
     rv.textContent = "↩ revert";
     t.append(u, rv);
     const f = document.createElement("div"); f.className = "forge";
@@ -785,8 +1096,9 @@
     thinking.innerHTML = `<span class="tdot">●</span><span class="tword">${WORDS[0]}…</span>`;
     const result = document.createElement("div"); result.className = "result";
     f.append(steps, thinking, result);
-    t.append(u, f);
+    t.append(f);
     transcript.append(t);
+    turn = { el: t, steps, thinking, result, tword: thinking.querySelector(".tword") };
 
     scroll(true);
     startWords();
@@ -795,12 +1107,17 @@
     intent.value = ""; grow();
     preEnhance = null; $("enhanceUndo").style.display = "none";
 
-    post({ action: "generate", intent: text, sid: sessionId });
+    const mpaths = mentionPaths.map(p => p.path).filter(p => {
+      const nm = (mentionPaths.find(q => q.path === p) || {}).name || "";
+      return !nm || text.includes(nm);
+    });
+    mentionPaths.length = 0; renderChips(); menClose();
+    post({ action: "generate", intent: text, sid: sessionId, paths: mpaths });
     if (!hasBridge) demoRun(text);   // standalone browser preview
   }
 
   // ---- slash commands (Kilo-style: local, instant, no LLM round-trip) ----
-  const SLASH_HELP = "/compact — summarize older turns into an expandable block\n/clear, /new — start a fresh chat\n/regen — re-run the last prompt\n/model — open the model picker\n/provider [slug] — switch provider (deepseek|openrouter|nvidia|openai|anthropic|ollama) or open settings\n/history — open chat history\n/help — this list";
+  const SLASH_HELP = "/compact — summarize older turns into an expandable block\n/clear, /new — start a fresh chat\n/regen — re-run the last prompt\n/model — open the model picker\n/provider [slug] — switch provider (deepseek|openrouter|nvidia|openai|anthropic|ollama) or open settings\n/allow <tool> — always allow one tool going forward\n/deny <tool> — block one tool outright · /undeny <tool> — unblock it\n/auto-approve [on|off] — master switch for unattended tool runs\n/history — open chat history\n/help — this list\n/unrevert — restore the last reverted turns";
   function slashRun(text) {
     const parts = text.slice(1).trim().split(/\s+/);
     const cmd = (parts[0] || "").toLowerCase(), args = parts.slice(1);
@@ -809,12 +1126,40 @@
       case "help": systemCard(SLASH_HELP.replace(/</g, "&lt;").replace(/\n/g, "<br>")); break;
       case "regen": case "regenerate":
         if (!working && lastPrompt && !lastPrompt.startsWith("/")) run(lastPrompt);
-        else systemCard("Nothing to regenerate yet.");
+        else         systemCard("Nothing to regenerate yet — send a prompt first, then ↻ or /regen re-runs it.");
         break;
       case "model": openModels(); break;
       case "provider":
-        if (args[0]) { chatModels = []; renderModelList($("msearch") ? $("msearch").value : ""); post({ action: "setProvider", provider: args[0].toLowerCase() }); }
+        if (args[0]) {
+          const pv = args[0].toLowerCase();
+          if ($("setprov").querySelector(`option[value="${pv}"]`)) $("setprov").value = pv;
+          curSlug = pv; curModel = null; renderPill(); renderCtx();
+          chatModels = []; renderModelList($("msearch") ? $("msearch").value : "");
+          post({ action: "setProvider", provider: pv });
+        }
         else { settingsEl.style.display = "flex"; }
+        break;
+      case "allow":
+        if (args[0]) { trackAllow(args[0]); post({ action: "allowTool", tool: args[0] }); }
+        else systemCard("Usage: <b>/allow &lt;tool-name&gt;</b> — e.g. /allow new_part.");
+        break;
+      case "deny":
+        if (args[0]) { trackDeny(args[0], true); post({ action: "denyTool", tool: args[0], denied: true }); }
+        else systemCard("Usage: <b>/deny &lt;tool-name&gt;</b> — blocked tools are refused without asking. /undeny to lift.");
+        break;
+      case "undeny":
+        if (args[0]) { trackDeny(args[0], false); post({ action: "denyTool", tool: args[0], denied: false }); }
+        else systemCard("Usage: <b>/undeny &lt;tool-name&gt;</b>.");
+        break;
+      case "unrevert": unrevert(); break;
+      case "auto-approve":
+        if (args[0] === "on" || args[0] === "off") {
+          const on = args[0] === "on";
+          $("apprtgl").checked = on; pushApprCfg();
+          systemCard(on ? "Auto-approve <b>on</b> — approved tools run without asking." : "Auto-approve <b>off</b> — every tool call asks first.");
+        } else {
+          systemCard(`Auto-approve is <b>${$("apprtgl").checked ? "on" : "off"}</b>. Usage: <b>/auto-approve on|off</b>.`);
+        }
         break;
       case "history": $("history").style.display = "flex"; renderHistoryList(); setTimeout(() => $("hsearch").focus(), 0); break;
       case "compact": compactTranscript(false); break;
@@ -825,6 +1170,21 @@
 
   // ---- transcript compaction ----
   let pendingCompact = null; // { sum, body } awaiting the host summary
+  let lastReverted = null; // { nodes, keep, sid, turns } — one-step unrevert stash
+  function unrevert() {
+    if (working || !lastReverted || !lastReverted.nodes.length) { if (!working) systemCard("Nothing to unrevert — ↩ revert on a turn stashes it here for one step."); return; }
+    if (sessionId && lastReverted.sid && lastReverted.sid !== sessionId) { lastReverted = null; systemCard("Nothing to unrevert — the chat changed since that revert, so there is nothing safe to restore."); return; }
+    closePops(); clearFind();
+    const ref = lastReverted.refNext && document.contains(lastReverted.refNext) ? lastReverted.refNext : null;
+    lastReverted.nodes.forEach(n => transcript.insertBefore(n, ref));
+    if (sessionId) {
+      const all = loadSessions();
+      const s = all.find(x => x.id === sessionId);
+      if (s) { s.turns = (lastReverted.turns || []).slice(0, 100); s.updated = Date.now(); saveSessions(all); }
+    }
+    lastReverted = null;
+    scroll(true);
+  }
   function buildCompactBlock(oldTurns, summaryText) {
     const block = document.createElement("div"); block.className = "compact";
     const hd = document.createElement("div"); hd.className = "chead";
@@ -845,9 +1205,12 @@
       .map((b, i) => `${i + 1}. ${b.textContent.slice(0, 80)}`).join("\n");
   }
   function compactTranscript(auto) {
-    const turns = [...transcript.querySelectorAll(":scope > .turn")];
+    if (working && !auto) { systemCard("Still working — wait for this run (or Esc to stop it), then compact."); return; }
+    if (pendingCompact) { if (!auto) systemCard("Already summarizing — wait for this compact to finish."); return; }
+    let turns = [...transcript.querySelectorAll(":scope > .turn")];
+    if (working) turns = turns.slice(0, -1);
     const keep = 10;
-    if (turns.length <= keep + 1) { if (!auto) systemCard("Nothing to compact — chat is short."); return; }
+    if (turns.length <= keep + 1) { if (!auto) systemCard("Nothing to compact — chat is short; older turns collapse here once you pass 10."); return; }
     const old = turns.slice(0, turns.length - keep);
     const digest = old.map(t => {
       const q = t.querySelector(".bubble.user")?.textContent || "";
@@ -897,6 +1260,35 @@
       el.className = "step run";
       el.innerHTML = `<span class="glyph">◆</span><span>${agent ? `Deploying <span class="agent">${agent}</span> · ` : ""}${(gloss || "").replace(/</g,"&lt;")}</span>`;
     }
+    // Long-run flood guard: past K step lines, older ones collapse behind a summary line.
+    try {
+      const stepsEl = turn.steps, K = 12, KEEP = 10;
+      const lines = [...stepsEl.children].filter(x => !x.hasAttribute("data-more"));
+      let more = stepsEl.querySelector("[data-more]");
+      if (lines.length > K) {
+        if (!more) {
+          more = document.createElement("div");
+          more.className = "step"; more.setAttribute("data-more", "1");
+          more.style.cursor = "pointer"; more.title = "Show all steps";
+          more.addEventListener("click", () => {
+            const nowExp = stepsEl.dataset.exp !== "1";
+            stepsEl.dataset.exp = nowExp ? "1" : "";
+            [...stepsEl.children].forEach(x => { if (x !== more) x.style.display = (nowExp || x.dataset.keep === "1") ? "" : "none"; });
+            more.innerHTML = `<span class="glyph">…</span><span>${nowExp ? "showing all steps — click to collapse" : (more.dataset.label || "earlier steps")}</span>`;
+          });
+          stepsEl.prepend(more);
+        }
+        const exp = stepsEl.dataset.exp === "1";
+        const hidden = lines.length - KEEP;
+        lines.forEach((x, i) => {
+          const hide = !exp && i < hidden;
+          x.style.display = hide ? "none" : "";
+          if (hide) x.removeAttribute("data-keep"); else x.dataset.keep = "1";
+        });
+        more.dataset.label = `${hidden} earlier steps done — click to expand`;
+        more.innerHTML = `<span class="glyph">…</span><span>${exp ? "showing all steps — click to collapse" : more.dataset.label}</span>`;
+      } else if (more) { more.remove(); delete stepsEl.dataset.exp; }
+    } catch (e) {}
     if (wasBottom) scroll();
   }
 
@@ -905,6 +1297,10 @@
   function finish(html) {
     stopWords();
     const wasTurn = !!turn && !!lastPrompt;
+    if (thinkEl) { // a zero-tool text finish still closes a live think block (Kilo text-response parity)
+      try { const hd = thinkEl.querySelector(".thead"); if (hd && /live/.test(hd.textContent)) hd.textContent = "Thought — click to expand"; thinkEl.classList.add("collapsed"); } catch (e) {}
+      thinkEl = null;
+    }
     if (turn) {
       turn.thinking.remove();
       if (html) turn.result.innerHTML = html;
@@ -914,7 +1310,7 @@
     if (wasTurn) recordTurn(html);
     working = false; turn = null;
     scroll(); renderCtx();
-    if (!pendingCompact && transcript.querySelectorAll(":scope > .turn").length > 40) compactTranscript(true);
+    if (autoCompactOn() && !pendingCompact && transcript.querySelectorAll(":scope > .turn").length > 40) compactTranscript(true);
   }
 
   function renderRedWave(m) {
@@ -977,39 +1373,103 @@
     }
 
     else if (m.type === "thinkStart") {
+      if (!working || !turn) return; // orphan think after revert/clear — never leave a stray live block
+      if (thinkEl && thinkEl.isConnected) { try { thinkEl.querySelector(".thead").textContent = "Thought — click to expand"; } catch (e) {} thinkEl = null; }
       thinkEl = document.createElement("div");
       thinkEl.className = "think";
       const tn = (m.model ? String(m.model).split("/").pop() : "");
       thinkEl.innerHTML = "";
       const hd = document.createElement("div"); hd.className = "thead";
-      hd.textContent = `✨ ${m.label || "Thinking"}` + (tn ? ` · ${tn}` : "") + "… (live)";
+      thinkEl._t0 = Date.now(); thinkEl._label = m.label || "Thinking"; thinkEl._model = tn;
+      hd.textContent = `✨ ${thinkEl._label}` + (tn ? ` · ${tn}` : "") + "… (live · 0s)";
       const bd = document.createElement("div"); bd.className = "tbody";
       thinkEl.append(hd, bd);
-      hd.addEventListener("click", () => thinkEl.classList.toggle("collapsed"));
-      transcript.appendChild(thinkEl); scroll();
+      hd.addEventListener("click", () => { try { thinkEl.classList.toggle("collapsed"); } catch (e) {} });
+      turn.result.appendChild(thinkEl); scroll();
     }
     else if (m.type === "think") {
-      if (!thinkEl) return;
+      if (!thinkEl || !thinkEl.isConnected) return;
       const bd = thinkEl.querySelector(".tbody");
-      if (bd && m.text) { bd.append(document.createTextNode(m.text)); scroll(); }
+      if (bd && m.text) {
+        const last = bd.lastChild; // coalesce into one text node so long runs can't grow unbounded DOM
+        if (last && last.nodeType === 3) last.data += m.text; else bd.append(document.createTextNode(m.text));
+        if (bd.textContent.length > 4000) thinkEl.classList.add("collapsed"); // auto-collapse long blocks
+        const hd2 = thinkEl.querySelector(".thead");
+        if (hd2) {
+          const s = Math.floor((Date.now() - (thinkEl._t0 || Date.now())) / 1000);
+          const base = `✨ ${thinkEl._label || "Thinking"}` + (thinkEl._model ? ` · ${thinkEl._model}` : "") + `… (live · ${s}s)`;
+          hd2.textContent = thinkEl.classList.contains("collapsed") ? base + " — long output collapsed, click to expand" : base;
+        }
+        scroll();
+      }
     }
     else if (m.type === "thinkEnd") {
-      if (!thinkEl) { ebReset(); return; }
-      const hd = thinkEl.querySelector(".thead");
+      if (!thinkEl) return;
+      const done = thinkEl; thinkEl = null;
+      if (!done.isConnected) return;
+      const hd = done.querySelector(".thead");
       if (m.interrupted) {
         if (hd) hd.textContent = "Interrupted — partial thinking kept (click to expand)";
-        thinkEl.classList.remove("collapsed");
-      } else if (hd) {
-        hd.textContent = `Thought for ${m.seconds || 0}s — click to collapse`;
+        done.classList.remove("collapsed");
+        } else if (hd) {
+          hd.textContent = `Thought for ${m.seconds || 0}s` + (done.classList.contains("collapsed") ? " — long output collapsed, click to expand" : " — click to collapse");
+        }
+    }
+
+    else if (m.type === "approve") {
+      if (!working || !turn) { // orphan card: run already ended/cancelled — show expired, post nothing
+        const exp = document.createElement("div");
+        exp.className = "appr done";
+        exp.innerHTML = `<div class="ahead"><span>🔶 Approval expired — run ended</span></div>`;
+        transcript.appendChild(exp); scroll();
+        return;
       }
-      ebReset();
+      const box = document.createElement("div");
+      box.className = "appr";
+      box.dataset.apprId = m.id || "";
+      const hd = document.createElement("div"); hd.className = "ahead";
+      hd.innerHTML = `<span>🔶 Approval needed</span>`;
+      const tn = document.createElement("span"); tn.className = "atool"; tn.textContent = m.tool || "tool";
+      hd.appendChild(tn);
+      const ag = document.createElement("div"); ag.className = "aargs";
+      let as_ = "";
+      try { as_ = JSON.stringify(m.args || {}, null, 1); } catch (e) { as_ = String(m.args || ""); }
+      ag.textContent = as_.length > 600 ? as_.slice(0, 600) + "…" : as_;
+      const btns = document.createElement("div"); btns.className = "abtns";
+      const mk = (label, decision, cls) => {
+        const b = document.createElement("button"); b.textContent = label; if (cls) b.className = cls;
+        b.addEventListener("click", () => {
+          if (box.classList.contains("done")) return; // double-click race: one decision only
+          box.classList.add("done");
+          btns.querySelectorAll("button").forEach(x => x.disabled = true);
+          hd.firstChild.textContent = `🔶 ${label} — ${m.tool || "tool"}`;
+          if (decision === "always" && m.tool) trackAllow(m.tool);
+          post({ action: "approveReply", id: m.id, decision });
+        });
+        return b;
+      };
+      btns.append(mk("Approve", "approve", "go"), mk("Always allow", "always"), mk("Reject", "reject"));
+      box.append(hd, ag, btns);
+      turn.result.appendChild(box);
+      scroll();
+    }
+    else if (m.type === "rules") {
+      if (Array.isArray(m.allow)) { try { safeSet(allowKey, JSON.stringify(m.allow.slice(0, 30))); } catch (e) {} }
+      if (Array.isArray(m.deny)) { try { safeSet(denyKey, JSON.stringify(m.deny.slice(0, 30))); } catch (e) {} }
+      renderRules(Array.isArray(m.allow) ? m.allow : null, Array.isArray(m.deny) ? m.deny : null);
     }
 
     else if (m.type === "compacted") {
       if (pendingCompact) { pendingCompact.sum.textContent = m.summary || ""; pendingCompact = null; }
     }
 
-    else if (m.type === "enhanced") {      if (preEnhance === null) preEnhance = intent.value;
+    else if (m.type === "files") {
+      menItems = (m.files || []).slice(0, 50);
+      menIdx = 0;
+      if (menQuery()) { menOpen = true; $("menpop").style.display = "flex"; renderMenList(); }
+    }
+
+    else if (m.type === "enhanced") {      if (preEnhance === null) preEnhance = (typeof enhanceDraft === "string" && enhanceDraft) ? enhanceDraft : intent.value;
       intent.value = m.text || ""; grow();
       $("enhanceUndo").style.display = "";
       ebReset();
@@ -1024,7 +1484,7 @@
         const st = document.querySelector("#obmstat");
         sel.innerHTML = "";
         if (m.error || !m.models || !m.models.length) {
-          if (st) st.textContent = m.error === "nokey" ? "Paste a key first, then reload." : "Couldn't load models — saving with the default.";
+          if (st) st.textContent = m.error === "nokey" ? "Paste a key first, then hit Load models." : "Couldn't load models — saving with the default so you can keep going.";
           const d = document.createElement("option"); d.value = ""; d.textContent = "Default model"; sel.appendChild(d);
         } else {
           m.models.forEach(id => { const op = document.createElement("option"); op.value = id; op.textContent = id; sel.appendChild(op); });
@@ -1033,6 +1493,7 @@
         }
       } else if (m.error && m.error !== "nokey") {
         $("mcount").textContent = "Couldn't load models.";
+        $("mcount").title = `${m.error} — check the key, then hit Refresh.`;
       }
     }
 
@@ -1054,8 +1515,8 @@
       }
     }
 
-    else if (m.type === "step") { stepLine(m.agent, m.gloss, m.state, m.result); }
-    else if (m.type === "status") { stepLine(null, m.message, "run"); }
+    else if (m.type === "step") { if (!working || !turn) return; stepLine(m.agent, m.gloss, m.state, m.result); }
+    else if (m.type === "status") { if (!working || !turn) return; stepLine(null, m.message, "run"); }
 
     else if (m.type === "attached") { showChip(m.name); }
     else if (m.type === "attachCleared") { hideChip(); }
@@ -1063,7 +1524,8 @@
     else if (m.type === "error") {
       if (enhanceActive) ebReset(); // only an in-flight enhance owns the button
       if (m.localCompact) compactFallback();
-      finish(`<div class="err">${(m.message || "").replace(/</g,"&lt;")}</div>`);
+      const msg = ((m.message || "Something went wrong on that run (no reason was given)").replace(/</g,"&lt;"));
+      finish(`<div class="err">${msg} — try again, or Esc stops a stuck run.</div>`);
     }
 
     else if (m.type === "variants") { finish(renderVariants(m)); }
@@ -1214,6 +1676,10 @@
           const msg = { action: "saveKey", provider: pr ? pr.value : "deepseek", key: k.value.trim() };
           if (pr && pr.value === "nvidia" && md && md.style.display !== "none" && md.value) msg.model = md.value;
           post(msg);
+          try { post({ action: "getProvider" }); } catch (e) {} // key state + pill refresh before first chat
+          o.dataset.saved = "1";
+        } else if (pr) {
+          try { post({ action: "setProvider", provider: pr.value }); } catch (e) {}
         }
       };
       const tryFetch = () => {
@@ -1248,7 +1714,7 @@
       const k = o.querySelector("#obkey");
       if (k) k.addEventListener("keydown", (e) => { if (e.key === "Enter") { doSave(); page++; render(); } });
     };
-    const done = () => { localStorage.setItem("forge_onboarded","1"); o.remove(); intent.focus(); };
+    const done = () => { try { localStorage.setItem("forge_onboarded","1"); } catch (e) {} try { if (o.dataset.saved) post({ action: "getProvider" }); } catch (e2) {} o.remove(); refresh(); intent.focus(); };
     render();
     transcript.appendChild(o);
   }
@@ -1342,42 +1808,54 @@
   function hideChip() { const chip = $("chip"); chip.style.display = "none"; chip.innerHTML = ""; }
   $("attach").addEventListener("click", () => post({ action: "attach" }));
   $("regen").addEventListener("click", () => {
-    if (!hasBridge || working || !lastPrompt) return;
+    if (!hasBridge || working || !lastPrompt || lastPrompt.startsWith("/")) return;
     run(lastPrompt);
   });
 
   // Kilo-style revert: drop this turn and everything after, restore the text for editing.
   // The host clears its pending thread so the conversation continues from this point.
+  // One-step unrevert: removed nodes + session turns are stashed; /unrevert restores them.
   transcript.addEventListener("click", (e) => {
     const btn = e.target.closest(".revertbtn");
     if (!btn) return;
-    const turn = btn.closest(".turn");
-    if (!turn) return;
-    const bubble = turn.querySelector(".bubble.user");
-    const flat = [...transcript.querySelectorAll(".turn")];
-    const keep = Math.max(0, flat.indexOf(turn));
+    const turnEl = btn.closest(".turn");
+    if (!turnEl) return;
+    if (working || enhanceActive) { try { post({ action: "stop" }); } catch (err) {} }
+    if (enhanceActive) ebReset();
+    const bubble = turnEl.querySelector(":scope > .bubble.user");
+    const flat = [...transcript.querySelectorAll(".turn")].filter(x => x.querySelector(":scope > .bubble.user"));
+    const keep = Math.max(0, flat.indexOf(turnEl));
     post({ action: "revert", sid: sessionId, keep: keep });
+    let savedTurns = null;
     if (sessionId) {
       const all = loadSessions();
       const s = all.find(x => x.id === sessionId);
-      if (s) { s.turns = s.turns.slice(0, keep); s.updated = Date.now(); saveSessions(all); }
+      if (s) { savedTurns = s.turns.slice(keep); s.turns = s.turns.slice(0, keep); s.updated = Date.now(); saveSessions(all); }
     }
-    let nxt = turn.nextElementSibling;
-    while (nxt) { const rm = nxt; nxt = nxt.nextElementSibling; rm.remove(); }
-    turn.remove();
+    let top = turnEl;
+    while (top.parentElement && top.parentElement !== transcript) top = top.parentElement;
+    const removed = [];
+    let nxt = top.nextElementSibling;
+    while (nxt) { const rm = nxt; nxt = nxt.nextElementSibling; removed.push(rm); rm.remove(); }
+    removed.unshift(top); top.remove();
+    if (pendingCompact && !document.contains(pendingCompact.body)) pendingCompact = null;
+    if (thinkEl && !thinkEl.isConnected) thinkEl = null;
+    if (removed.length) lastReverted = { nodes: removed, refNext: nxt || null, sid: sessionId, turns: savedTurns };
+    else lastReverted = null;
     if (bubble) { intent.value = bubble.textContent; grow(); }
     preEnhance = null; $("enhanceUndo").style.display = "none";
-    turn = null; stopWords();
+    turn = null; thinkEl = null; working = false; stopWords();
+    clearFind(); closePops();
     intent.focus(); scroll(true);
   });
 
   $("scrolldown").addEventListener("click", () => {
     pinned = true; scroll(true); $("scrolldown").style.display = "none"; intent.focus();
   });
-  let preEnhance = null, enhanceActive = false, enhanceTimer = null, enhanceT0 = 0;
+  let preEnhance = null, enhanceActive = false, enhanceTimer = null, enhanceT0 = 0, enhanceDraft = "";
   const ebReset = () => {
     const eb = $("enhance");
-    enhanceActive = false;
+    enhanceActive = false; enhanceDraft = "";
     if (enhanceTimer) { clearInterval(enhanceTimer); enhanceTimer = null; }
     eb.classList.remove("busy"); eb.style.minWidth = ""; eb.disabled = false; eb.textContent = "✨ Enhance";
   };
@@ -1396,6 +1874,7 @@
       return;
     }
     preEnhance = null; $("enhanceUndo").style.display = "none";
+    enhanceDraft = draft;
     enhanceActive = true;
     eb.style.minWidth = eb.offsetWidth + "px"; // lock width: no contraction while busy
     eb.classList.add("busy"); eb.disabled = true;
@@ -1411,9 +1890,27 @@
 
   // ---- model picker (Kilo-style popover next to Attach) ----
   let curModel = null, curDynamic = false, chatModels = [];
-  const favKey = "forge_fav_models";
-  const getFavs = () => { try { return JSON.parse(localStorage.getItem(favKey)) || []; } catch (e) { return []; } };
-  const setFavs = (a) => { try { localStorage.setItem(favKey, JSON.stringify(a)); } catch (e) {} };
+  const favKey = "forge_fav_models", recKey = "forge_recent_models";
+  // Favorites/recents are {provider, model} so identical ids on different providers don't collide.
+  // Legacy plain-string entries migrate on read (match any provider).
+  const normFav = (a) => (Array.isArray(a) ? a : []).map(x => typeof x === "string" ? { p: null, m: x } : x).filter(x => x && x.m);
+  const getFavs = () => { try { return normFav(JSON.parse(localStorage.getItem(favKey))); } catch (e) { return []; } };
+  const setFavs = (a) => { try { safeSet(favKey, JSON.stringify(a)); } catch (e) {} };
+  const getRecents = () => { try { return normFav(JSON.parse(localStorage.getItem(recKey))); } catch (e) { return []; } };
+  const setRecents = (a) => { try { safeSet(recKey, JSON.stringify(a)); } catch (e) {} };
+  const favMatch = (f, id) => f.m === id && (!f.p || !curSlug || f.p === curSlug);
+  const isFav = (id) => getFavs().some(f => favMatch(f, id));
+  const toggleFav = (id) => {
+    const f = getFavs();
+    const i = f.findIndex(x => favMatch(x, id));
+    if (i >= 0) f.splice(i, 1); else f.push({ p: curSlug, m: id });
+    setFavs(f);
+  };
+  const pushRecent = (id) => {
+    const r = getRecents().filter(x => x.m !== id);
+    r.unshift({ p: curSlug, m: id });
+    setRecents(r.slice(0, 5));
+  };
   const shortName = (id) => String(id || "").split("/").pop();
   function renderPill() {
     $("modelname").textContent = curModel ? shortName(curModel) : "model";
@@ -1439,12 +1936,20 @@
     const list = $("mlist"); list.innerHTML = "";
     const query = String(q || "").toLowerCase();
     const match = (id) => !query || shortName(id).toLowerCase().includes(query) || String(id).toLowerCase().includes(query);
-    const favs = getFavs();
     const items = chatModels.filter(match);
-    const showFavs = !query && items.some(id => favs.includes(id));
+    const recents = getRecents().map(r => r.m).filter(id => items.includes(id));
+    const showFavs = !query && items.some(isFav);
+    const showRecents = !query && recents.length > 0;
+    const favRows = (id) => !isFav(id) && !(showRecents && recents.includes(id));
     const groups = [];
-    if (showFavs) groups.push({ label: "★ Favorites", rows: items.filter(id => favs.includes(id)) });
-    groups.push({ label: "Models", rows: query ? items : items.filter(id => !favs.includes(id)) });
+    if (showRecents) groups.push({ label: "🕘 Recent", rows: recents });
+    if (showFavs) groups.push({ label: "★ Favorites", rows: items.filter(isFav) });
+    const rest = query ? items : items.filter(favRows);
+    // Kilo parity: group the live list by vendor prefix when several vendors are present.
+    const vendor = (id) => { const s = String(id || ""); const i = s.indexOf("/"); if (i > 0) return s.slice(0, i); const j = s.indexOf("-"); return j > 0 ? s.slice(0, j) : "other"; };
+    const vendors = [...new Set(rest.map(vendor))];
+    if (!query && vendors.length > 1) vendors.sort().forEach(v => groups.push({ label: v, rows: rest.filter(id => vendor(id) === v) }));
+    else groups.push({ label: "Models", rows: rest });
     let shown = 0;
     groups.forEach(g => {
       if (!g.rows.length) return;
@@ -1454,7 +1959,7 @@
         const row = document.createElement("div");
         row.className = "mrow" + (id === curModel ? " active" : "");
         row.setAttribute("data-id", id);
-        const starred = favs.includes(id);
+        const starred = isFav(id);
         row.innerHTML = `<span class="mcheck">${id === curModel ? "✓" : ""}</span>` +
           `<span class="mname">${shortName(id).replace(/</g,"&lt;")}<small>${String(id).replace(/</g,"&lt;")}</small></span>` +
           `<button class="mstar${starred ? " on" : ""}" title="${starred ? "Unfavorite" : "Favorite"}">${starred ? "★" : "☆"}</button>`;
@@ -1462,11 +1967,12 @@
           const st = e.target.closest(".mstar");
           if (st) {
             e.stopPropagation();
-            const f = getFavs();
-            setFavs(starred ? f.filter(x => x !== id) : [...f, id]);
+            toggleFav(id);
             renderModelList($("msearch").value);
             return;
           }
+          pushRecent(id);
+          curModel = id; renderPill(); renderCtx(); // optimistic: pill follows the click, host confirms
           post({ action: "setModel", model: id });
           closeModels();
         });
@@ -1475,7 +1981,13 @@
     });
     if (!shown) {
       const em = document.createElement("div"); em.className = "mempty";
-      em.textContent = chatModels.length ? "No models match." : "No models loaded yet — hit Refresh.";
+      if (chatModels.length) {
+        em.textContent = "No models match — clear the search to see all.";
+        em.style.cursor = "pointer"; em.title = "Clear the search";
+        em.addEventListener("click", () => { $("msearch").value = ""; renderModelList(""); $("msearch").focus(); });
+      } else {
+        em.textContent = curDynamic ? "No models loaded yet — hit Refresh." : "One fixed model on this provider — nothing to load.";
+      }
       list.appendChild(em);
     }
     $("mcount").textContent = chatModels.length ? chatModels.length + " models" : "";
@@ -1490,15 +2002,20 @@
     if (e.key === "Escape") { e.stopPropagation(); closeModels(); return; }
     if (!rows.length) return;
     let i = rows.findIndex(r => r.classList.contains("kb"));
-    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-      e.preventDefault();
-      i = e.key === "ArrowDown" ? Math.min(rows.length - 1, i + 1) : Math.max(0, i - 1);
+    const move = (n) => {
+      i = Math.max(0, Math.min(rows.length - 1, n));
       rows.forEach(r => r.classList.remove("kb"));
       rows[i].classList.add("kb"); rows[i].scrollIntoView({ block: "nearest" });
-    } else if (e.key === "Enter") {
+    };
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
-      const pick = rows[i >= 0 ? i : 0] || rows.find(r => r.classList.contains("active"));
-      if (pick) { post({ action: "setModel", model: pick.getAttribute("data-id") }); closeModels(); }
+      move(e.key === "ArrowDown" ? i + 1 : (i < 0 ? rows.length - 1 : i - 1));
+    } else if (e.key === "Home") { e.preventDefault(); move(0); }
+    else if (e.key === "End") { e.preventDefault(); move(rows.length - 1); }
+    else if (e.key === "Enter") {
+      e.preventDefault();
+      const pick = (i >= 0 ? rows[i] : null) || rows.find(r => r.classList.contains("active")) || rows[0];
+      if (pick) { const id = pick.getAttribute("data-id"); pushRecent(id); curModel = id; renderPill(); renderCtx(); post({ action: "setModel", model: id }); closeModels(); }
     }
   });
   $("mrefresh").addEventListener("click", (e) => {

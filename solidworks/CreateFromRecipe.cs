@@ -48,6 +48,7 @@ namespace Forge.SolidWorks
         {
             string text = (intent ?? "").Trim();
             if (text.Length == 0) return false;
+            if (Regex.IsMatch(text, @"^\s*(review|inspect|show|check|analy[sz]e|explain|describe|what|how|is|are|list|tell)\b", RegexOptions.IgnoreCase)) return false;
             if (!CreateVerbRx.IsMatch(text)) return false;
             if (!ShapeNounRx.IsMatch(text)) return false;
             if (CreateGuardrail.UnsupportedCue(text) == null) return false; // bare primitive: existing path

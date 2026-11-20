@@ -2899,6 +2899,7 @@ namespace Forge.SolidWorks
         // ---- the runner: returns true if the pipeline handled the command; false => let the offline regex path try. ----
         private async Task<bool> RunViaPipeline(string intent, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken), string sid = null)
         {
+            ct.ThrowIfCancellationRequested(); // stop/new-chat wins before any COM or cloud work
             var doc = App?.ActiveDoc as IModelDoc2;
             if (doc == null) return false;   // no doc: let the legacy path show its guidance
 
@@ -5093,7 +5094,7 @@ namespace Forge.SolidWorks
             // HSpecs. These run BEFORE the cloud parse so the basic solids route even when the cloud is unreachable.
             // Specific-first: each fenced by its own noun, before the generic create_part. The plate cue uses the
             // widened local net (IsOfflinePlateIntent) so plain block/cube/rectangular phrasing still lands.
-            if (CreateSphere.IsIntent(intent))
+            if (CreateSphere.IsIntent(intent) && !IsEditPhrasing(intent))
             {
                 var spSpec = Specs().Find(s => s.Name == "create_sphere");
                 var spPlan = new IntentPlan { Confidence = 1.0 };
@@ -5108,7 +5109,7 @@ namespace Forge.SolidWorks
             // either, so a bare "make a washer" / "create a cone" would otherwise parse 0 ops. Specific-first, each
             // fenced by its own noun. tube/pipe MUST be claimed before the (widened) create_cylinder, whose matcher also
             // fires on tube|pipe — so the tube family sits above the cylinder intercept below.
-            if (CreateFlange.IsIntent(intent))
+            if (CreateFlange.IsIntent(intent) && !IsEditPhrasing(intent))
             {
                 var flSpec = Specs().Find(s => s.Name == "create_flange");
                 var flPlan = new IntentPlan { Confidence = 1.0 };
@@ -5118,7 +5119,7 @@ namespace Forge.SolidWorks
                 return true;
             }
 
-            if (CreateCone.IsIntent(intent))
+            if (CreateCone.IsIntent(intent) && !IsEditPhrasing(intent))
             {
                 var cnSpec = Specs().Find(s => s.Name == "create_cone");
                 var cnPlan = new IntentPlan { Confidence = 1.0 };
@@ -5128,7 +5129,7 @@ namespace Forge.SolidWorks
                 return true;
             }
 
-            if (CreateTorus.IsIntent(intent))
+            if (CreateTorus.IsIntent(intent) && !IsEditPhrasing(intent))
             {
                 var toSpec = Specs().Find(s => s.Name == "create_torus");
                 var toPlan = new IntentPlan { Confidence = 1.0 };
@@ -5138,7 +5139,7 @@ namespace Forge.SolidWorks
                 return true;
             }
 
-            if (CreateTube.IsIntent(intent))
+            if (CreateTube.IsIntent(intent) && !IsEditPhrasing(intent))
             {
                 var tuSpec = Specs().Find(s => s.Name == "create_tube");
                 var tuPlan = new IntentPlan { Confidence = 1.0 };
@@ -5148,7 +5149,7 @@ namespace Forge.SolidWorks
                 return true;
             }
 
-            if (CreateCylinder.IsIntent(intent))
+            if (CreateCylinder.IsIntent(intent) && !IsEditPhrasing(intent))
             {
                 var cySpec = Specs().Find(s => s.Name == "create_cylinder");
                 var cyPlan = new IntentPlan { Confidence = 1.0 };
@@ -5158,7 +5159,7 @@ namespace Forge.SolidWorks
                 return true;
             }
 
-            if (IsOfflinePlateIntent(intent))
+            if (IsOfflinePlateIntent(intent) && !IsEditPhrasing(intent))
             {
                 var plSpec = Specs().Find(s => s.Name == "create_plate");
                 var plPlan = new IntentPlan { Confidence = 1.0 };
@@ -5560,6 +5561,7 @@ namespace Forge.SolidWorks
         //      compound (handled, or reported honestly); false lets the single-shape paths + guardrail keep their behaviour.
         private async Task<bool> TryRunCompoundCreate(string intent)
         {
+            if (IsEditPhrasing(intent)) return false; // "build up the flange and …": an edit, not a two-step from-scratch
             var comp = CompoundCreate.Parse(intent);
             if (comp == null || !comp.IsCompound || comp.Error != null) return false;
 
@@ -5612,15 +5614,17 @@ namespace Forge.SolidWorks
         {
             private readonly System.Threading.SynchronizationContext _ui;
             private readonly Action<object> _send;
+            private readonly Func<bool> _alive; // superseded runs go silent: their deltas must not interleave the new run's thinking block
             private readonly System.Diagnostics.Stopwatch _sw;
             private readonly System.Text.StringBuilder _buf = new System.Text.StringBuilder();
             private readonly string _label;
             private DateTime _lastFlush = DateTime.MinValue;
 
-            public ThinkRelay(string label, Action<object> send)
+            public ThinkRelay(string label, Action<object> send, Func<bool> alive = null)
             {
                 _label = label ?? "Thinking";
                 _send = send;
+                _alive = alive;
                 try { _ui = System.Threading.SynchronizationContext.Current; } catch { }
                 _sw = System.Diagnostics.Stopwatch.StartNew();
             }
@@ -5628,12 +5632,15 @@ namespace Forge.SolidWorks
             {
                 Post(new { type = "thinkStart", model = model, label = _label });
             }
+            private bool _ended; // End() won: late deltas are dropped, never posted after thinkEnd
             public void OnDelta(string kind, string text)
             {
                 if (kind != "reasoning" || string.IsNullOrEmpty(text)) return;
+                try { if (_alive != null && !_alive()) return; } catch { }
                 bool flush = false;
                 lock (_buf)
                 {
+                    if (_ended) return;
                     _buf.Append(text);
                     if ((DateTime.UtcNow - _lastFlush).TotalMilliseconds >= 500) { _lastFlush = DateTime.UtcNow; flush = true; }
                 }
@@ -5647,6 +5654,7 @@ namespace Forge.SolidWorks
             }
             public void End(bool interrupted)
             {
+                lock (_buf) { if (_ended) return; _ended = true; } // idempotent: double-End sends one thinkEnd
                 Flush();
                 try { _sw.Stop(); } catch { }
                 Post(new { type = "thinkEnd", seconds = (int)_sw.Elapsed.TotalSeconds, interrupted = interrupted });
@@ -5668,15 +5676,19 @@ namespace Forge.SolidWorks
         // deterministic create paths + guardrail refusal (bare primitives, keyless chat).
         private async Task<bool> TryRunCreateRecipe(string intent, System.Threading.CancellationToken ct)
         {
+            if (IsEditPhrasing(intent)) return false; // create-verb edit ("build up …", "make this thicker"): never a recipe
             if (!CreateFromRecipe.IsRecipeCreate(intent)) return false;
             if (ProviderFactoryAvailable() == false) return false;
 
+            string myIdR = _currentRunId; // a newer Generate owns the panel: stay silent when stale
             try { PanelCapture.Log("parse", new { intent, action = "create_recipe", confidence = 1.0, routed = "create_recipe", source = "recipe-create" }); } catch { }
             Func<string, string, string, string, Task> emitR = async (a, g, s, r) =>
             { Send(new { type = "step", agent = a, gloss = g, state = s, result = r }); await Task.Delay(60); };
             CreateFromRecipe.RecipeCreateOutcome rc;
             try { rc = await CreateFromRecipe.Run(App, intent, emitR, ct); }
-            catch (OperationCanceledException) { Send(new { type = "answer", answer = "Interrupted — nothing was built. Edit and resend, or ↩ revert to an earlier prompt.", runId = _currentRunId, handler = "create_recipe" }); return true; }
+            catch (OperationCanceledException) { if (myIdR == _currentRunId) Send(new { type = "answer", answer = "Interrupted — nothing was built. Edit and resend, or ↩ revert to an earlier prompt.", runId = _currentRunId, handler = "create_recipe" }); return true; }
+            catch (Exception ex) { if (myIdR == _currentRunId) Send(new { type = "answer", answer = "Recipe build failed (" + ex.GetType().Name + ": " + ex.Message + ") — nothing was built; edit and resend.", runId = _currentRunId, handler = "create_recipe" }); return true; }
+            if (myIdR != _currentRunId) return true; // superseded: don't attribute our answer to the new run
             if (rc == null || !rc.Attempted) return false; // no provider / not claimable: existing paths keep behaviour
             if (!string.IsNullOrEmpty(rc.Error))
             {
@@ -5701,19 +5713,34 @@ namespace Forge.SolidWorks
             if (!McpBuild.IsMcpCreate(intent)) return false;
             if (ProviderFactoryAvailable() == false) return false;
 
+            string myId = _currentRunId; // a newer Generate owns the panel: stay silent when stale
             try { PanelCapture.Log("parse", new { intent, action = "mcp_build", confidence = 1.0, routed = "mcp_build", source = "mcp-build" }); } catch { }
             Func<string, string, string, string, Task> emitM = async (a, g, s, r) =>
             { Send(new { type = "step", agent = a, gloss = g, state = s, result = r }); await Task.Delay(60); };
-            var relay = new ThinkRelay("Planning", msg => Send(msg));
-            relay.Start(Forge.Providers.ProviderFactory.CurrentModel());
+            var relay = new ThinkRelay("Planning", msg => Send(msg), () => myId == _currentRunId);
+            try { relay.Start(Forge.Providers.ProviderFactory.CurrentModel()); } catch { }
             McpBuild.McpBuildOutcome mc;
+            // The approval gate posts its cards through this sender: without it the panel never
+            // shows the approve/reject card and any gated tool hangs until stop.
+            var mySender = new Action<JObject>(card => Send(card));
+            McpBuild.CardSender = mySender;
             try { mc = await McpBuild.RunAgent(intent, emitM, ct, relay.OnDelta, sid); relay.End(false); }
             catch (OperationCanceledException)
             {
                 relay.End(true);
-                Send(new { type = "answer", answer = "Interrupted — partial thinking is kept above. ↩ revert a turn, or edit and resend.", runId = _currentRunId, handler = "mcp_build" });
+                if (myId == _currentRunId)
+                    Send(new { type = "answer", answer = "Interrupted — partial thinking is kept above. ↩ revert a turn, or edit and resend.", runId = _currentRunId, handler = "mcp_build" });
                 return true;
             }
+            catch (Exception ex)
+            {
+                try { relay.End(true); } catch { }
+                if (myId == _currentRunId)
+                    Send(new { type = "answer", answer = "Build failed (" + ex.GetType().Name + ": " + ex.Message + ") — what built so far stays open; edit and resend.", runId = _currentRunId, handler = "mcp_build" });
+                return true;
+            }
+            finally { if (McpBuild.CardSender == mySender) McpBuild.CardSender = null; }
+            if (myId != _currentRunId) return true; // superseded: don't attribute our answer to the new run
             if (mc == null || !mc.Attempted) return false; // no provider: existing paths keep behaviour
             if (!string.IsNullOrEmpty(mc.Error))
             {
@@ -5767,13 +5794,13 @@ namespace Forge.SolidWorks
             // "plate" word — still lands on the from-scratch plate solid offline. The ported CreatePlate.IsIntent stays
             // untouched. tube/pipe is claimed by create_tube (the widened create_cylinder matcher also fires on
             // tube|pipe), so the tube family MUST be tested before create_cylinder.
-            if (CreateSphere.IsIntent(i)) return "create_sphere";
-            if (CreateFlange.IsIntent(i)) return "create_flange";
-            if (CreateCone.IsIntent(i)) return "create_cone";
-            if (CreateTorus.IsIntent(i)) return "create_torus";
-            if (CreateTube.IsIntent(i)) return "create_tube";
-            if (CreateCylinder.IsIntent(i)) return "create_cylinder";
-            if (IsOfflinePlateIntent(i)) return "create_plate";
+            if (CreateSphere.IsIntent(i) && !IsEditPhrasing(i)) return "create_sphere";
+            if (CreateFlange.IsIntent(i) && !IsEditPhrasing(i)) return "create_flange";
+            if (CreateCone.IsIntent(i) && !IsEditPhrasing(i)) return "create_cone";
+            if (CreateTorus.IsIntent(i) && !IsEditPhrasing(i)) return "create_torus";
+            if (CreateTube.IsIntent(i) && !IsEditPhrasing(i)) return "create_tube";
+            if (CreateCylinder.IsIntent(i) && !IsEditPhrasing(i)) return "create_cylinder";
+            if (IsOfflinePlateIntent(i) && !IsEditPhrasing(i)) return "create_plate";
             // Reference-plane cue ("create/make a plane") — NOT a plate/block solid. Action value matches the
             // create_reference_plane HSpec's Actions[] exactly (CreateRefPlane.IsCreateRefPlaneIntent already
             // excludes remove/delete phrasing).
@@ -5998,6 +6025,23 @@ namespace Forge.SolidWorks
             bool noun = Regex.IsMatch(i, @"\b(plate|panel|slab|blank|block|cube|rectangular)\b");
             bool verb = Regex.IsMatch(i, @"\b(create|make|build|new|start)\b");
             return verb && noun;
+        }
+
+        // Edit-flavored phrasing that still carries a create verb ("build up the flange",
+        // "make this thicker", "make the length 100mm"). The create-first hooks (recipe/compound/
+        // single-shape) must not claim these: a from-scratch create closes the current doc, so an
+        // edit misrouted here destroys context. Mirrors the McpBuild.IsMcpCreate exclusions; checked
+        // at the intercepts because the per-shape IsIntent matchers accept the same verbs. Narrow by
+        // construction (demonstrative + comparative, "the X thicker", "make it N"), so bare creates
+        // ("make the flange 40mm diameter", "create a thicker plate") keep routing.
+        private static bool IsEditPhrasing(string intent)
+        {
+            if (string.IsNullOrEmpty(intent)) return false;
+            if (Regex.IsMatch(intent, @"\bbuil[dt]\s+up\b", RegexOptions.IgnoreCase)) return true;
+            if (Regex.IsMatch(intent, @"\b(this|that|these|those|it)\b.{0,20}\b(thicker|thinner|taller|shorter|wider|narrower|larger|smaller|longer)\b", RegexOptions.IgnoreCase)) return true;
+            if (Regex.IsMatch(intent, @"\b(the|this|that)\b[^,.;]{0,25}\b(thicker|thinner)\b", RegexOptions.IgnoreCase)) return true;
+            if (Regex.IsMatch(intent, @"\bmake\s+it\s+\d", RegexOptions.IgnoreCase)) return true;
+            return false;
         }
 
         private static bool IsAffirmative(string s)

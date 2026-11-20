@@ -29,6 +29,9 @@ namespace Forge.SolidWorks
         private static readonly ConcurrentDictionary<int, TaskCompletionSource<string>> Pending =
             new ConcurrentDictionary<int, TaskCompletionSource<string>>();
         private static JArray CachedTools;
+        // Serializes EnsureStarted handshakes: without this two concurrent callers each
+        // start a server, the second kills the first's process, and both handshakes fail.
+        private static readonly SemaphoreSlim StartGate = new SemaphoreSlim(1, 1);
 
         public class McpException : Exception
         {
@@ -67,50 +70,62 @@ namespace Forge.SolidWorks
 
         public static bool IsRunning
         {
-            get { lock (Gate) { return Proc != null && !Proc.HasExited; } }
+            get { lock (Gate) { try { return Proc != null && !Proc.HasExited; } catch { return false; } } }
         }
 
         /// <summary>Start the server + handshake if needed. Throws McpException with a setup hint on failure.</summary>
         public static async Task EnsureStartedAsync(int timeoutMs = 0)
         {
-            lock (Gate)
-            {
-                if (Proc != null && !Proc.HasExited) return;
-                StartLocked(timeoutMs > 0 ? timeoutMs : LoadConfig().StartTimeoutMs);
-            }
-            // Handshake outside the lock (IO).
+            int initTimeout;
+            await StartGate.WaitAsync().ConfigureAwait(false);
             try
             {
-                var init = new JObject
+                lock (Gate)
                 {
-                    ["protocolVersion"] = "2024-11-05",
-                    ["capabilities"] = new JObject(),
-                    ["clientInfo"] = new JObject { ["name"] = "Forge", ["version"] = "1.0" }
-                };
-                JObject res = await RpcAsync("initialize", init, 60000);
-                if (res == null) throw new McpException("MCP initialize returned nothing.");
-                await NotifyAsync("notifications/initialized", new JObject());
+                    if (Proc != null) { try { if (!Proc.HasExited) return; } catch { } }
+                    int want = timeoutMs > 0 ? timeoutMs : LoadConfig().StartTimeoutMs;
+                    if (want < 30000) want = 60000; // StartLocked ignores <30s; handshake must still bound itself
+                    initTimeout = want;
+                    StartLocked();
+                }
+                // Handshake outside the process lock but inside the start gate (IO).
+                try
+                {
+                    var init = new JObject
+                    {
+                        ["protocolVersion"] = "2024-11-05",
+                        ["capabilities"] = new JObject(),
+                        ["clientInfo"] = new JObject { ["name"] = "Forge", ["version"] = "1.0" }
+                    };
+                    JObject res = await RpcAsync("initialize", init, initTimeout);
+                    if (res == null) throw new McpException("MCP initialize returned nothing.");
+                    await NotifyAsync("notifications/initialized", new JObject());
+                }
+                catch (Exception ex)
+                {
+                    Stop();
+                    if (ex is McpException) throw;
+                    throw new McpException("MCP handshake failed: " + ex.Message + " — run `uvx solidworks-mcp --selftest` with SolidWorks open and retry.");
+                }
             }
-            catch (Exception ex)
-            {
-                Stop();
-                if (ex is McpException) throw;
-                throw new McpException("MCP handshake failed: " + ex.Message + " — run `uvx solidworks-mcp --selftest` with SolidWorks open and retry.");
-            }
+            finally { try { StartGate.Release(); } catch { } }
         }
 
-        private static void StartLocked(int startTimeoutMs)
+        private static void StartLocked()
         {
             StopLocked();
             var cfg = LoadConfig();
             var psi = new ProcessStartInfo
             {
                 FileName = cfg.Command,
-                Arguments = string.Join(" ", cfg.Args),
+                // Quote args containing spaces so installs under e.g. "C:\Program Files" launch.
+                Arguments = string.Join(" ", Array.ConvertAll(cfg.Args, a => a.Contains(" ") && !a.StartsWith("\"") ? "\"" + a + "\"" : a)),
                 UseShellExecute = false,
                 RedirectStandardInput = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
                 CreateNoWindow = true
             };
             try
@@ -127,17 +142,18 @@ namespace Forge.SolidWorks
             }
 
             ReaderThread = new Thread(ReaderLoop) { IsBackground = true, Name = "forge-mcp-reader" };
-            ReaderThread.Start();
+            ReaderThread.Start(Proc); // pass the process: the field may be replaced by a restart
             DrainThread = new Thread(DrainLoop) { IsBackground = true, Name = "forge-mcp-stderr" };
             DrainThread.Start(Proc.StandardError);
         }
 
-        private static void ReaderLoop()
+        private static void ReaderLoop(object state)
         {
+            var proc = state as Process;
             try
             {
                 string line;
-                var reader = Proc.StandardOutput;
+                var reader = proc != null ? proc.StandardOutput : Proc.StandardOutput;
                 while ((line = reader.ReadLine()) != null)
                 {
                     if (string.IsNullOrWhiteSpace(line)) continue;
@@ -148,7 +164,10 @@ namespace Forge.SolidWorks
                         var msg = JObject.Parse(line);
                         var jt = msg["id"];
                         if (jt == null || jt.Type == JTokenType.Null) continue; // notification from server: ignore
-                        id = jt.Value<int>();
+                        // Servers may echo string ids ("12"): never drop a reply on a cast.
+                        if (jt.Type == JTokenType.Integer) id = jt.Value<int>();
+                        else if (jt.Type == JTokenType.String) { if (!int.TryParse((string)jt, out id)) continue; }
+                        else { try { id = Convert.ToInt32(((JValue)jt).Value); } catch { continue; } }
                         Pending.TryRemove(id, out tcs);
                     }
                     catch { continue; }
@@ -156,11 +175,15 @@ namespace Forge.SolidWorks
                 }
             }
             catch { }
-            // Server died: fail everything outstanding.
-            foreach (var kv in Pending)
+            // Server died: fail everything outstanding. Snapshot keys first so a
+            // concurrent restart's new ids (added after the death) are not stolen.
+            int[] dead;
+            try { dead = new System.Collections.Generic.List<int>(Pending.Keys).ToArray(); }
+            catch { dead = new int[0]; }
+            foreach (int key in dead)
             {
                 TaskCompletionSource<string> tcs;
-                if (Pending.TryRemove(kv.Key, out tcs))
+                if (Pending.TryRemove(key, out tcs))
                     try { tcs.TrySetException(new McpException("MCP server exited (is SolidWorks still running?).")); } catch { }
             }
         }
@@ -178,12 +201,14 @@ namespace Forge.SolidWorks
 
         private static void StopLocked()
         {
-            CachedTools = null;
+            CachedTools = null; // invalidate: a restarted server may serve a different tool set
             foreach (var kv in Pending)
             {
                 TaskCompletionSource<string> tcs;
                 if (Pending.TryRemove(kv.Key, out tcs))
-                    try { tcs.TrySetCanceled(); } catch { }
+                    // Fail with a real error, not TaskCanceledException: waiters report
+                    // "server stopped" instead of a bare "a task was canceled".
+                    try { tcs.TrySetException(new McpException("MCP server stopped.")); } catch { }
             }
             try { if (Stdin != null) Stdin.Close(); } catch { }
             Stdin = null;
@@ -214,6 +239,8 @@ namespace Forge.SolidWorks
         /// <summary>Raw JSON-RPC call. Returns the `result` object (throws on error member / timeout).</summary>
         public static async Task<JObject> RpcAsync(string method, JObject p, int timeoutMs)
         {
+            if (timeoutMs <= 0) timeoutMs = 60000; // Task.Delay throws on 0/negative: bound it instead
+            if (string.IsNullOrWhiteSpace(method)) throw new McpException("MCP method must not be empty.");
             int id = Interlocked.Increment(ref NextId);
             var msg = new JObject { ["jsonrpc"] = "2.0", ["id"] = id, ["method"] = method };
             if (p != null) msg["params"] = p;
@@ -235,17 +262,24 @@ namespace Forge.SolidWorks
                     throw new McpException("MCP write failed: " + ex.Message);
                 }
             }
-            var winner = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
+            // Cancellable delay: a bare Task.Delay(timeoutMs) leaves a Timer queued for the
+            // full timeout (300s on tools/call) even when the reply arrives in ms.
+            object winner;
+            using (var timeoutCts = new CancellationTokenSource())
+            {
+                winner = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs, timeoutCts.Token)).ConfigureAwait(false);
+                try { timeoutCts.Cancel(); } catch { }
+            }
             if (winner != tcs.Task)
             {
                 TaskCompletionSource<string> dropped;
                 Pending.TryRemove(id, out dropped);
                 throw new McpException("MCP `" + method + "` timed out after " + (timeoutMs / 1000) + "s.");
             }
-            string line = await tcs.Task;
+            string line = await tcs.Task.ConfigureAwait(false);
             var resp = JObject.Parse(line);
             var err = resp["error"];
-            if (err != null) throw new McpException("MCP error: " + (string)err["message"] ?? err.ToString());
+            if (err != null) throw new McpException("MCP error: " + ((string)err["message"] ?? err.ToString()));
             return resp["result"] as JObject;
         }
 
@@ -254,7 +288,10 @@ namespace Forge.SolidWorks
             await EnsureStartedAsync();
             if (CachedTools != null) return CachedTools;
             JObject res = await RpcAsync("tools/list", new JObject(), 60000);
-            var tools = res["tools"] as JArray ?? new JArray();
+            // A null/missing result must not NRE here, and an empty list must not be
+            // cached: otherwise one malformed reply poisons every later call.
+            var tools = res != null ? res["tools"] as JArray : null;
+            if (tools == null || tools.Count == 0) return new JArray();
             CachedTools = tools;
             return tools;
         }
@@ -271,6 +308,8 @@ namespace Forge.SolidWorks
             var p = new JObject { ["name"] = name };
             p["arguments"] = args ?? new JObject();
             JObject res = await RpcAsync("tools/call", p, timeoutMs);
+            // A null result is a broken server reply: fail loudly, not Ok=true with empty text.
+            if (res == null) throw new McpException("MCP `tools/call` returned an empty result.");
             var out_ = new ToolResult();
             try
             {
@@ -284,7 +323,9 @@ namespace Forge.SolidWorks
                         if ((string)t["type"] == "text") sb.Append((string)t["text"]);
                     }
                 out_.Text = sb.ToString();
-                if (res["isError"] != null && res["isError"].Value<bool>()) out_.Ok = false;
+                bool isErr = false;
+                try { isErr = res["isError"] != null && res["isError"].Value<bool>(); } catch { }
+                if (isErr) out_.Ok = false;
                 if (out_.Text.Contains("\"ok\": false") || out_.Text.Contains("\"ok\":false")) out_.Ok = false;
             }
             catch { out_.Text = res != null ? res.ToString() : ""; }
