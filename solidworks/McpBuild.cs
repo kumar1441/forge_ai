@@ -573,10 +573,11 @@ namespace Forge.SolidWorks
             JArray tools;
             try
             {
-                await McpBridge.EnsureStartedAsync();
-                tools = await McpBridge.ListToolsAsync();
+                await McpBridge.EnsureStartedAsync(0, ct);
+                tools = await McpBridge.ListToolsAsync(ct);
                 if (tools == null || tools.Count == 0) throw new McpBridge.McpException("tool list came back empty.");
             }
+            catch (OperationCanceledException) { outcome.Error = "INTERRUPTED"; return outcome; }
             catch (Exception ex)
             {
                 outcome.Error = "Couldn't start the SolidWorks-MCP server: " + ex.Message;
@@ -648,12 +649,9 @@ namespace Forge.SolidWorks
                 }
                 try
                 {
-                    // Cancellable mid-flight like the agent loop: stop abandons the wait instead
-                    // of hanging on the server call's own (minutes-long) timeout.
-                    var callTask = McpBridge.CallToolAsync(tool, args);
-                    await Task.WhenAny(callTask, Task.Delay(-1, ct));
-                    if (!callTask.IsCompleted) throw new OperationCanceledException(ct);
-                    r = await callTask;
+                    // Cancellable mid-flight: stop throws out of the server call itself instead of
+                    // abandoning the wait on its (minutes-long) timeout — no orphaned unobserved task.
+                    r = await McpBridge.CallToolAsync(tool, args, 300000, ct);
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
@@ -703,10 +701,11 @@ namespace Forge.SolidWorks
             JArray tools;
             try
             {
-                await McpBridge.EnsureStartedAsync();
-                tools = await McpBridge.ListToolsAsync();
+                await McpBridge.EnsureStartedAsync(0, ct);
+                tools = await McpBridge.ListToolsAsync(ct);
                 if (tools == null || tools.Count == 0) throw new McpBridge.McpException("tool list came back empty.");
             }
+            catch (OperationCanceledException) { outcome.Error = "INTERRUPTED"; return outcome; }
             catch (Exception ex)
             {
                 outcome.Error = "Couldn't start the SolidWorks-MCP server: " + ex.Message;
@@ -859,11 +858,10 @@ namespace Forge.SolidWorks
                         if (gate != null) r = gate;
                         else
                         {
-                            // Cancellable mid-flight: an orphaned server call is discarded, never applied twice.
-                            var callTask = McpBridge.CallToolAsync(c.Name, args);
-                            var finished = await Task.WhenAny(callTask, Task.Delay(-1, ct));
-                            if (finished != callTask) throw new OperationCanceledException(ct);
-                            try { r = await callTask; }
+                            // Cancellable mid-flight inside the bridge call: no orphaned server wait is
+                            // abandoned (and none applied twice) — stop throws before any history append.
+                            try { r = await McpBridge.CallToolAsync(c.Name, args, 300000, ct); }
+                            catch (OperationCanceledException) { throw; }
                             catch (Exception ex) { r = new McpBridge.ToolResult { Ok = false, Text = "transport failed: " + ex.Message }; }
                         }
                         string text = r.Text ?? "";
@@ -914,13 +912,15 @@ namespace Forge.SolidWorks
                 ct.ThrowIfCancellationRequested();
                 try
                 {
-                    var r = await McpBridge.CallToolAsync(probe, new JObject(), 120000);
+                    // ct-bound: stop during the verify probes interrupts instead of hanging up to 120s each.
+                    var r = await McpBridge.CallToolAsync(probe, new JObject(), 120000, ct);
                     if (r.Ok && !string.IsNullOrWhiteSpace(r.Text))
                     {
                         string t = r.Text;
                         return t.Length > 300 ? t.Substring(0, 300) + "…" : t;
                     }
                 }
+                catch (OperationCanceledException) { throw; }
                 catch { }
             }
             return null;

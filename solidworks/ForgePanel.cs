@@ -329,6 +329,10 @@ namespace Forge.SolidWorks
                 }
                 else if (action == "attach") DoAttach();
                 else if (action == "clearAttach") { _attachedFile = null; lock (_mentionedFiles) { _mentionedFiles.Clear(); } Send(new { type = "attachCleared" }); }
+                else if (action == "revokeShare")   // no server revoke route exists in this client: be honest, links auto-expire
+                {
+                    Send(new { type = "answer", answer = "Revoke isn't wired to the share server in this build — shared links expire automatically after 7 days." });
+                }
 
                 // @-mention file search (Kilo parity): open SolidWorks documents first (most likely
                 // targets), then the active document's folder (depth 2, CAD files first), filtered by q.
@@ -508,6 +512,16 @@ namespace Forge.SolidWorks
                     {
                         SaveProviderKey(provider, key.Trim(), model);
                         Send(new { type = "answer", answer = "Provider key saved — encrypted locally (DPAPI), never leaves this machine." });
+                        // Confirm the new key state to the panel (pill/ctx/settings) directly:
+                        // the panel's follow-up getProvider can race this handler on a busy UI thread.
+                        try
+                        {
+                            var scfg = ReadForgeConfig();
+                            string sp2 = (string)scfg["provider"], sbu2 = (string)scfg["baseUrl"];
+                            string sslug2 = PresetSlugFor(sp2, sbu2);
+                            Send(new { type = "provider", slug = sslug2, provider = sp2, baseUrl = sbu2, model = (string)scfg["model"], dynamic = IsDynamicProvider(sp2), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(sslug2, sp2)) });
+                        }
+                        catch { }
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't save the key: " + ex.Message }); }
                 }
@@ -520,8 +534,9 @@ namespace Forge.SolidWorks
                     string key = null, provider = null;
                     try { key = (string)msg.key; } catch { }
                     try { provider = (string)msg.provider; } catch { }
-                    var preset = ProviderPresetFor((provider ?? "").Trim().ToLowerInvariant());
-                    if (string.IsNullOrWhiteSpace(key)) key = StoredProviderKey(preset.Provider);
+                    string fslug = (provider ?? "").Trim().ToLowerInvariant();
+                    var preset = ProviderPresetFor(fslug);
+                    if (string.IsNullOrWhiteSpace(key)) key = StoredProviderKeyForSlug(fslug, preset.Provider);
                     if (string.IsNullOrWhiteSpace(key))
                     { Send(new { type = "models", models = new string[0], error = "nokey" }); return; }
                     try
@@ -541,7 +556,8 @@ namespace Forge.SolidWorks
                         var cfg = ReadForgeConfig();
                         string p = (string)cfg["provider"];
                         string bu = (string)cfg["baseUrl"];
-                        Send(new { type = "provider", slug = PresetSlugFor(p, bu), provider = p, baseUrl = bu, model = (string)cfg["model"], dynamic = IsDynamicProvider(p), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKey(p)) });
+                        string gslug = PresetSlugFor(p, bu);
+                        Send(new { type = "provider", slug = gslug, provider = p, baseUrl = bu, model = (string)cfg["model"], dynamic = IsDynamicProvider(p), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(gslug, p)) });
                         Send(new { type = "rules", allow = McpBuild.AlwaysList(), deny = McpBuild.DenyList() });
                     }
                     catch (Exception ex) { Send(new { type = "provider", error = ex.Message }); }
@@ -557,13 +573,28 @@ namespace Forge.SolidWorks
                             throw new Exception("Unknown provider '" + provider + "'.");
                         var preset = ProviderPresetFor(slug);
                         var cfg = ReadForgeConfig();
+                        // Remember the outgoing provider's model so switching back restores
+                        // the user's pick instead of resetting to the preset default.
+                        try
+                        {
+                            string prevSlug = PresetSlugFor((string)cfg["provider"], (string)cfg["baseUrl"]);
+                            string prevModel = (string)cfg["model"];
+                            if (!string.IsNullOrWhiteSpace(prevSlug) && !string.IsNullOrWhiteSpace(prevModel)
+                                && !string.Equals(prevSlug, slug, StringComparison.OrdinalIgnoreCase))
+                                cfg["model_" + prevSlug] = prevModel.Trim();
+                        }
+                        catch { }
                         cfg["provider"] = preset.Provider;
                         cfg["baseUrl"] = preset.BaseUrl;
-                        cfg["model"] = preset.Model;
+                        string remembered = null;
+                        try { remembered = (string)cfg["model_" + slug]; } catch { }
+                        cfg["model"] = !string.IsNullOrWhiteSpace(remembered) ? remembered.Trim() : preset.Model;
                         WriteForgeConfig(cfg);
                         string p = preset.Provider;
-                        Send(new { type = "provider", slug = slug, provider = p, baseUrl = preset.BaseUrl, model = preset.Model, dynamic = IsDynamicProvider(p), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKey(p)) });
-                        Send(new { type = "answer", answer = "Provider switched to " + slug + " (" + preset.Model + ") — pick another model from the pill if you like." });
+                        string keptModel = null;
+                        try { keptModel = (string)cfg["model"]; } catch { }
+                        Send(new { type = "provider", slug = slug, provider = p, baseUrl = preset.BaseUrl, model = keptModel ?? preset.Model, dynamic = IsDynamicProvider(p), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(slug, p)) });
+                        Send(new { type = "answer", answer = "Provider switched to " + slug + " (" + (keptModel ?? preset.Model) + ") — pick another model from the pill if you like." });
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't switch provider: " + ex.Message }); }
                 }
@@ -576,7 +607,7 @@ namespace Forge.SolidWorks
                         string baseUrl = (string)cfg["baseUrl"];
                         if (!IsDynamicProvider(p)) throw new Exception("This provider has a fixed model.");
                         if (string.IsNullOrWhiteSpace(baseUrl)) throw new Exception("No provider configured yet.");
-                        string key = StoredProviderKey(p);
+                        string key = StoredProviderKeyForSlug(PresetSlugFor(p, baseUrl), p);
                         if (string.IsNullOrWhiteSpace(key)) throw new Exception("No provider key stored — save one first.");
                         var ids = await FetchServableModels(baseUrl, key.Trim());
                         Send(new { type = "models", models = ids, selected = (string)cfg["model"] });
@@ -593,9 +624,16 @@ namespace Forge.SolidWorks
                     {
                         var cfg = ReadForgeConfig();
                         cfg["model"] = model.Trim();
+                        try
+                        {
+                            string sms = PresetSlugFor((string)cfg["provider"], (string)cfg["baseUrl"]);
+                            if (!string.IsNullOrWhiteSpace(sms)) cfg["model_" + sms] = model.Trim();
+                        }
+                        catch { }
                         WriteForgeConfig(cfg);
                         string sp = (string)cfg["provider"], sbu = (string)cfg["baseUrl"];
-                        Send(new { type = "provider", slug = PresetSlugFor(sp, sbu), provider = sp, baseUrl = sbu, model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKey(sp)) });
+                        string smslug = PresetSlugFor(sp, sbu);
+                        Send(new { type = "provider", slug = smslug, provider = sp, baseUrl = sbu, model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(smslug, sp)) });
                         Send(new { type = "answer", answer = "Model switched to " + model.Trim() + " — it applies to the next run." });
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't switch model: " + ex.Message }); }
@@ -761,10 +799,18 @@ namespace Forge.SolidWorks
         //      {provider, baseUrl, model} â€” the API key is NEVER in the file â€” and stores the key via
         //      KeyStore (DPAPI, current-user). Presets match the README's student instructions exactly so
         //      the onboarding key box configures a real, working provider. ----
+        private static readonly string[] KnownSlugs = { "deepseek", "openrouter", "nvidia", "openai", "anthropic", "ollama" };
+
         private static void SaveProviderKey(string provider, string key, string model = null)
         {
-            var preset = ProviderPresetFor((provider ?? "").Trim().ToLowerInvariant());
-            KeyStore.Save(preset.Provider, key);
+            string slug = (provider ?? "").Trim().ToLowerInvariant();
+            if (Array.IndexOf(KnownSlugs, slug) < 0)
+                throw new Exception("Unknown provider '" + provider + "'.");
+            var preset = ProviderPresetFor(slug);
+            // Per-slug key file: every OpenAI-compatible preset used to share one
+            // "openai-compatible.key", so saving an NVIDIA key silently wiped the
+            // DeepSeek key (and vice versa). Lookups try the slug file first.
+            KeyStore.Save(slug, key);
             string dir = Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData), "Forge");
             Directory.CreateDirectory(dir);
             string cfgPath = Path.Combine(dir, "config.json");
@@ -773,6 +819,7 @@ namespace Forge.SolidWorks
             cfg["provider"] = preset.Provider;
             cfg["baseUrl"] = preset.BaseUrl;
             cfg["model"] = string.IsNullOrWhiteSpace(model) ? preset.Model : model.Trim();
+            cfg["model_" + slug] = (string)cfg["model"];
             File.WriteAllText(cfgPath, cfg.ToString());
         }
 
@@ -813,6 +860,10 @@ namespace Forge.SolidWorks
             string bu = (baseUrl ?? "").Trim().ToLowerInvariant();
             if (p == "anthropic") return "anthropic";
             if (p == "ollama") return "ollama";
+            // Ollama presets store the client id "openai-compatible" with a localhost
+            // baseUrl — map those back to the "ollama" slug so the settings dropdown,
+            // pill, and key check round-trip instead of showing "openai-compatible".
+            if (bu.Contains("localhost") || bu.Contains("127.0.0.1") || bu.Contains("::1")) return "ollama";
             if (bu.Contains("integrate.api.nvidia.com")) return "nvidia";
             if (bu.Contains("openrouter.ai")) return "openrouter";
             if (bu.Contains("api.deepseek.com")) return "deepseek";
@@ -826,6 +877,37 @@ namespace Forge.SolidWorks
             try { var k = KeyStore.Load(provider); if (!string.IsNullOrWhiteSpace(k)) return k; } catch { }
             try { return System.Environment.GetEnvironmentVariable("FORGE_PROVIDER_KEY"); }
             catch { return null; }
+        }
+
+        // Slug-aware key lookup: per-slug files first (see SaveProviderKey), then the
+        // legacy shared client-id file, then the env var. A legacy file is adopted once
+        // under the current slug and removed, so a pre-fix shared key is attributed to
+        // the selected provider instead of silently serving every other provider too.
+        private static string StoredProviderKeyForSlug(string slug, string provider)
+        {
+            string s = (slug ?? "").Trim().ToLowerInvariant();
+            string pid = (provider ?? "").Trim();
+            if (!string.IsNullOrWhiteSpace(s) && !string.Equals(s, pid, StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    var k = KeyStore.Load(s);
+                    if (!string.IsNullOrWhiteSpace(k)) return k;
+                }
+                catch { }
+                try
+                {
+                    var legacy = KeyStore.Load(pid);
+                    if (!string.IsNullOrWhiteSpace(legacy))
+                    {
+                        try { KeyStore.Save(s, legacy); } catch { }
+                        try { KeyStore.Delete(pid); } catch { }
+                        return legacy;
+                    }
+                }
+                catch { }
+            }
+            return StoredProviderKey(pid);
         }
 
         private static async Task<System.Collections.Generic.List<string>> FetchServableModels(string baseUrl, string apiKey)
@@ -935,7 +1017,7 @@ namespace Forge.SolidWorks
                 Send(new { type = "thinkEnd", seconds = (int)watch.Elapsed.TotalSeconds });
                 string clean = CleanEnhanced(res != null ? res.Text : null);
                 if (string.IsNullOrWhiteSpace(clean)) throw new Exception("empty enhancement");
-                try { IntentRate.Note(res.TokIn, res.TokOut); } catch { }
+                try { if (res != null) IntentRate.Note(res.TokIn, res.TokOut); } catch { }
                 Send(new { type = "enhanced", text = clean });
             }
             catch (OperationCanceledException)
@@ -968,10 +1050,12 @@ namespace Forge.SolidWorks
                 @"^\s*(build|create|make|design|modify|change|add|assemble|machine|model|overall|envelope|part|assembly|what|which|how|when|where|why|is|are|can|do|does|should)\b|\?\s*$",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             var narrRx = new System.Text.RegularExpressions.Regex(
-                @"^\s*(the user wants|the draft|key rules|rules?:|here'?s|here is|let me|i('ll| will| need to| should)|okay|sure|draft:|enhanced (prompt|request)?\s*:|plan:|explanation:)",
+                @"^\s*(the user wants|the draft|key rules|rules?:|here'?s|here is|let me|i('ll| will| need to| should)|okay|sure|draft:|enhanced (prompt|request)?\s*:|plan:|explanation:|return only|treat the next|starting directly)",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            // Numbered instruction echoes only. "metric"/"fillets" are deliberately NOT here: they are
+            // ordinary CAD words ("2. 4x M6 metric holes") and stripping them eats legit spec lines.
             var ruleEchoRx = new System.Text.RegularExpressions.Regex(
-                @"^\s*\d+\.\s+.*(treat the next|return only|keep the user|assume sensible|metric|fillets|150 words|without answering)",
+                @"^\s*\d+\.\s+.*(treat the next|return only|keep the user|assume sensible|150 words|without answering|starting directly|output only|never answer|no length limit)",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             int start = 0;
             for (int i = 0; i < lines.Length && i < 15; i++)
@@ -986,7 +1070,10 @@ namespace Forge.SolidWorks
             while (kept.Count > 0 && string.IsNullOrWhiteSpace(kept[0])) kept.RemoveAt(0);
             while (kept.Count > 0 && string.IsNullOrWhiteSpace(kept[kept.Count - 1])) kept.RemoveAt(kept.Count - 1);
             s = string.Join("\n", kept.ToArray()).Trim();
-            if (string.IsNullOrWhiteSpace(s) && !string.IsNullOrWhiteSpace(text)) s = text.Trim(); // fail-open, never null
+            // Fail-open, never null — but fall back to the FENCE-STRIPPED text, not the raw model output,
+            // so an all-narration response at least comes back without markdown fences.
+            if (string.IsNullOrWhiteSpace(s) && !string.IsNullOrWhiteSpace(text))
+                s = System.Text.RegularExpressions.Regex.Replace(text.Trim(), @"^```\w*\n?|```$", "").Trim();
             return string.IsNullOrWhiteSpace(s) ? null : s;
         }
 

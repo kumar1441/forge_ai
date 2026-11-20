@@ -74,10 +74,17 @@ namespace Forge.SolidWorks
         }
 
         /// <summary>Start the server + handshake if needed. Throws McpException with a setup hint on failure.</summary>
-        public static async Task EnsureStartedAsync(int timeoutMs = 0)
+        public static async Task EnsureStartedAsync(int timeoutMs = 0, CancellationToken ct = default(CancellationToken))
         {
             int initTimeout;
-            await StartGate.WaitAsync().ConfigureAwait(false);
+            bool acquired = false;
+            try
+            {
+                if (ct.CanBeCanceled) await StartGate.WaitAsync(ct).ConfigureAwait(false);
+                else await StartGate.WaitAsync().ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) { throw; } // stop during download: never enter the handshake
+            acquired = true;
             try
             {
                 lock (Gate)
@@ -97,10 +104,11 @@ namespace Forge.SolidWorks
                         ["capabilities"] = new JObject(),
                         ["clientInfo"] = new JObject { ["name"] = "Forge", ["version"] = "1.0" }
                     };
-                    JObject res = await RpcAsync("initialize", init, initTimeout);
+                    JObject res = await RpcAsync("initialize", init, initTimeout, ct).ConfigureAwait(false);
                     if (res == null) throw new McpException("MCP initialize returned nothing.");
                     await NotifyAsync("notifications/initialized", new JObject());
                 }
+                catch (OperationCanceledException) { Stop(); throw; } // stop wins: never rewrap cancel as a handshake error
                 catch (Exception ex)
                 {
                     Stop();
@@ -108,7 +116,7 @@ namespace Forge.SolidWorks
                     throw new McpException("MCP handshake failed: " + ex.Message + " — run `uvx solidworks-mcp --selftest` with SolidWorks open and retry.");
                 }
             }
-            finally { try { StartGate.Release(); } catch { } }
+            finally { if (acquired) { try { StartGate.Release(); } catch { } } }
         }
 
         private static void StartLocked()
@@ -236,8 +244,30 @@ namespace Forge.SolidWorks
             return Task.FromResult(0);
         }
 
+        private static void ObserveFault(Task t)
+        {
+            // An abandoned call (timeout/cancel) may still fault via a racing StopLocked: mark it
+            // observed so the finalizer never takes the process down with UnobservedTaskException.
+            try { t.ContinueWith(x => { var ignored = x.Exception; }, TaskContinuationOptions.OnlyOnFaulted); }
+            catch { }
+        }
+
+        private static bool IsDeadServer(McpException ex)
+        {
+            string m = ex != null ? (ex.Message ?? "") : "";
+            return m.IndexOf("not running", StringComparison.OrdinalIgnoreCase) >= 0
+                || m.IndexOf("exited", StringComparison.OrdinalIgnoreCase) >= 0
+                || m.IndexOf("stopped", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static string Trunc(string s, int max)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            return s.Length > max ? s.Substring(0, max) + "…(truncated)" : s;
+        }
+
         /// <summary>Raw JSON-RPC call. Returns the `result` object (throws on error member / timeout).</summary>
-        public static async Task<JObject> RpcAsync(string method, JObject p, int timeoutMs)
+        public static async Task<JObject> RpcAsync(string method, JObject p, int timeoutMs, CancellationToken ct = default(CancellationToken))
         {
             if (timeoutMs <= 0) timeoutMs = 60000; // Task.Delay throws on 0/negative: bound it instead
             if (string.IsNullOrWhiteSpace(method)) throw new McpException("MCP method must not be empty.");
@@ -267,27 +297,47 @@ namespace Forge.SolidWorks
             object winner;
             using (var timeoutCts = new CancellationTokenSource())
             {
-                winner = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs, timeoutCts.Token)).ConfigureAwait(false);
+                var timeoutTask = Task.Delay(timeoutMs, timeoutCts.Token);
+                if (ct.CanBeCanceled)
+                    winner = await Task.WhenAny(tcs.Task, timeoutTask, Task.Delay(-1, ct)).ConfigureAwait(false);
+                else
+                    winner = await Task.WhenAny(tcs.Task, timeoutTask).ConfigureAwait(false);
                 try { timeoutCts.Cancel(); } catch { }
+            }
+            if (ct.IsCancellationRequested)
+            {
+                TaskCompletionSource<string> dropped;
+                Pending.TryRemove(id, out dropped);
+                ObserveFault(tcs.Task); // a racing StopLocked must not surface as UnobservedTaskException
+                throw new OperationCanceledException(ct);
             }
             if (winner != tcs.Task)
             {
                 TaskCompletionSource<string> dropped;
                 Pending.TryRemove(id, out dropped);
+                ObserveFault(tcs.Task); // late reply / racing death-fail must have no unobserved waiter
                 throw new McpException("MCP `" + method + "` timed out after " + (timeoutMs / 1000) + "s.");
             }
             string line = await tcs.Task.ConfigureAwait(false);
-            var resp = JObject.Parse(line);
+            JObject resp;
+            try { resp = JObject.Parse(line); }
+            catch (Exception jx) { throw new McpException("MCP returned non-JSON text (" + (line != null ? line.Length : 0) + " chars): " + Trunc(line, 200)); }
             var err = resp["error"];
-            if (err != null) throw new McpException("MCP error: " + ((string)err["message"] ?? err.ToString()));
+            if (err != null)
+            {
+                string em = null;
+                try { em = (string)err["message"]; } catch { }
+                if (string.IsNullOrEmpty(em)) { try { em = err.ToString(); } catch { em = "unknown error"; } }
+                throw new McpException("MCP error: " + Trunc(em, 500));
+            }
             return resp["result"] as JObject;
         }
 
-        public static async Task<JArray> ListToolsAsync()
+        public static async Task<JArray> ListToolsAsync(CancellationToken ct = default(CancellationToken))
         {
-            await EnsureStartedAsync();
+            await EnsureStartedAsync(0, ct).ConfigureAwait(false);
             if (CachedTools != null) return CachedTools;
-            JObject res = await RpcAsync("tools/list", new JObject(), 60000);
+            JObject res = await RpcAsync("tools/list", new JObject(), 60000, ct).ConfigureAwait(false);
             // A null/missing result must not NRE here, and an empty list must not be
             // cached: otherwise one malformed reply poisons every later call.
             var tools = res != null ? res["tools"] as JArray : null;
@@ -303,11 +353,19 @@ namespace Forge.SolidWorks
         }
 
         /// <summary>Call one MCP tool. The server reports failures as {ok:false,...} text — surfaced, never thrown.</summary>
-        public static async Task<ToolResult> CallToolAsync(string name, JObject args, int timeoutMs = 300000)
+        public static async Task<ToolResult> CallToolAsync(string name, JObject args, int timeoutMs = 300000, CancellationToken ct = default(CancellationToken))
         {
             var p = new JObject { ["name"] = name };
             p["arguments"] = args ?? new JObject();
-            JObject res = await RpcAsync("tools/call", p, timeoutMs);
+            JObject res;
+            try { res = await RpcAsync("tools/call", p, timeoutMs, ct).ConfigureAwait(false); }
+            catch (McpException mex) when (IsDeadServer(mex) && !ct.IsCancellationRequested)
+            {
+                // Server died mid-run (process killed / SW closed took it down): restart once and
+                // retry so the next tool call heals instead of failing every later step until the cap.
+                await EnsureStartedAsync(60000, ct).ConfigureAwait(false);
+                res = await RpcAsync("tools/call", p, timeoutMs, ct).ConfigureAwait(false);
+            }
             // A null result is a broken server reply: fail loudly, not Ok=true with empty text.
             if (res == null) throw new McpException("MCP `tools/call` returned an empty result.");
             var out_ = new ToolResult();
@@ -326,9 +384,17 @@ namespace Forge.SolidWorks
                 bool isErr = false;
                 try { isErr = res["isError"] != null && res["isError"].Value<bool>(); } catch { }
                 if (isErr) out_.Ok = false;
-                if (out_.Text.Contains("\"ok\": false") || out_.Text.Contains("\"ok\":false")) out_.Ok = false;
+                // Whitespace-tolerant {ok:false} detection: servers emit {"ok":false}, { "ok" : false }, etc.
+                try
+                {
+                    string compact = out_.Text.Replace(" ", "").Replace("\t", "").Replace("\r", "").Replace("\n", "");
+                    if (compact.Contains("\"ok\":false")) out_.Ok = false;
+                }
+                catch { }
+                // Bound memory + downstream history: the agent history re-caps at 2000 chars.
+                if (out_.Text != null && out_.Text.Length > 8000) out_.Text = out_.Text.Substring(0, 8000) + "…(truncated)";
             }
-            catch { out_.Text = res != null ? res.ToString() : ""; }
+            catch { out_.Text = res != null ? Trunc(res.ToString(), 2000) : ""; }
             return out_;
         }
     }

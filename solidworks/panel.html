@@ -1786,7 +1786,7 @@
     const cp = e.target.closest("[data-copy]");
     if (cp) { const link = cp.closest(".share").querySelector(".link").textContent; try { navigator.clipboard.writeText(link); cp.textContent = "copied"; } catch {} return; }
     const rv = e.target.closest("[data-revoke]");
-    if (rv) { post({ action: "revokeShare" }); rv.textContent = "revoked"; return; }
+    if (rv) { rv.disabled = true; rv.textContent = "revoke requested"; post({ action: "revokeShare" }); return; }
   });
 
   // per-run thumbs: tags feedback to the exact run trace (correction data)

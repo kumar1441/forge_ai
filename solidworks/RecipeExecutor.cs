@@ -497,8 +497,12 @@ namespace Forge.SolidWorks
             {
                 string subDir = Path.Combine(Path.GetDirectoryName(c.Result.Path ?? Path.GetTempPath()) ?? Path.GetTempPath(), "components");
                 var sub = RecipeExecutor.Execute(c.App, Recipe.FromJObject(nested), subDir);
-                c.Result.Step("component", "RecipeExecutor::Execute(nested)", sub.Path != null, "nested=" + (sub.Path ?? sub.Error));
-                if (string.IsNullOrEmpty(sub.Path)) return false;
+                // Fail-closed: a half-built or unverified nested part must NEVER be composed into the
+                // assembly (the old check only looked at Path, which the saver sets even on failure).
+                bool subOk = !string.IsNullOrEmpty(sub.Path) && sub.Verified && string.IsNullOrEmpty(sub.Error);
+                c.Result.Step("component", "RecipeExecutor::Execute(nested)", subOk,
+                    "nested=" + (subOk ? sub.Path : ("FAILED op=" + sub.FailedOp + " err=" + sub.Error + " verified=" + sub.Verified)));
+                if (!subOk) return false;
                 partPath = sub.Path;
             }
             if (string.IsNullOrEmpty(partPath) || !File.Exists(partPath))

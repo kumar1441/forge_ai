@@ -42,10 +42,32 @@ namespace Forge.Providers
         {
             if (string.IsNullOrWhiteSpace(apiKey))
                 throw new ArgumentException("apiKey must not be empty.", "apiKey");
-            byte[] plain = Encoding.UTF8.GetBytes(apiKey);
-            byte[] protectedBlob = ProtectedData.Protect(plain, null, DataProtectionScope.CurrentUser);
+            byte[] protectedBlob;
+            try
+            {
+                byte[] plain = Encoding.UTF8.GetBytes(apiKey);
+                protectedBlob = ProtectedData.Protect(plain, null, DataProtectionScope.CurrentUser);
+            }
+            catch (CryptographicException ex)
+            {
+                throw new CryptographicException("Could not encrypt the key with DPAPI (roaming profile or restricted account?): " + ex.Message, ex);
+            }
             Directory.CreateDirectory(Dir);
-            File.WriteAllText(PathFor(provider), Convert.ToBase64String(protectedBlob));
+            // Atomic write (temp + replace): a crash or a concurrent Save/Load can
+            // never leave a half-written .key file behind that Load then misreads.
+            string path = PathFor(provider);
+            string tmp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            File.WriteAllText(tmp, Convert.ToBase64String(protectedBlob));
+            try
+            {
+                if (File.Exists(path)) File.Replace(tmp, path, null);
+                else File.Move(tmp, path);
+            }
+            catch
+            {
+                try { File.Delete(tmp); } catch { }
+                throw;
+            }
         }
 
         /// <summary>Returns the plaintext key, or null if missing/unreadable (caller falls back).</summary>

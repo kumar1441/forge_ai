@@ -44,7 +44,7 @@ namespace Forge.SolidWorks
     /// </summary>
     public class RecipeResult
     {
-        public bool Built;                 // the executor ran to completion (file saved)
+        public bool Built;                 // ran to completion with no failed op (file saved; keepOpen: built in-memory, doc left open)
         public bool RebuildClean;          // GetWhatsWrongCount == 0
         public bool NativeTree;            // real modeling features present (not a dumb solid)
         public bool DimsMatch;             // verify block measured OK on the result

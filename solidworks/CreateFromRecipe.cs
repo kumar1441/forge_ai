@@ -25,12 +25,24 @@ namespace Forge.SolidWorks
     public static class CreateFromRecipe
     {
         private static readonly Regex CreateVerbRx = new Regex(
-            @"\b(create|make|build|design|generate|model|fabricate|draft)\b",
+            @"\b(create|make|build|design|generate|model|fabricate|draft|print)\b",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
         // Shape/document nouns worth a multi-step build (must pair with a create verb above).
+        // spacer/standoff: V1 recipe categories the old noun list dropped (false negatives -> refusal).
         private static readonly Regex ShapeNounRx = new Regex(
-            @"\b(part|assembly|plate|block|cube|bracket|flange|cylinder|boss|box|housing|enclosure|mount|washer|ring|tube|pipe|cone|sphere|torus|shaft|rod|base|frame|cover|lid|panel|blank|slab)\b",
+            @"\b(part|assembly|plate|block|cube|bracket|flange|cylinder|boss|box|housing|enclosure|mount|washer|ring|tube|pipe|cone|sphere|torus|shaft|rod|base|frame|cover|lid|panel|blank|slab|spacer|standoff)\b",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        // Edit guard (never steal refines): a create verb aimed at the CURRENT model is an edit for
+        // the refine path, not a from-scratch build — e.g. "make the bracket holes bigger", "add holes
+        // to this plate". Deictic + shape/model noun, current/existing-model refs, or a definite article
+        // paired with a comparative ("make the holes bigger") all point at something already existing.
+        // Deliberately narrow: "this size" / "a bigger bracket" (indefinite, no model ref) still build.
+        private static readonly Regex EditRefRx = new Regex(
+            @"\b(this|that|these|those)\s+(part|parts|assembly|assemblies|model|models|bracket|plate|flange|cylinder|boss|block|box|housing|enclosure|mount|washer|ring|tube|pipe|cone|sphere|torus|shaft|rod|base|frame|cover|lid|panel|blank|slab|cube|face|faces|edge|edges|hole|holes|solid|sketch|feature)\b" +
+            @"|\b(current|existing|open|active|selected)\s+(part|assembly|model|doc|document|solid|body)\b" +
+            @"|\bthe\b.{0,40}\b(bigger|smaller|larger|longer|shorter|wider|narrower|taller|thicker|thinner|deeper|shallower)\b",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
         private static readonly HashSet<string> KnownOps = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -49,6 +61,7 @@ namespace Forge.SolidWorks
             string text = (intent ?? "").Trim();
             if (text.Length == 0) return false;
             if (Regex.IsMatch(text, @"^\s*(review|inspect|show|check|analy[sz]e|explain|describe|what|how|is|are|list|tell)\b", RegexOptions.IgnoreCase)) return false;
+            if (EditRefRx.IsMatch(text)) return false; // deictic/comparative edit: the refine path owns it
             if (!CreateVerbRx.IsMatch(text)) return false;
             if (!ShapeNounRx.IsMatch(text)) return false;
             if (CreateGuardrail.UnsupportedCue(text) == null) return false; // bare primitive: existing path
@@ -92,6 +105,7 @@ namespace Forge.SolidWorks
                     return outcome;
                 }
             }
+            catch (OperationCanceledException) { throw; } // cancel stays cancel: the caller owns the Interrupted message
             catch (Exception ex)
             {
                 GroundTruth.Trace?.Invoke("create-recipe: author failed (" + ex.GetType().Name + ")");
@@ -116,8 +130,9 @@ namespace Forge.SolidWorks
             try
             {
                 await emit("Builder", "building " + ((string)recipeJson["name"] ?? "the part") + " feature by feature", "run", null);
-                res = await Task.Run(() => RecipeExecutor.Execute(app, Recipe.FromJObject(recipeJson), Path.GetTempPath(), true));
+                res = await Task.Run(() => RecipeExecutor.Execute(app, Recipe.FromJObject(recipeJson), Path.GetTempPath(), true), ct);
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 outcome.Error = "The build failed before it started (" + ex.GetType().Name + ": " + ex.Message + ").";
@@ -169,18 +184,128 @@ namespace Forge.SolidWorks
             if (feats.Count > 40) return "That plan has " + feats.Count + " steps (cap is 40) — split it into two builds.";
             string kind = ((string)r["kind"] ?? "part").ToLowerInvariant();
             if (kind != "part" && kind != "assembly") return "Unknown recipe kind '" + kind + "'.";
+
+            // Units: the executor builds in millimetres unconditionally. A non-mm plan would verify
+            // against its own wrong-scale numbers and PASS, so reject the plan here instead.
+            string units = ((string)r["units"] ?? "mm").Trim().ToLowerInvariant();
+            if (units != "mm" && units != "millimeter" && units != "millimeters" && units != "millimetre" && units != "millimetres")
+                return "That plan uses units '" + units + "' — the builder works in millimetres; rephrase with mm dims.";
+
             foreach (var t in feats)
             {
                 var f = t as JObject; if (f == null) return "A plan step isn't an object — ask again.";
                 string op = ((string)f["op"] ?? "").Trim().ToLowerInvariant();
                 if (!KnownOps.Contains(op)) return "The plan uses '" + op + "', which the builder doesn't know — rephrase without it.";
             }
+
+            // Ref integrity + runaway caps, in execution order: every sketch/feature/component ref must
+            // name an EARLIER step's id (the executor resolves in order and fails closed, but that leaves
+            // a half-built part open — reject the PLAN instead). Pattern counts and hole-position lists
+            // are capped so a runaway number can't hang SolidWorks on a 100k-instance pattern.
+            // (Negative/zero dims are NOT rejected here: the executor fails those closed per-op, and a
+            // negative plane offset is legal geometry.)
+            var ids = new HashSet<string>(StringComparer.Ordinal);       // feature/sketch/plane ids, in order
+            var compIds = new HashSet<string>(StringComparer.Ordinal);   // component ids, in order
+            for (int i = 0; i < feats.Count; i++)
+            {
+                var f = feats[i] as JObject; if (f == null) continue; // already rejected above
+                string op = ((string)f["op"] ?? "").Trim().ToLowerInvariant();
+                string tag = "step " + (i + 1) + " ('" + op + "')";
+                string bad;
+                try { bad = CheckStepRefs(f, op, ids, compIds); }
+                catch { bad = "has a malformed value"; }
+                if (bad != null) return "That plan's " + tag + " " + bad;
+                try { bad = CheckStepCounts(f, op, tag); }
+                catch { bad = tag + " has a malformed count"; }
+                if (bad != null) return "That plan's " + bad + " — split it into smaller builds.";
+                try
+                {
+                    string id = (string)f["id"];
+                    if (!string.IsNullOrWhiteSpace(id))
+                    {
+                        if (op == "component") compIds.Add(id.Trim()); else ids.Add(id.Trim());
+                    }
+                }
+                catch { }
+            }
+            return null;
+        }
+
+        // Every ref an op resolves at runtime must already exist. Mirrors the executor's lookups
+        // (case-sensitive dictionaries, in-order registration); returns the full complaint or null.
+        private static string CheckStepRefs(JObject f, string op, HashSet<string> ids, HashSet<string> compIds)
+        {
+            const string notDefined = " — the steps before it never define that id.";
+            if (op == "extrude" || op == "cut")
+            {
+                string s = (string)f["sketch"];
+                if (string.IsNullOrWhiteSpace(s) || !ids.Contains(s.Trim())) return "references unknown sketch '" + (s ?? "").Trim() + "'." + notDefined;
+            }
+            else if (op == "linear_pattern" || op == "circular_pattern")
+            {
+                string s = (string)f["feature"];
+                if (string.IsNullOrWhiteSpace(s) || !ids.Contains(s.Trim())) return "references unknown feature '" + (s ?? "").Trim() + "'." + notDefined;
+            }
+            else if (op == "fillet" || op == "chamfer")
+            {
+                string t = ((string)f["target"] ?? "all_edges").Trim().ToLowerInvariant();
+                if (t.StartsWith("feature:"))
+                {
+                    string s = t.Substring("feature:".Length).Trim();
+                    if (s.Length == 0 || !ids.Contains(s)) return "references unknown feature '" + s + "'." + notDefined;
+                }
+            }
+            else if (op == "component")
+            {
+                string pp = (string)f["partPath"];
+                if (string.IsNullOrWhiteSpace(pp) && !(f["recipe"] is JObject)) return "names a part with neither partPath nor a nested recipe.";
+            }
+            else if (op == "mate")
+            {
+                foreach (string side in new[] { "a", "b" })
+                {
+                    var sel = f[side] as JObject;
+                    string c = sel != null ? (string)sel["comp"] : null;
+                    if (!string.IsNullOrWhiteSpace(c) && !compIds.Contains(c.Trim())) return "references unknown component '" + c.Trim() + "'." + notDefined;
+                }
+            }
+            return null;
+        }
+
+        // Runaway-geometry caps. Returns the complaint or null.
+        private static string CheckStepCounts(JObject f, string op, string tag)
+        {
+            if (op == "linear_pattern")
+            {
+                foreach (string k in new[] { "count", "count2" })
+                {
+                    if (f[k] == null) continue;
+                    int n = (int?)f[k] ?? 0;
+                    if (n < 1 || n > 500) return tag + " asks for " + k + "=" + f[k]?.ToString() + " (pattern counts must be 1-500)";
+                }
+            }
+            else if (op == "circular_pattern")
+            {
+                if (f["count"] != null)
+                {
+                    int n = (int?)f["count"] ?? 0;
+                    if (n < 1 || n > 500) return tag + " asks for count=" + f["count"]?.ToString() + " (pattern counts must be 1-500)";
+                }
+            }
+            else if (op == "hole")
+            {
+                var pos = f["positions"] as JArray;
+                if (pos == null || pos.Count == 0) return tag + " lists no positions";
+                if (pos.Count > 1000) return tag + " lists " + pos.Count + " positions (cap is 1000)";
+            }
             return null;
         }
 
         private static async Task<JObject> AuthorRecipe(IProviderClient client, string intent, System.Threading.CancellationToken ct)
         {
-            var opts = new ProviderOptions { MaxTokens = 2500, Temperature = 0, Model = ProviderFactory.CurrentModel() };
+            // 8000 output tokens: a capped 40-step recipe with hole positions runs ~4-6k tokens; the old
+            // 2500 budget truncated big plans into unbalanced JSON (retry, then a "couldn't plan" dead end).
+            var opts = new ProviderOptions { MaxTokens = 8000, Temperature = 0, Model = ProviderFactory.CurrentModel() };
             string user = "User said: \"" + (intent ?? "").Trim() + "\"\n\nOutput ONLY the recipe JSON object. No markdown fences, no commentary.";
             for (int attempt = 0; attempt < 2; attempt++)
             {
@@ -193,11 +318,11 @@ namespace Forge.SolidWorks
                 try { res = await client.CompleteAsync(msgs, opts, ct); }
                 catch (OperationCanceledException) { throw; }
                 catch { return null; }
+                try { if (res != null) IntentRate.Note(res.TokIn, res.TokOut); } catch { } // every response spends tokens, even unparseable ones
                 string err;
                 var recipe = SafeJsonExtractor.ExtractResponseEnvelope(res != null ? res.Text : null, out err);
                 if (recipe != null && recipe["features"] is JArray)
                 {
-                    try { IntentRate.Note(res.TokIn, res.TokOut); } catch { }
                     try { GroundTruth.Trace?.Invoke("create-recipe: authored model=" + res.Model); } catch { }
                     return recipe;
                 }

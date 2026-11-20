@@ -5661,6 +5661,9 @@ namespace Forge.SolidWorks
             }
             private void Post(object msg)
             {
+                // Superseded runs stay silent: a stale thinkStart/think/thinkEnd must never
+                // interleave with (or close) the new run's thinking block.
+                try { if (_alive != null && !_alive()) return; } catch { return; }
                 try
                 {
                     if (_ui != null) _ui.Post(_ => { try { _send(msg); } catch { } }, null);
@@ -5683,7 +5686,7 @@ namespace Forge.SolidWorks
             string myIdR = _currentRunId; // a newer Generate owns the panel: stay silent when stale
             try { PanelCapture.Log("parse", new { intent, action = "create_recipe", confidence = 1.0, routed = "create_recipe", source = "recipe-create" }); } catch { }
             Func<string, string, string, string, Task> emitR = async (a, g, s, r) =>
-            { Send(new { type = "step", agent = a, gloss = g, state = s, result = r }); await Task.Delay(60); };
+            { if (myIdR != _currentRunId) return; Send(new { type = "step", agent = a, gloss = g, state = s, result = r }); await Task.Delay(60); };
             CreateFromRecipe.RecipeCreateOutcome rc;
             try { rc = await CreateFromRecipe.Run(App, intent, emitR, ct); }
             catch (OperationCanceledException) { if (myIdR == _currentRunId) Send(new { type = "answer", answer = "Interrupted — nothing was built. Edit and resend, or ↩ revert to an earlier prompt.", runId = _currentRunId, handler = "create_recipe" }); return true; }
@@ -5716,13 +5719,14 @@ namespace Forge.SolidWorks
             string myId = _currentRunId; // a newer Generate owns the panel: stay silent when stale
             try { PanelCapture.Log("parse", new { intent, action = "mcp_build", confidence = 1.0, routed = "mcp_build", source = "mcp-build" }); } catch { }
             Func<string, string, string, string, Task> emitM = async (a, g, s, r) =>
-            { Send(new { type = "step", agent = a, gloss = g, state = s, result = r }); await Task.Delay(60); };
+            { if (myId != _currentRunId) return; Send(new { type = "step", agent = a, gloss = g, state = s, result = r }); await Task.Delay(60); };
             var relay = new ThinkRelay("Planning", msg => Send(msg), () => myId == _currentRunId);
             try { relay.Start(Forge.Providers.ProviderFactory.CurrentModel()); } catch { }
             McpBuild.McpBuildOutcome mc;
             // The approval gate posts its cards through this sender: without it the panel never
-            // shows the approve/reject card and any gated tool hangs until stop.
-            var mySender = new Action<JObject>(card => Send(card));
+            // shows the approve/reject card and any gated tool hangs until stop. Stale-guarded so
+            // a superseded run's late card can't hijack the new run's approval flow.
+            var mySender = new Action<JObject>(card => { if (myId == _currentRunId) Send(card); });
             McpBuild.CardSender = mySender;
             try { mc = await McpBuild.RunAgent(intent, emitM, ct, relay.OnDelta, sid); relay.End(false); }
             catch (OperationCanceledException)

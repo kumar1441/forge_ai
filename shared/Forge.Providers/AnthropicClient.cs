@@ -50,7 +50,7 @@ namespace Forge.Providers
             string body;
             try { url = BuildUrl(opts); body = BuildBody(messages, opts, model); }
             catch (ProviderException) { throw; }
-            catch (Exception ex) { throw new ProviderException("Provider request failed to build: " + ex.Message, ex); }
+            catch (Exception ex) { throw new ProviderException("Provider request failed to build (" + ex.GetType().Name + "): " + ex.Message, ex); }
 
             // Transient overload (429/5xx incl. 529) retries with backoff; fresh message per
             // attempt since Framework HttpClient won't resend one. Non-transient errors throw at once.
@@ -58,7 +58,7 @@ namespace Forge.Providers
             {
                 HttpRequestMessage req;
                 try { req = new HttpRequestMessage(HttpMethod.Post, url); }
-                catch (Exception ex) { throw new ProviderException("Provider misconfigured: " + ex.Message, ex); }
+                catch (Exception ex) { throw new ProviderException("Provider misconfigured (bad base URL \"" + url + "\"): " + ex.Message, ex); }
                 using (req)
                 {
                     if (!string.IsNullOrEmpty(_apiKey))
@@ -71,7 +71,8 @@ namespace Forge.Providers
                     catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                     catch (TaskCanceledException) { throw new ProviderException("Provider request timed out."); }
                     catch (HttpRequestException ex) { throw new ProviderException("Provider network failure: " + ex.Message, ex); }
-                    catch (InvalidOperationException ex) { throw new ProviderException("Provider misconfigured: " + ex.Message, ex); }
+                    catch (InvalidOperationException ex) { throw new ProviderException("Provider misconfigured (bad base URL \"" + url + "\"): " + ex.Message, ex); }
+                    catch (UriFormatException ex) { throw new ProviderException("Provider misconfigured (bad base URL \"" + url + "\"): " + ex.Message, ex); }
 
                     using (resp)
                     {
@@ -96,7 +97,7 @@ namespace Forge.Providers
             IReadOnlyList<ChatMessage> messages, ProviderOptions opts, CancellationToken ct, System.Action<string, string> onDelta)
         {
             // Faulted task (not a synchronous throw) so `var t = ...; await t` callers see the same error.
-            try { throw new ProviderException("Streaming is not supported for the Anthropic provider yet — pick an OpenAI-compatible model for live thinking."); }
+            try { throw new ProviderException("Streaming is not supported for the Anthropic provider — Enhance and planning fall back to a single fast call automatically; the full agent build loop needs an OpenAI-compatible model (switch provider in settings to build)."); }
             catch (ProviderException ex) { var tcs = new TaskCompletionSource<ProviderResult>(); tcs.SetException(ex); return tcs.Task; }
         }
 
@@ -128,9 +129,18 @@ namespace Forge.Providers
                 }
                 else
                 {
-                    arr.Add(new JObject { ["role"] = role == "assistant" ? "assistant" : "user", ["content"] = m.Content });
+                    // Anthropic rejects consecutive same-role messages (400), so merge
+                    // runs of user (or assistant) turns instead of sending them back-to-back.
+                    string nrole = role == "assistant" ? "assistant" : "user";
+                    var last = arr.Count > 0 ? arr[arr.Count - 1] as JObject : null;
+                    if (last != null && string.Equals((string)last["role"], nrole, System.StringComparison.Ordinal))
+                        last["content"] = (string)last["content"] + "\n" + m.Content;
+                    else
+                        arr.Add(new JObject { ["role"] = nrole, ["content"] = m.Content });
                 }
             }
+            if (arr.Count == 0)
+                throw new ProviderException("Provider request has no user/assistant messages to send.");
             if (system.Length > 0) j["system"] = system.ToString();
             j["messages"] = arr;
 
@@ -157,6 +167,7 @@ namespace Forge.Providers
             // Tool-use-only turns carry no text: collect tool_use blocks so the agent
             // loop can act instead of failing with "no content".
             var sb = new StringBuilder();
+            var think = new StringBuilder();
             var toolCalls = new System.Collections.Generic.List<ToolCall>();
             if (content != null)
                 foreach (var b in content)
@@ -165,6 +176,14 @@ namespace Forge.Providers
                     if (bo == null) continue;
                     string t = (string)bo["text"];
                     if (!string.IsNullOrEmpty(t)) sb.Append(t);
+                    // Extended-thinking turns carry the reasoning in "thinking" blocks;
+                    // keep it as a fallback so a thinking-only stop still returns text
+                    // (same fallback the OpenAI client applies to reasoning_content).
+                    if (sb.Length == 0 && string.Equals((string)bo["type"], "thinking", System.StringComparison.Ordinal))
+                    {
+                        string th = (string)bo["thinking"];
+                        if (!string.IsNullOrEmpty(th)) think.Append(th);
+                    }
                     if ((string)bo["type"] == "tool_use")
                     {
                         JToken input = bo["input"];
@@ -178,7 +197,7 @@ namespace Forge.Providers
                         toolCalls.Add(new ToolCall { Id = (string)bo["id"], Name = (string)bo["name"], ArgumentsJson = argStr ?? "" });
                     }
                 }
-            string outText = sb.Length > 0 ? sb.ToString() : null;
+            string outText = sb.Length > 0 ? sb.ToString() : (think.Length > 0 ? think.ToString() : null);
             if (string.IsNullOrEmpty(outText) && toolCalls.Count == 0)
                 throw new ProviderException("Provider returned no content. " + Truncate(text));
 
