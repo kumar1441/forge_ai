@@ -60,17 +60,19 @@ Forge reads chat settings (provider, base URL, model) from `%APPDATA%\Forge\conf
 | `anthropic` | `FORGE_PROVIDER_KEY_ANTHROPIC` |
 | `ollama` | — (local, no key) |
 
+Slugs normalize to uppercase with non-alphanumerics as underscores, so a custom slug like `openai-compatible` maps to `FORGE_PROVIDER_KEY_OPENAI_COMPATIBLE`.
+
 1. Create `%APPDATA%\Forge\config.json`:
 
    ```json
     {
       "provider": "openai-compatible",
       "baseUrl": "https://api.deepseek.com/v1",
-      "model": "deepseek-chat",
-      "smallModel": "deepseek-chat"
+      "model": "deepseek-flash",
+      "smallModel": "deepseek-flash"
     }
 
-`smallModel` is optional: rewrite chores (enhance, compaction summaries) use it when set, else the current model.
+`smallModel` is optional: rewrite chores (enhance, compaction summaries) use it when set, else a built-in cheap default per provider (DeepSeek→`deepseek-flash`, OpenAI→`gpt-6-luna`, Anthropic→`claude-haiku-4-5`), else the current model.
    ```
 
 2. Set the key as an environment variable — never in the config file:

@@ -554,7 +554,7 @@
 
   // rotating mechanical "thinking" words — one shared pool
   const WORDS = ["Mating","Fastening","Threading","Torquing","Bolting","Calibrating",
-    "Aligning","Meshing","Tightening","Riveting","Forging","Combobulating",
+    "Aligning","Meshing","Tightening","Riveting","Forging",
     "Ratcheting","Whirring","Clanking","Cranking","Sprocketing","Kerchunking"];
 
   const grow = () => { intent.style.height = "auto"; intent.style.height = Math.min(intent.scrollHeight,200) + "px"; };
@@ -679,7 +679,8 @@
     try {
       const on = safeGet("forge_compact_on");
       const at = safeGet("forge_compact_at");
-      post({ action: "setCompact", on: on === null ? true : on === "1", at: at === null ? 60 : (parseInt(at, 10) || 0) });
+      let atn = at === null ? 60 : parseInt(at, 10); if (isNaN(atn) || atn < 10) atn = 60;
+      post({ action: "setCompact", on: on === null ? true : on === "1", at: atn });
     } catch (e2) {}
     try { post({ action: "telemetry", on: safeGet("forge_telm") === "1" }); } catch (e3) {}
     renderCtx();
@@ -692,7 +693,7 @@
     stopWords(); clearThinkTimeout();
     working = false; turn = null; thinkEl = null; sessionId = null; lastPrompt = "";
     usage.agentMsgs = 0; usage.agentTokens = 0;
-    pendingCompact = null; lastReverted = null;
+    pendingCompact = null; lastReverted = null; lastNoKeyPrompt = null; // new chat = new no-key episode
     try { post({ action: "reset" }); } catch (e) {} // fresh agent conversation host-side too
     clearFind(); closePops();
     transcript.innerHTML = '<div class="empty" id="empty">Forge <b>knows</b> your part.<br>' +
@@ -776,7 +777,7 @@
         const cbody = cur.closest ? cur.closest(".cbody") : null;
         if (cbody && cbody.style.display === "none") cbody.style.display = "";
         const th = cur.closest ? cur.closest(".think.collapsed") : null;
-        if (th) th.classList.remove("collapsed");
+        if (th) { th.classList.remove("collapsed"); th._manual = true; } // keep open: streaming must not re-collapse a find jump
       } catch (e2) {}
       cur.classList.add("cur"); try { cur.scrollIntoView({ block: "center" }); } catch (e) {}
     }
@@ -875,7 +876,8 @@
     chatModels = []; renderModelList($("msearch") ? $("msearch").value : "");
     if ($("mcount")) $("mcount").textContent = hasBridge ? "Loading…" : "Preview mode — model list needs SolidWorks.";
     if (!hasBridge) { systemCard(needBridgeMsg("Switching providers")); return; }
-    if (needsKey()) { systemCard(`No key saved for <b>${curSlug}</b> — paste it in Settings → API key, hit Save, then pick a model.`); showPop("settings"); }
+    // No immediate no-key card here: lastHasKey is unknown until the host replies,
+    // and its provider message owns the once-per-slug warning.
     post({ action: "setProvider", provider: $("setprov").value });
     setTimeout(() => { if ($("mcount") && $("mcount").textContent === "Loading…") { $("mcount").textContent = "Couldn't load models."; $("mcount").title = "No reply — check the key, then hit Refresh."; } }, 8000);
   });
@@ -1008,7 +1010,7 @@
   let working = false;
 
   // ---- @-mention files (Kilo-style): @ triggers a host file search, pick to attach ----
-  let menOpen = false, menItems = [], menIdx = 0, menTimer = null, menStart = -1;
+  let menOpen = false, menItems = [], menIdx = 0, menTimer = null, menStart = -1, menSentQ = null;
   const mentionPaths = []; // {name, path} for this draft; sent with generate, cleared on send
   function menQuery() {
     const pos = intent.selectionStart || 0;
@@ -1056,7 +1058,7 @@
     try { intent.setSelectionRange(caret, caret); } catch (e) {}
   }
   const escRx = (s) => String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const menHas = (name) => new RegExp("(?:^|\\s)@" + escRx(name) + "(?=\\s|$)").test(intent.value);
+  const menHas = (name) => new RegExp("(?:^|\\s)@" + escRx(name) + "(?=[\\s,.;:!?\\)\\]\"']|$)").test(intent.value);
   function renderChips() {
     const box = $("mchips"); box.innerHTML = "";
     box.style.display = mentionPaths.length ? "flex" : "none";
@@ -1069,7 +1071,7 @@
       if (dup[p.name] > 1) { const seg = String(p.path || "").split(/[\\/]/).filter(Boolean); const parent = seg.length > 1 ? seg[seg.length - 2] : ""; if (parent) label += " (" + parent + ")"; }
       const t = document.createElement("span"); t.textContent = label; t.title = p.path;
       const x = document.createElement("button"); x.className = "x"; x.textContent = "✕"; x.title = "Remove";
-      x.addEventListener("click", () => { const k = mentionPaths.findIndex(q => q.path === p.path); if (k >= 0) mentionPaths.splice(k, 1); renderChips(); });
+      x.addEventListener("click", () => { const k = mentionPaths.findIndex(q => q.path === p.path); if (k >= 0) mentionPaths.splice(k, 1); try { intent.value = intent.value.replace(new RegExp("(^|\\s)@" + escRx(p.name) + "(?=[\\s,.;:!?\\)\\]\"']|$)"), "$1"); grow(); } catch (e) {} renderChips(); intent.focus(); });
       c.append(t, x); box.appendChild(c);
     });
   }
@@ -1092,7 +1094,7 @@
     }
     menStart = q.start;
     clearTimeout(menTimer);
-    menTimer = setTimeout(() => post({ action: "files", q: q.q }), 250);
+    menTimer = setTimeout(() => { menSentQ = q.q; post({ action: "files", q: q.q }); }, 250);
   }
   intent.addEventListener("input", menCheck);
 
@@ -1109,7 +1111,7 @@
     clearThinkTimeout();
     thinkTimer = setTimeout(() => {
       try {
-        if (thinkEl === el && el.isConnected && working) {
+        if (thinkEl === el && el.isConnected && working && !el._manual) {
           const hd = el.querySelector(".thead");
           if (hd) hd.textContent = "Thought (timed out — showing partial) — click to expand";
           el.classList.add("collapsed");
@@ -1203,6 +1205,7 @@
     sessionId = id;
     lastPrompt = (s.turns.length ? s.turns[s.turns.length - 1].q : "") || "";
     hideChip(); hIdx = -1; draftStash = null; preEnhance = null; $("enhanceUndo").style.display = "none";
+    mentionPaths.length = 0; renderChips(); menClose();
     focusIfHidden($("history")); $("history").style.display = "none"; setExpanded("histbtn", false);
     post({ action: "loadHistory", sid: id });
     const rt = [...transcript.querySelectorAll(":scope > .turn")];
@@ -1220,7 +1223,7 @@
       const notes = [];
       try {
         if (s.model && chatModels.length && !chatModels.some(id => String(id).split("/").pop() === s.model) && !chatModels.includes(s.model)) notes.push(`It was saved with model <b>${String(s.model).replace(/</g, "&lt;")}</b>, which isn't in the current list — you're on <b>${String(shortModel(curModel) || curSlug || "the current model").replace(/</g, "&lt;")}</b>. Sending still works.`);
-        if (needsKey()) notes.push(`<b>${curSlug}</b> has no key saved — add one in Settings → API key before sending, or the run will fail. The restored text is kept.`);
+        if (needsKey()) { lastNoKeyPrompt = curSlug; notes.push(`<b>${curSlug}</b> has no key saved — add one in Settings → API key before sending, or the run will fail. The restored text is kept.`); }
       } catch (e3) {}
       if (notes.length) systemCard(notes.join("<br>"));
     }
@@ -1278,7 +1281,7 @@
 
     const mpaths = mentionPaths.map(p => p.path).filter(p => {
       const nm = (mentionPaths.find(q => q.path === p) || {}).name || "";
-      return !nm || new RegExp("(?:^|\\s)@" + escRx(nm) + "(?=\\s|$)").test(text);
+      return !nm || new RegExp("(?:^|\\s)@" + escRx(nm) + "(?=[\\s,.;:!?\\)\\]\"']|$)").test(text);
     });
     mentionPaths.length = 0; renderChips(); menClose();
     if (hasBridge && needsKey() && lastNoKeyPrompt !== curSlug) { lastNoKeyPrompt = curSlug; systemCard(`No key saved for <b>${curSlug}</b> — sending anyway, but add one in Settings → API key and hit Save so the next run succeeds. Your prompt is kept.`); }
@@ -1311,9 +1314,11 @@
           if ($("setkeyrow")) $("setkeyrow").style.display = pv === "ollama" ? "none" : "";
           if ($("setsub")) $("setsub").textContent = pv + " · …";
           chatModels = []; renderModelList($("msearch") ? $("msearch").value : "");
+          if ($("mcount")) $("mcount").textContent = hasBridge ? "Loading…" : "Preview mode — model list needs SolidWorks.";
           if (!hasBridge) { systemCard(needBridgeMsg("Switching providers")); break; }
-          if (needsKey()) { systemCard(`No key saved for <b>${pv}</b> — paste it in Settings → API key, hit Save, then pick a model.`); showPop("settings"); }
+          // Host provider reply owns the once-per-slug warning (key state still unknown here).
           post({ action: "setProvider", provider: pv });
+          setTimeout(() => { if ($("mcount") && $("mcount").textContent === "Loading…") { $("mcount").textContent = "Couldn't load models."; $("mcount").title = "No reply — check the key, then hit Refresh."; } }, 8000);
         }
         else { showPop("settings"); }
         break;
@@ -1357,8 +1362,8 @@
       case "compact": case "summarize": compactTranscript(false); break;
       case "undo": {
         const turns = [...transcript.querySelectorAll(":scope > .turn")];
-        const last = turns[turns.length - 1];
-        if (last) { last.querySelector(".revertbtn")?.click(); }
+        const last = turns.reverse().find(t => t.querySelector(".revertbtn"));
+        if (last) { last.querySelector(".revertbtn").click(); }
         else systemCard("Nothing to undo yet — send a prompt first.");
         break;
       }
@@ -1373,7 +1378,8 @@
   let pendingCompact = null; // { sum, body } awaiting the host summary
   let lastReverted = null; // { nodes, keep, sid, turns } — one-step unrevert stash
   function unrevert() {
-    if (working || !lastReverted || !lastReverted.nodes.length) { if (!working) systemCard("Nothing to unrevert — ↩ revert on a turn stashes it here for one step."); return; }
+    if (working) { systemCard("Still working — wait for this run (or Esc to stop it), then /unrevert restores it."); return; }
+    if (!lastReverted || !lastReverted.nodes.length) { systemCard("Nothing to unrevert — ↩ revert on a turn stashes it here for one step."); return; }
     if (sessionId && lastReverted.sid && lastReverted.sid !== sessionId) { lastReverted = null; systemCard("Nothing to unrevert — the chat changed since that revert, so there is nothing safe to restore."); return; }
     if (sessionId && lastReverted.keep != null) { // a new message sent post-revert grew the session — refuse, don't splice stale turns around it
       const cur = (loadSessions().find(x => x.id === sessionId) || {}).turns;
@@ -1385,7 +1391,7 @@
     if (sessionId) {
       const all = loadSessions();
       const s = all.find(x => x.id === sessionId);
-      if (s) { s.turns = s.turns.concat(lastReverted.turns || []).slice(0, 100); s.updated = Date.now(); saveSessions(all); }
+      if (s) { s.turns = s.turns.concat(lastReverted.turns || []).slice(-100); s.updated = Date.now(); saveSessions(all); }
     }
     lastReverted = null;
     renderCtx();
@@ -1513,7 +1519,7 @@
     stopWords(); clearThinkTimeout(); expireApprovals();
     const wasTurn = !!turn && !!lastPrompt;
     if (thinkEl) { // a zero-tool text finish still closes a live think block (Kilo text-response parity)
-      try { const hd = thinkEl.querySelector(".thead"); if (hd && /live/.test(hd.textContent)) hd.textContent = "Thought — click to expand"; thinkEl.classList.add("collapsed"); } catch (e) {}
+      try { const hd = thinkEl.querySelector(".thead"); if (hd && /live/.test(hd.textContent)) hd.textContent = "Thought — click to expand"; if (!thinkEl._manual) thinkEl.classList.add("collapsed"); } catch (e) {}
       if (thinkEl.contains(document.activeElement)) { try { intent.focus(); } catch (e) {} }
       thinkEl = null;
     }
@@ -1643,7 +1649,7 @@
       const hd = done.querySelector(".thead");
       if (m.interrupted) {
         if (hd) hd.textContent = "Interrupted — partial thinking kept (click to expand)";
-        done.classList.remove("collapsed");
+        if (!done._manual) done.classList.remove("collapsed");
         } else if (hd) {
           hd.textContent = `Thought for ${m.seconds || 0}s` + (done.classList.contains("collapsed") ? " — long output collapsed, click to expand" : " — click to collapse");
         }
@@ -1704,10 +1710,12 @@
     }
 
     else if (m.type === "files") {
+      const cur = menQuery();
+      if (!cur) { menClose(); return; } // async reply outlived the @ query — never leave a stale popover open
+      if (cur.q !== menSentQ) { menSentQ = cur.q; clearTimeout(menTimer); menTimer = setTimeout(() => { menSentQ = cur.q; post({ action: "files", q: cur.q }); }, 250); menClose(); return; } // typed on: drop stale, re-ask
       menItems = (m.files || []).slice(0, 50);
       menIdx = 0;
-      if (menQuery()) { menOpen = true; showPop("menpop"); renderMenList(); }
-      else menClose(); // async reply outlived the @ query — never leave a stale popover open
+      menOpen = true; showPop("menpop"); renderMenList();
     }
 
     else if (m.type === "enhanced") {
@@ -1738,6 +1746,7 @@
       } else if (m.error === "nokey") {
         $("mcount").textContent = "Needs a key — see Settings.";
         $("mcount").title = "Paste a key in Settings → API key, hit Save, then Refresh.";
+        if (curSlug !== "ollama") { if ($("setkeyrow")) $("setkeyrow").style.display = ""; if ($("setsub")) $("setsub").textContent = (curSlug || "") + " · no key"; }
       } else if (m.error) {
         $("mcount").textContent = "Couldn't load models.";
         $("mcount").title = `${m.error} — check the key, then hit Refresh.`;
@@ -1842,7 +1851,7 @@
     else if (m.type === "share") { finish(renderShare(m)); }
     else if (m.type === "presence") { renderPresence(m); }
     else if (m.type === "firstrun") { showOnboard(); }
-    else if (m.type === "telemetryState") { if (telmTgl) { telmTgl.checked = m.on !== false; try { safeSet("forge_telm", telmTgl.checked ? "1" : "0"); } catch (e) {} } }
+    else if (m.type === "telemetryState") { if (telmTgl && typeof m.on === "boolean") { telmTgl.checked = m.on; try { safeSet("forge_telm", telmTgl.checked ? "1" : "0"); } catch (e) {} } }
 
     // cross-tool / teammate notifications arrive any time — append as a system card
     else if (m.type === "bifrost") {
@@ -1934,6 +1943,7 @@
       else if (model) curModel = model;
       curSlug = next;
       if (curSlug === "ollama") lastHasKey = true;
+      else if (!o.dataset.saved) lastHasKey = null; // unknown until the host replies; never keep a stale true
       renderPill(); renderCtx(); renderSettings({ slug: curSlug, hasKey: lastHasKey === true, model: curModel, baseUrl: lastBaseUrl });
     };
     const render = () => {
@@ -2175,6 +2185,7 @@
     if (removed.length) lastReverted = { nodes: removed, refNext: banner || null, sid: sessionId, turns: savedTurns, keep: keepCount };
     else lastReverted = null;
     preEnhance = null; $("enhanceUndo").style.display = "none";
+    mentionPaths.length = 0; renderChips(); menClose(); // restored text re-resolves host-side; drop stale chips
     turn = null; thinkEl = null; working = false; stopWords(); clearThinkTimeout();
     clearFind(); closePops(); renderCtx();
     intent.focus(); scroll(true);
@@ -2216,7 +2227,7 @@
     enhanceDraft = draft;
     enhanceActive = true;
     eb.style.minWidth = eb.offsetWidth + "px"; // lock width: no contraction while busy
-    eb.classList.add("busy"); eb.disabled = true;
+    eb.classList.add("busy"); // stays clickable: a second Enhance supersedes the first
     enhanceT0 = Date.now(); ebTick();
     enhanceTimer = setInterval(ebTick, 1000);
     post({ action: "enhance", text: draft });
@@ -2257,7 +2268,7 @@
   }
   function openModels() {
     if (!hasBridge) { systemCard(needBridgeMsg("The model picker")); return; }
-    if (needsKey()) { if (lastNoKeyPrompt !== curSlug) { lastNoKeyPrompt = curSlug; systemCard(`No key saved for <b>${curSlug || "this provider"}</b> — paste it in Settings → API key, hit Save, then Refresh.`); } showPop("settings"); }
+    if (needsKey()) { if (lastNoKeyPrompt !== curSlug) { lastNoKeyPrompt = curSlug; systemCard(`No key saved for <b>${curSlug || "this provider"}</b> — paste it in Settings → API key, hit Save, then Refresh.`); } showPop("settings"); return; }
     if (!chatModels.length && curDynamic) post({ action: "refreshModels" });
     closeOthers("modelpop");
     $("modelpop").style.display = "flex"; setExpanded("modelpick", true);

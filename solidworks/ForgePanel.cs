@@ -246,7 +246,10 @@ namespace Forge.SolidWorks
                         try { var ccfg = ReadForgeConfig(); cslug = PresetSlugFor((string)ccfg["provider"], (string)ccfg["baseUrl"]); } catch { cslug = null; }
                         string cwhere = "Settings → API key";
                         if (!string.IsNullOrWhiteSpace(cslug) && !string.Equals(cslug.Trim(), "ollama", StringComparison.OrdinalIgnoreCase))
-                            cwhere += " (or set FORGE_PROVIDER_KEY_" + cslug.Trim().ToUpperInvariant() + ")";
+                        {
+                            string cenv = Forge.Providers.ProviderFactory.EnvSlug(cslug);
+                            cwhere += " (or set " + (cenv == null ? "FORGE_PROVIDER_KEY" : "FORGE_PROVIDER_KEY_" + cenv) + ")";
+                        }
                         Send(new { type = "error", message = "Compaction needs a provider — save a key in " + cwhere + ", then compact again. History kept as-is.", localCompact = true }); return;
                     }
                     try
@@ -481,7 +484,7 @@ namespace Forge.SolidWorks
                         try { running = McpBridge.IsRunning; } catch { }
                         Send(new { type = "answer", answer = "MCP server: " + (running ? "running" : "not running (starts on first multi-part build)") + " — `" + (cmd + " " + args).Trim() + "`. Override in %APPDATA%\\Forge\\mcp.json." });
                     }
-                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't read MCP status: " + ex.Message }); }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't read MCP status: " + ex.Message + " — check %APPDATA%\\Forge\\mcp.json and try again." }); }
                 }
                 else if (action == "reset")   // rehearsal/recording: wipe the panel + every pending thread for a clean take
                 {
@@ -640,7 +643,7 @@ namespace Forge.SolidWorks
                         try { rslug = PresetSlugFor(p, baseUrl); } catch { rslug = null; }
                         bool rlocal = !string.IsNullOrWhiteSpace(rslug) && string.Equals(rslug.Trim(), "ollama", StringComparison.OrdinalIgnoreCase);
                         string key = StoredProviderKeyForSlug(PresetSlugFor(p, baseUrl), p);
-                        if (string.IsNullOrWhiteSpace(key) && !rlocal) throw new Exception("No key saved for " + (rslug ?? p) + " — save one in Settings → API key (or set FORGE_PROVIDER_KEY_" + (rslug ?? "PROVIDER").Trim().ToUpperInvariant() + "), then Refresh.");
+                        if (string.IsNullOrWhiteSpace(key) && !rlocal) throw new Exception("No key saved for " + (rslug ?? p) + " — save one in Settings → API key (or set " + (Forge.Providers.ProviderFactory.EnvSlug(rslug) == null ? "FORGE_PROVIDER_KEY" : "FORGE_PROVIDER_KEY_" + Forge.Providers.ProviderFactory.EnvSlug(rslug)) + "), then Refresh.");
                         var ids = await FetchServableModels(baseUrl, (key ?? "").Trim());
                         Send(new { type = "models", models = ids, selected = (string)cfg["model"] });
                     }
@@ -940,7 +943,8 @@ namespace Forge.SolidWorks
                 {
                     try
                     {
-                        var k = System.Environment.GetEnvironmentVariable("FORGE_PROVIDER_KEY_" + s.ToUpperInvariant());
+                        string eslug = Forge.Providers.ProviderFactory.EnvSlug(s);
+                        var k = eslug == null ? null : System.Environment.GetEnvironmentVariable("FORGE_PROVIDER_KEY_" + eslug);
                         if (!string.IsNullOrWhiteSpace(k)) return k;
                     }
                     catch { }
@@ -1010,11 +1014,11 @@ namespace Forge.SolidWorks
             {
                 case "openrouter": return new ProviderPreset("openai-compatible", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini");
                 case "nvidia":     return new ProviderPreset("openai-compatible", "https://integrate.api.nvidia.com/v1", "moonshotai/kimi-k3.1-pro");
-                case "openai":     return new ProviderPreset("openai-compatible", "https://api.openai.com/v1", "gpt-4o-mini");
+                case "openai":     return new ProviderPreset("openai-compatible", "https://api.openai.com/v1", "gpt-6-luna"); // gpt-4o-mini snapshot shuts down 2027-01-14
                 case "anthropic":  return new ProviderPreset("anthropic", "https://api.anthropic.com/v1", "claude-3-5-sonnet-20241022");
                 case "ollama":     return new ProviderPreset("openai-compatible", "http://localhost:11434/v1", "llama3.2");
                 case "deepseek":
-                default:           return new ProviderPreset("openai-compatible", "https://api.deepseek.com/v1", "deepseek-chat");
+                default:           return new ProviderPreset("openai-compatible", "https://api.deepseek.com/v1", "deepseek-flash"); // deepseek-chat discontinued 2026-07-24
             }
         }
 
@@ -1044,8 +1048,11 @@ namespace Forge.SolidWorks
                 string eslug0 = null;
                 try { var ec0 = ReadForgeConfig(); eslug0 = PresetSlugFor((string)ec0["provider"], (string)ec0["baseUrl"]); } catch { eslug0 = null; }
                 string ewhere = "Settings → API key";
-                if (!string.IsNullOrWhiteSpace(eslug0) && !string.Equals(eslug0.Trim(), "ollama", StringComparison.OrdinalIgnoreCase))
-                    ewhere += " (or set FORGE_PROVIDER_KEY_" + eslug0.Trim().ToUpperInvariant() + ")";
+                    if (!string.IsNullOrWhiteSpace(eslug0) && !string.Equals(eslug0.Trim(), "ollama", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string eenv = Forge.Providers.ProviderFactory.EnvSlug(eslug0);
+                        ewhere += " (or set " + (eenv == null ? "FORGE_PROVIDER_KEY" : "FORGE_PROVIDER_KEY_" + eenv) + ")";
+                    }
                 Send(new { type = "error", message = "Enhance needs an LLM provider — save a key in " + ewhere + ", then try again." });
                 return;
             }

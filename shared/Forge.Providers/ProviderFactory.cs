@@ -6,7 +6,7 @@ namespace Forge.Providers
 {
     /// <summary>
     /// Builds an IProviderClient from %APPDATA%\Forge\config.json
-    /// {"provider":"openai-compatible","baseUrl":"https://api.deepseek.com/v1","model":"deepseek-chat"}
+    /// {"provider":"openai-compatible","baseUrl":"https://api.deepseek.com/v1","model":"deepseek-flash"}
     /// with the API key read from KeyStore (keys\{provider}.key). Returns null when unconfigured
     /// so the caller can fall back to the cloud router.
     /// </summary>
@@ -85,8 +85,8 @@ namespace Forge.Providers
             }
             catch { }
             string bu = (baseUrl ?? "").Trim().ToLowerInvariant();
-        if (bu.Contains("api.deepseek.com")) return "deepseek-flash";
-        if (bu.Contains("api.openai.com")) return "gpt-5-nano";
+            if (bu.Contains("api.deepseek.com")) return "deepseek-flash";
+            if (bu.Contains("api.openai.com")) return "gpt-6-luna";
         if (bu.Contains("api.anthropic.com")) return "claude-haiku-4-5";
             return null;
         }
@@ -100,7 +100,7 @@ namespace Forge.Providers
         {
             if (string.IsNullOrWhiteSpace(model)) return true;
             string m = model.Trim().ToLowerInvariant();
-            if (System.Text.RegularExpressions.Regex.IsMatch(m, @"(^|[^a-z0-9])(o[1-9]|gpt-5|codex)([^a-z0-9]|$)")) return false;
+            if (System.Text.RegularExpressions.Regex.IsMatch(m, @"(^|[^a-z0-9])(o[1-9]|gpt-[456]|codex)([^a-z0-9]|$)")) return false;
             if (System.Text.RegularExpressions.Regex.IsMatch(m, @"(^|[^a-z0-9])(think|thinking|reason|reasoning|reasoner)([^a-z0-9]|$)")) return false;
             return true;
         }
@@ -134,14 +134,25 @@ namespace Forge.Providers
             }
         }
 
+            /// <summary>Env-var-safe slug fragment (uppercase, hyphens/spaces to underscores).</summary>
+        public static string EnvSlug(string slug)
+        {
+            if (string.IsNullOrWhiteSpace(slug)) return null;
+            var s = System.Text.RegularExpressions.Regex.Replace(slug.Trim().ToUpperInvariant(), @"[^A-Z0-9]+", "_");
+            s = s.Trim('_'); // a slug of only separators ("---") is no slug: fall back to bare
+            return string.IsNullOrEmpty(s) ? null : s;
+        }
+
         /// <summary>Per-slug key env var for the current config; null when no key is needed (Ollama/local).</summary>
         public static string KeyEnvFor(string provider, string baseUrl)
         {
             string slug = null;
             try { slug = SlugFor(provider, baseUrl); } catch { slug = null; }
             if (string.IsNullOrWhiteSpace(slug)) return "FORGE_PROVIDER_KEY";
-            if (string.Equals(slug.Trim(), "ollama", StringComparison.OrdinalIgnoreCase)) return null;
-            return "FORGE_PROVIDER_KEY_" + slug.Trim().ToUpperInvariant();
+            if (string.Equals(slug.Trim(), "ollama", System.StringComparison.OrdinalIgnoreCase)) return null;
+            string env = null;
+            try { env = EnvSlug(slug); } catch { env = null; }
+            return string.IsNullOrEmpty(env) ? "FORGE_PROVIDER_KEY" : "FORGE_PROVIDER_KEY_" + env;
         }
 
         /// <summary>Missing-key refusal naming the right env var for the current slug; null when no key is needed.</summary>
@@ -229,7 +240,8 @@ namespace Forge.Providers
                 {
                     try
                     {
-                        var k = Environment.GetEnvironmentVariable("FORGE_PROVIDER_KEY_" + s.Trim().ToUpperInvariant());
+                        string es = EnvSlug(s);
+                        var k = es == null ? null : Environment.GetEnvironmentVariable("FORGE_PROVIDER_KEY_" + es);
                         if (!string.IsNullOrWhiteSpace(k)) return k;
                     }
                     catch { }
