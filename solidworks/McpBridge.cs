@@ -73,6 +73,14 @@ namespace Forge.SolidWorks
             get { lock (Gate) { try { return Proc != null && !Proc.HasExited; } catch { return false; } } }
         }
 
+        /// <summary>Launch configuration for status display (read-only snapshot).</summary>
+        public static void Describe(out string command, out string args)
+        {
+            var cfg = LoadConfig();
+            command = cfg.Command ?? "";
+            args = cfg.Args != null ? string.Join(" ", cfg.Args) : "";
+        }
+
         /// <summary>Start the server + handshake if needed. Throws McpException with a setup hint on failure.</summary>
         public static async Task EnsureStartedAsync(int timeoutMs = 0, CancellationToken ct = default(CancellationToken))
         {

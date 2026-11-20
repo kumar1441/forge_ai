@@ -377,7 +377,7 @@ namespace Forge.SolidWorks
         {
             // 8000 output tokens: a capped 40-step recipe with hole positions runs ~4-6k tokens; the old
             // 2500 budget truncated big plans into unbalanced JSON (retry, then a "couldn't plan" dead end).
-            var opts = new ProviderOptions { MaxTokens = 8000, Temperature = 0, Model = model };
+            var opts = new ProviderOptions { MaxTokens = 8000, Model = model };
             // The intent is untrusted data (framed as such below, dims verbatim — even inch
             // marks survive); the 2000-char cap keeps a pasted blob from becoming a token blowup.
             string safe = (intent ?? "").Trim();

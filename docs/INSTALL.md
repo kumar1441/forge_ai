@@ -49,16 +49,28 @@ The Forge panel appears as a task pane inside SolidWorks.
 
 ## Configure a provider
 
-Forge reads chat settings (provider, base URL, model) from `%APPDATA%\Forge\config.json`. Keys live in per-provider DPAPI-encrypted key files, falling back to the `FORGE_PROVIDER_KEY` env var — never in the config file.
+Forge reads chat settings (provider, base URL, model) from `%APPDATA%\Forge\config.json`. Keys never live in the config file. Resolution order, everywhere: (1) per-slug DPAPI file `%APPDATA%\Forge\keys\<slug>.key` (e.g. `nvidia.key`), (2) per-slug env var, (3) the legacy shared client-id file (auto-adopted under the slug on first use), (4) the bare `FORGE_PROVIDER_KEY` fallback.
+
+| Slug | Per-slug env var |
+|---|---|
+| `deepseek` | `FORGE_PROVIDER_KEY_DEEPSEEK` |
+| `openrouter` | `FORGE_PROVIDER_KEY_OPENROUTER` |
+| `nvidia` | `FORGE_PROVIDER_KEY_NVIDIA` |
+| `openai` | `FORGE_PROVIDER_KEY_OPENAI` |
+| `anthropic` | `FORGE_PROVIDER_KEY_ANTHROPIC` |
+| `ollama` | — (local, no key) |
 
 1. Create `%APPDATA%\Forge\config.json`:
 
    ```json
-   {
-     "provider": "openai-compatible",
-     "baseUrl": "https://api.deepseek.com/v1",
-     "model": "deepseek-chat"
-   }
+    {
+      "provider": "openai-compatible",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "model": "deepseek-chat",
+      "smallModel": "deepseek-chat"
+    }
+
+`smallModel` is optional: rewrite chores (enhance, compaction summaries) use it when set, else the current model.
    ```
 
 2. Set the key as an environment variable — never in the config file:
@@ -118,7 +130,7 @@ Each user turn has a `↩ revert` button. It stops any in-flight run, drops that
 
 ### Transcript compaction
 
-`/compact` and the `🗜` top-bar button fold all but the newest 10 turns into a collapsed `🗜 N earlier turns compacted` block. With a provider connected the host summarizes the folded text (`compact` action, plain-text bullets); otherwise the block keeps a numbered titles digest. The Settings cog holds `Auto-compact` plus `Compact at` (default on, 60 agent messages, floored at 10). The host honors the same toggle/threshold independently and disables entirely when the toggle is off. The panel also auto-compacts once the transcript passes the same `Compact at` threshold (default 60) when auto-compact is on.
+`/compact` and the `🗜` top-bar button fold all but the newest 10 turns into a collapsed `🗜 N earlier turns compacted` block. With a provider connected the host summarizes the folded text (`compact` action, plain-text bullets); otherwise the block keeps a numbered titles digest. The Settings cog holds `Auto-compact` plus `Compact at` (default on, 60, floored at 10). The host applies the number to its agent-message history and retains the newest 30; the panel applies the same number to transcript turns and keeps the newest 10. The host disables entirely when the toggle is off. A 200-step runaway breaker caps agent loops regardless of approvals.
 
 ### Top bar
 
@@ -126,11 +138,11 @@ Each user turn has a `↩ revert` button. It stops any in-flight run, drops that
 
 ### Slash commands
 
-The dispatcher (`slashRun`) supports exactly: `/clear` (= `/new`: fresh chat, resets host conversation), `/help` (command list), `/regen` (= `/regenerate`: re-run last prompt), `/model` (= `/models`: open model picker), `/provider [slug]` (switch with `deepseek|openrouter|nvidia|openai|anthropic|ollama`, or open Settings with no arg), `/allow <tool>` (always allow), `/deny <tool>` (block), `/undeny <tool>` (unblock), `/unrevert` (= `/redo`: restore last revert; `/undo` reverts the last turn), `/auto-approve [on|off]` (master switch, or report state), `/history` (= `/sessions`, `/resume`, `/continue`: open chat history), `/status` (open the usage dropdown), `/compact` (= `/summarize`: fold older turns). Anything else renders the unknown-command card plus the same help text. Leading-`/` input never reaches the agent.
+The dispatcher (`slashRun`) supports exactly: `/clear` (= `/new`: fresh chat, resets host conversation), `/help` (command list), `/regen` (= `/regenerate`: re-run last prompt), `/model` (= `/models`: open model picker), `/provider [slug]` (switch with `deepseek|openrouter|nvidia|openai|anthropic|ollama`, or open Settings with no arg; `/connect` opens Settings), `/allow <tool>` (always allow), `/deny <tool>` (block), `/undeny <tool>` (unblock), `/unrevert` (= `/redo`: restore last revert; `/undo` reverts the last turn), `/auto-approve [on|off]` (master switch, or report state; aliases `/autoapprove /approve-all /approveall`), `/history` (= `/sessions`, `/resume`, `/continue`: open chat history), `/rename <title>` (names the current chat; history has no rename button yet), `/mcps` (read-only MCP server status), `/status` (open the usage dropdown), `/compact` (= `/summarize`: fold older turns). Anything else renders the unknown-command card plus the same help text. Leading-`/` input never reaches the agent. No `/fork` (no shared-session backend), `/agents` (no selectable personas), or transcript export yet.
 
 ### Auto-approve
 
-Settings holds `Auto-approve` (master) plus `Read tools`, `Build tools`, `Destructive` (persisted as `forge_appr_*`, pushed via `setAutoApprove`). Tool category is host-derived (read/build/destructive by name prefix). When a call needs consent the panel shows an approval card (`🔶 Approval needed`, truncated JSON args) with `Approve` / `Always allow` / `Reject`; the verdict posts `approveReply`. `/allow <tool>` and `/deny <tool>` append ordered rules to `%APPDATA%\Forge\agent\approval-rules.json` (last match wins); `/undeny <tool>` removes them; the Settings cog lists allowed and denied patterns with per-item remove buttons.
+Settings holds `Auto-approve` (master) plus `Read tools`, `Build tools`, `Destructive` (persisted as `forge_appr_*`, pushed via `setAutoApprove`). Tool category is host-derived (read/build/destructive by name prefix). When a call needs consent the panel shows an approval card (`🔶 Approval needed`, truncated JSON args) with `Approve` / `Always allow` / `Reject`; the verdict posts `approveReply`. `/allow <tool>` and `/deny <tool>` append ordered rules to `%APPDATA%\Forge\approval-rules.json` (last match wins); `/undeny <tool>` removes them; the Settings cog lists allowed and denied patterns with per-item remove buttons. Glob patterns are supported (`*`, `?`, case-insensitive). A 200-step runaway breaker caps the loop regardless of approvals.
 ### @-mentions
 
 Typing `@` opens the file picker: the host searches open SolidWorks documents first (tagged `open`), then the active document's folder plus one level of subfolders (CAD extensions first), filtered by the query, capped at 50 rows; `Enter/Tab` accepts, arrows move, `Esc` closes. Picking adds a chip under the composer (removable with `✕`). On send, only chips whose names are still in the text are posted as `paths`. Host-side the first posted path doubles as the attach-button file, so Compare-class handlers pick it up with no document open. Remaining `@name` tokens resolve against open documents and the active-doc folder.

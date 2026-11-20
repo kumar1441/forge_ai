@@ -230,7 +230,7 @@ namespace Forge.SolidWorks
             string pat = null;
             try { pat = MatchedPatternFor(tool); } catch { pat = null; }
             string why = string.IsNullOrWhiteSpace(pat) ? "it is on the deny list" : ("deny rule '" + pat.Trim() + "' blocks it");
-            return "Tool '" + tool + "' is blocked (" + why + ") — remove it in Settings → Denied list, or ask for a workaround.";
+            return "Tool '" + tool + "' is blocked (" + why + ") — remove it in Settings → Denied, or ask for a workaround.";
         }
 
         /// <returns>null = ask (card), "allow" / "deny" = last matching rule wins (Kilo parity).</returns>
@@ -971,7 +971,7 @@ namespace Forge.SolidWorks
             int succeeded = 0; // tool calls that returned Ok: the success line reports these, never attempts
             var DoomWindow = new System.Collections.Generic.List<string>(); // per-run rolling window, Kilo parity (fresh each run: a rejected loop re-asks next run, never auto-stops)
             int mark = 0; // Msgs.Count before this iteration's assistant turn (dangling-tail trim bound)
-            // Rolling window of the last single calls seen (name + FULL arguments, exact equality),
+            // Rolling window of the last calls seen (name + FULL arguments, exact equality),
             // Kilo parity: three identical consecutive calls = doom loop. Reads count too.
             try
             {
@@ -1092,8 +1092,8 @@ namespace Forge.SolidWorks
                         }
                         string text = r.Text ?? "";
                         if (text.Length > 2000) text = text.Substring(0, 2000) + "…(truncated)";
-                            log.Add(c.Name + " -> " + (r.Ok ? "ok" : "FAILED"));
-                            if (r.Ok) succeeded++;
+                        log.Add(c.Name + " -> " + (r.Ok ? "ok" : "FAILED"));
+                        if (r.Ok) succeeded++;
                         // The tool ran but stop/revert/supersede landed before the append:
                         // throwing here (trimmed below) beats grafting a stale result onto
                         // truncated history.
@@ -1132,6 +1132,14 @@ namespace Forge.SolidWorks
                             if (verdict != "approve")
                             {
                                 outcome.Error = "Stopped: the model repeated the same call 3 times (" + (c.Name ?? "?") + "). What built so far stays open; rephrase to break the cycle.";
+                                SaveSession(sid);
+                                return outcome;
+                            }
+                            // A deny landing while the card was pending wins over the approve click
+                            // (same fail-closed recheck as GateToolAsync).
+                            if (ApprovalFor(c.Name ?? "") == "deny")
+                            {
+                                outcome.Error = "Stopped: the model repeated the same call 3 times (" + (c.Name ?? "?") + "). " + DenyText(c.Name ?? "?");
                                 SaveSession(sid);
                                 return outcome;
                             }

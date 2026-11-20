@@ -471,6 +471,18 @@ namespace Forge.SolidWorks
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't load chat history: " + ex.Message + " — try again." }); }
                 }
+                else if (action == "mcpStatus")
+                {
+                    try
+                    {
+                        string cmd, args;
+                        McpBridge.Describe(out cmd, out args);
+                        bool running = false;
+                        try { running = McpBridge.IsRunning; } catch { }
+                        Send(new { type = "answer", answer = "MCP server: " + (running ? "running" : "not running (starts on first multi-part build)") + " — `" + (cmd + " " + args).Trim() + "`. Override in %APPDATA%\\Forge\\mcp.json." });
+                    }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't read MCP status: " + ex.Message }); }
+                }
                 else if (action == "reset")   // rehearsal/recording: wipe the panel + every pending thread for a clean take
                 {
                     try { if (_runCts != null) _runCts.Cancel(); } catch { }
@@ -898,7 +910,9 @@ namespace Forge.SolidWorks
         private static string StoredProviderKey(string provider)
         {
             try { var k = KeyStore.Load(provider); if (!string.IsNullOrWhiteSpace(k)) return k; } catch { }
-            try { return System.Environment.GetEnvironmentVariable("FORGE_PROVIDER_KEY"); }
+            // An empty/whitespace export counts as unset (same null contract as KeyStore.Load):
+            // callers use this to decide hasKey and to build auth headers.
+            try { var k = System.Environment.GetEnvironmentVariable("FORGE_PROVIDER_KEY"); return string.IsNullOrWhiteSpace(k) ? null : k; }
             catch { return null; }
         }
 

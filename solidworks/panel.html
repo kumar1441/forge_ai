@@ -560,7 +560,7 @@
   const grow = () => { intent.style.height = "auto"; intent.style.height = Math.min(intent.scrollHeight,200) + "px"; };
   // Quota-safe localStorage: reads fall back to memory, writes prune then keep memory copy.
   const memStore = {}; let quotaFull = false, quotaNoticed = false;
-  function safeGet(k) { try { if (quotaFull && (k in memStore)) return memStore[k]; const v = localStorage.getItem(k); return v === null && (k in memStore) ? memStore[k] : v; } catch (e) { return (k in memStore) ? memStore[k] : null; } }
+  function safeGet(k) { try { if (k in memStore) return memStore[k]; return localStorage.getItem(k); } catch (e) { return (k in memStore) ? memStore[k] : null; } }
   function noteQuota(full) {
     try {
       if (full && !quotaNoticed) { quotaNoticed = true; systemCard("Local storage is full — keeping everything for this session only. Nothing was lost; free space (or delete an old chat) and saving resumes."); }
@@ -681,6 +681,7 @@
       const at = safeGet("forge_compact_at");
       post({ action: "setCompact", on: on === null ? true : on === "1", at: at === null ? 60 : (parseInt(at, 10) || 0) });
     } catch (e2) {}
+    try { post({ action: "telemetry", on: safeGet("forge_telm") === "1" }); } catch (e3) {}
     renderCtx();
   }
   window.addEventListener("DOMContentLoaded", refresh);
@@ -884,7 +885,7 @@
     if (!hasBridge) { systemCard(needBridgeMsg("Saving keys") + " Keys are stored by the SolidWorks host (DPAPI) — reconnect there to save."); return; }
     post({ action: "saveKey", provider: $("setprov").value, key: k });
     post({ action: "getProvider" }); // refresh key state + model list immediately after save
-    lastHasKey = true; renderSettings({ slug: $("setprov").value, hasKey: true, model: curModel, baseUrl: lastBaseUrl });
+    lastHasKey = true; lastNoKeyPrompt = null; renderSettings({ slug: $("setprov").value, hasKey: true, model: curModel, baseUrl: lastBaseUrl });
     renderPill(); renderCtx();
     if (curDynamic) { if ($("mcount")) $("mcount").textContent = "Loading…"; post({ action: "refreshModels" }); }
     $("setkey").value = "";
@@ -956,7 +957,8 @@
     }
   });
   themeTgl.addEventListener("change", () => { safeSet("forge_theme", themeTgl.checked ? "dark" : "light"); applyTheme(); });
-  telmTgl.addEventListener("change", () => post({ action: "telemetry", on: telmTgl.checked }));
+  try { telmTgl.checked = safeGet("forge_telm") === "1"; } catch (e) {}
+  telmTgl.addEventListener("change", () => { safeSet("forge_telm", telmTgl.checked ? "1" : "0"); post({ action: "telemetry", on: telmTgl.checked }); });
   applyTheme();
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 
@@ -1042,7 +1044,8 @@
   function menAccept(i) {
     const it = menItems[i];
     const q = menQuery(); // recompute: the debounced files reply may predate the latest keystroke
-    if (q) menStart = q.start;
+    if (!q) { menClose(); return; }
+    menStart = q.start;
     if (!it || menStart < 0) { menClose(); return; }
     const pos = intent.selectionStart || 0;
     intent.value = intent.value.slice(0, menStart + 1) + it.name + " " + intent.value.slice(pos);
@@ -1278,13 +1281,13 @@
       return !nm || new RegExp("(?:^|\\s)@" + escRx(nm) + "(?=\\s|$)").test(text);
     });
     mentionPaths.length = 0; renderChips(); menClose();
-    if (hasBridge && needsKey()) systemCard(`No key saved for <b>${curSlug}</b> — sending anyway, but add one in Settings → API key and hit Save so the next run succeeds. Your prompt is kept.`);
+    if (hasBridge && needsKey() && lastNoKeyPrompt !== curSlug) { lastNoKeyPrompt = curSlug; systemCard(`No key saved for <b>${curSlug}</b> — sending anyway, but add one in Settings → API key and hit Save so the next run succeeds. Your prompt is kept.`); }
     post({ action: "generate", intent: text, sid: sessionId, paths: mpaths });
     if (!hasBridge) demoRun(text);   // standalone browser preview
   }
 
   // ---- slash commands (Kilo-style: local, instant, no LLM round-trip) ----
-  const SLASH_HELP = "/compact — summarize older turns into an expandable block\n/summarize — same as /compact\n/clear, /new — start a fresh chat\n/regen, /regenerate — re-run the last prompt\n/model, /models — open the model picker\n/provider [slug] — switch provider (deepseek|openrouter|nvidia|openai|anthropic|ollama) or open settings\n/allow <tool> — always allow one tool going forward\n/deny <tool> — block one tool outright · /undeny <tool> — unblock it\n/auto-approve [on|off] — master switch for unattended tool runs\n/history, /sessions — open chat history · /resume, /continue — same list\n/status — show usage details\n/undo — revert the last turn · /redo — restore it\n/help — this list\n/unrevert — restore the last reverted turns";
+  const SLASH_HELP = "/compact — summarize older turns into an expandable block\n/summarize — same as /compact\n/clear, /new — start a fresh chat\n/regen, /regenerate — re-run the last prompt\n/model, /models — open the model picker\n/provider [slug] — switch provider (deepseek|openrouter|nvidia|openai|anthropic|ollama) or open settings\n/connect — open provider settings (Kilo-style connect)\n/allow <tool> — always allow one tool going forward\n/deny <tool> — block one tool outright · /undeny <tool> — unblock it\n/auto-approve [on|off] — master switch for unattended tool runs (aliases: /autoapprove /approve-all /approveall)\n/mcps — show the MCP server status\n/history, /sessions — open chat history · /resume, /continue — same list\n/rename <title> — rename the current chat\n/status — show usage details\n/undo — revert the last turn · /redo — restore it\n/help — this list\n/unrevert — restore the last reverted turns";
   function slashRun(text) {
     const parts = text.slice(1).trim().split(/\s+/);
     const cmd = (parts[0] || "").toLowerCase(), args = parts.slice(1);
@@ -1297,7 +1300,8 @@
         else         systemCard("Nothing to regenerate yet — send a prompt first, then ↻ or /regen re-runs it.");
         break;
       case "model": case "models": openModels(); break;
-      case "provider":
+      case "provider": case "connect":
+        if (cmd === "connect" && !args[0]) { showPop("settings"); break; }
         if (args[0]) {
           const pv = args[0].toLowerCase();
           if (!$("setprov").querySelector(`option[value="${pv}"]`)) { systemCard(`Unknown provider <b>${pv.replace(/</g, "&lt;")}</b> — pick one in Settings.`); showPop("settings"); break; }
@@ -1326,9 +1330,9 @@
         else systemCard("Usage: <b>/undeny &lt;tool-name&gt;</b>.");
         break;
       case "unrevert": unrevert(); break;
-      case "auto-approve":
-        if (args[0] === "on" || args[0] === "off") {
-          const on = args[0] === "on";
+      case "auto-approve": case "autoapprove": case "approve-all": case "approveall":
+        if ((args[0] || "").toLowerCase() === "on" || (args[0] || "").toLowerCase() === "off") {
+          const on = (args[0] || "").toLowerCase() === "on";
           $("apprtgl").checked = on; pushApprCfg();
           systemCard(on ? "Auto-approve <b>on</b> — approved tools run without asking." : "Auto-approve <b>off</b> — every tool call asks first.");
         } else {
@@ -1336,6 +1340,20 @@
         }
         break;
       case "history": case "sessions": case "resume": case "continue": showPop("history"); renderHistoryList(); setExpanded("histbtn", true); setTimeout(() => $("hsearch").focus(), 0); break;
+      case "mcps":
+        if (!hasBridge) { systemCard(needBridgeMsg("MCP server status")); break; }
+        post({ action: "mcpStatus" });
+        break;
+      case "rename": {
+        const title = args.join(" ").trim().slice(0, 60);
+        if (!title) { systemCard("Usage: <b>/rename &lt;title&gt;</b> — names the current chat in history."); break; }
+        const all = loadSessions();
+        const s = all.find(x => x.id === sessionId);
+        if (!s) { systemCard("No active chat to rename yet — send a prompt first."); break; }
+        s.title = title; s.updated = Date.now(); saveSessions(all); renderHistoryList();
+        systemCard(`Chat renamed to “${title.replace(/</g, "&lt;")}”.`);
+        break;
+      }
       case "compact": case "summarize": compactTranscript(false); break;
       case "undo": {
         const turns = [...transcript.querySelectorAll(":scope > .turn")];
@@ -1367,7 +1385,7 @@
     if (sessionId) {
       const all = loadSessions();
       const s = all.find(x => x.id === sessionId);
-      if (s) { s.turns = (lastReverted.turns || []).slice(0, 100); s.updated = Date.now(); saveSessions(all); }
+      if (s) { s.turns = s.turns.concat(lastReverted.turns || []).slice(0, 100); s.updated = Date.now(); saveSessions(all); }
     }
     lastReverted = null;
     renderCtx();
@@ -1416,7 +1434,7 @@
       setTimeout(() => { if (pendingCompact && pendingCompact.sum === sum) compactFallback(); }, 10000);
     } else {
       sum.textContent = titlesDigest(body);
-      if (hasBridge && needsKey()) systemCard(`Compacted locally — add a provider key in Settings for AI summaries. <b>${curSlug}</b> has no key yet.`);
+      if (hasBridge && needsKey() && lastNoKeyPrompt !== curSlug) { lastNoKeyPrompt = curSlug; systemCard(`Compacted locally — add a provider key in Settings for AI summaries. <b>${curSlug}</b> has no key yet.`); }
     }
     scroll();
   }
@@ -1588,7 +1606,7 @@
       const bd = document.createElement("div"); bd.className = "tbody";
       thinkEl.append(hd, bd);
       const selfThink = thinkEl; // capture the block: the shared var moves on to the next think
-      const toggleThink = () => { try { selfThink.classList.toggle("collapsed"); } catch (e) {} };
+      const toggleThink = () => { try { selfThink.classList.toggle("collapsed"); selfThink._manual = true; } catch (e) {} };
       hd.addEventListener("click", toggleThink);
       hd.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleThink(); } });
       turn.result.appendChild(thinkEl); scroll();
@@ -1598,13 +1616,14 @@
       if (!thinkEl || !thinkEl.isConnected) return;
       const bd = thinkEl.querySelector(".tbody");
       if (bd && m.text) {
-        if ((thinkEl._len || 0) > 50000) return; // very long single delta: stop appending, header already notes truncation
+        if ((thinkEl._len || 0) >= 50000) return; // very long single delta: stop appending, header already notes truncation
         let txt = m.text;
         if (thinkEl._len + txt.length > 50000) txt = txt.slice(0, 50000 - thinkEl._len);
+        if (!txt.length) return; // exactly at the cap: nothing left to append, no empty text node
         const last = bd.lastChild; // coalesce into one text node so long runs can't grow unbounded DOM
         if (last && last.nodeType === 3) last.data += txt; else bd.append(document.createTextNode(txt));
         thinkEl._len = (thinkEl._len || 0) + txt.length; // O(1) length tracking, not O(n) textContent scan
-        if (thinkEl._len > 4000) thinkEl.classList.add("collapsed"); // auto-collapse long blocks
+        if (thinkEl._len > 4000 && !thinkEl._manual) thinkEl.classList.add("collapsed"); // auto-collapse long blocks
         const hd2 = thinkEl.querySelector(".thead");
         if (hd2) {
           const s = Math.floor((Date.now() - (thinkEl._t0 || Date.now())) / 1000);
@@ -1743,6 +1762,7 @@
         renderCtx();
         $("mrefresh").style.display = curDynamic ? "" : "none";
         if (!m.hasKey && m.slug && m.slug !== "ollama" && lastNoKeyPrompt !== m.slug) { lastNoKeyPrompt = m.slug; systemCard(`No key saved for <b>${m.slug}</b> — paste it in Settings → API key, hit Save, then pick a model.`); }
+        if (m.hasKey) lastNoKeyPrompt = null; // key present again: a later no-key episode re-warns once
         if (curDynamic && !chatModels.length) post({ action: "refreshModels" });
       } else if (m.error === "nokey") {
         lastHasKey = false;
@@ -1822,7 +1842,7 @@
     else if (m.type === "share") { finish(renderShare(m)); }
     else if (m.type === "presence") { renderPresence(m); }
     else if (m.type === "firstrun") { showOnboard(); }
-    else if (m.type === "telemetryState") { if (telmTgl) telmTgl.checked = m.on !== false; }
+    else if (m.type === "telemetryState") { if (telmTgl) { telmTgl.checked = m.on !== false; try { safeSet("forge_telm", telmTgl.checked ? "1" : "0"); } catch (e) {} } }
 
     // cross-tool / teammate notifications arrive any time — append as a system card
     else if (m.type === "bifrost") {
@@ -1980,7 +2000,7 @@
       const nxt = o.querySelector("#obnext");
       if (nxt) nxt.addEventListener("click", () => { doSave(); page++; render(); });
       const prv = o.querySelector("#obprov");
-      if (prv) prv.addEventListener("change", syncProv);
+      if (prv) prv.addEventListener("change", () => { const kk2 = o.querySelector("#obkey"); if (kk2 && kk2.value) kk2.value = ""; syncProv(); });
       const kk = o.querySelector("#obkey");
       if (kk) kk.addEventListener("input", () => { clearTimeout(kk._t); kk._t = setTimeout(tryFetch, 700); });
       const rel = o.querySelector("#obreload");
@@ -2184,7 +2204,7 @@
       return;
     }
     if (!hasBridge) { systemCard(needBridgeMsg("✨ Enhance") + " Tip: open Settings (⚙) to add a provider key first."); return; }
-    if (needsKey()) { systemCard(`✨ Enhance needs a provider key — paste it in Settings → API key for <b>${curSlug}</b>, hit Save, then Enhance again. Your draft is kept.`); showPop("settings"); return; }
+    if (needsKey()) { if (lastNoKeyPrompt !== curSlug) { lastNoKeyPrompt = curSlug; systemCard(`✨ Enhance needs a provider key — paste it in Settings → API key for <b>${curSlug}</b>, hit Save, then Enhance again. Your draft is kept.`); } showPop("settings"); return; }
     const eb = $("enhance");
     const draft = intent.value.trim();
     if (!draft) {
@@ -2237,7 +2257,7 @@
   }
   function openModels() {
     if (!hasBridge) { systemCard(needBridgeMsg("The model picker")); return; }
-    if (needsKey()) { systemCard(`No key saved for <b>${curSlug || "this provider"}</b> — paste it in Settings → API key, hit Save, then Refresh.`); showPop("settings"); }
+    if (needsKey()) { if (lastNoKeyPrompt !== curSlug) { lastNoKeyPrompt = curSlug; systemCard(`No key saved for <b>${curSlug || "this provider"}</b> — paste it in Settings → API key, hit Save, then Refresh.`); } showPop("settings"); }
     if (!chatModels.length && curDynamic) post({ action: "refreshModels" });
     closeOthers("modelpop");
     $("modelpop").style.display = "flex"; setExpanded("modelpick", true);
@@ -2369,7 +2389,7 @@
   $("mrefresh").addEventListener("click", (e) => {
     e.stopPropagation();
     if (!hasBridge) { $("mcount").textContent = "Preview mode — needs SolidWorks."; systemCard(needBridgeMsg("Refreshing models")); return; }
-    if (needsKey()) { $("mcount").textContent = "Needs a key — see Settings."; systemCard(`Can't refresh models without a key — paste it in Settings → API key for <b>${curSlug}</b>, hit Save, then Refresh.`); showPop("settings"); return; }
+    if (needsKey()) { $("mcount").textContent = "Needs a key — see Settings."; if (lastNoKeyPrompt !== curSlug) { lastNoKeyPrompt = curSlug; systemCard(`Can't refresh models without a key — paste it in Settings → API key for <b>${curSlug}</b>, hit Save, then Refresh.`); } showPop("settings"); return; }
     $("mcount").textContent = "Loading…";
     post({ action: "refreshModels" });
     setTimeout(() => { if ($("mcount").textContent === "Loading…") { $("mcount").textContent = "Couldn't load models."; $("mcount").title = "No reply — check the key, then hit Refresh."; } }, 8000);

@@ -85,9 +85,9 @@ namespace Forge.Providers
             }
             catch { }
             string bu = (baseUrl ?? "").Trim().ToLowerInvariant();
-            if (bu.Contains("api.deepseek.com")) return "deepseek-chat";
-            if (bu.Contains("api.openai.com")) return "gpt-4o-mini";
-            if (bu.Contains("api.anthropic.com")) return "claude-3-5-haiku-latest";
+        if (bu.Contains("api.deepseek.com")) return "deepseek-flash";
+        if (bu.Contains("api.openai.com")) return "gpt-5-nano";
+        if (bu.Contains("api.anthropic.com")) return "claude-haiku-4-5";
             return null;
         }
 
@@ -101,7 +101,7 @@ namespace Forge.Providers
             if (string.IsNullOrWhiteSpace(model)) return true;
             string m = model.Trim().ToLowerInvariant();
             if (System.Text.RegularExpressions.Regex.IsMatch(m, @"(^|[^a-z0-9])(o[1-9]|gpt-5|codex)([^a-z0-9]|$)")) return false;
-            if (m.Contains("think") || m.Contains("reason")) return false;
+            if (System.Text.RegularExpressions.Regex.IsMatch(m, @"(^|[^a-z0-9])(think|thinking|reason|reasoning|reasoner)([^a-z0-9]|$)")) return false;
             return true;
         }
 
@@ -130,7 +130,7 @@ namespace Forge.Providers
                 case "openai": return "OpenAI";
                 case "anthropic": return "Anthropic";
                 case "ollama": return "Ollama";
-                default: return slug.Trim();
+                default: return "the provider";
             }
         }
 
