@@ -118,7 +118,7 @@ Each user turn has a `↩ revert` button. It stops any in-flight run, drops that
 
 ### Transcript compaction
 
-`/compact` and the `🗜` top-bar button fold all but the newest 10 turns into a collapsed `🗜 N earlier turns compacted` block. With a provider connected the host summarizes the folded text (`compact` action, plain-text bullets); otherwise the block keeps a numbered titles digest. The Settings cog holds `Auto-compact` plus `Compact at` (default on, 60 agent messages, floored at 10). The host honors the same toggle/threshold independently and disables entirely when the toggle is off or the threshold is non-positive. The panel also auto-compacts once the transcript passes 40 turns when auto-compact is on.
+`/compact` and the `🗜` top-bar button fold all but the newest 10 turns into a collapsed `🗜 N earlier turns compacted` block. With a provider connected the host summarizes the folded text (`compact` action, plain-text bullets); otherwise the block keeps a numbered titles digest. The Settings cog holds `Auto-compact` plus `Compact at` (default on, 60 agent messages, floored at 10). The host honors the same toggle/threshold independently and disables entirely when the toggle is off. The panel also auto-compacts once the transcript passes the same `Compact at` threshold (default 60) when auto-compact is on.
 
 ### Top bar
 
@@ -131,7 +131,6 @@ The dispatcher (`slashRun`) supports exactly: `/clear` (= `/new`: fresh chat, re
 ### Auto-approve
 
 Settings holds `Auto-approve` (master) plus `Read tools`, `Build tools`, `Destructive` (persisted as `forge_appr_*`, pushed via `setAutoApprove`). Tool category is host-derived (read/build/destructive by name prefix). When a call needs consent the panel shows an approval card (`🔶 Approval needed`, truncated JSON args) with `Approve` / `Always allow` / `Reject`; the verdict posts `approveReply`. `/allow <tool>` and `/deny <tool>` append ordered rules to `%APPDATA%\Forge\agent\approval-rules.json` (last match wins); `/undeny <tool>` removes them; the Settings cog lists allowed and denied patterns with per-item remove buttons.
-
 ### @-mentions
 
 Typing `@` opens the file picker: the host searches open SolidWorks documents first (tagged `open`), then the active document's folder plus one level of subfolders (CAD extensions first), filtered by the query, capped at 50 rows; `Enter/Tab` accepts, arrows move, `Esc` closes. Picking adds a chip under the composer (removable with `✕`). On send, only chips whose names are still in the text are posted as `paths`. Host-side the first posted path doubles as the attach-button file, so Compare-class handlers pick it up with no document open. Remaining `@name` tokens resolve against open documents and the active-doc folder.

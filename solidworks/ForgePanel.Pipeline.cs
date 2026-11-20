@@ -5435,6 +5435,8 @@ namespace Forge.SolidWorks
                 durationMs: sw.ElapsedMilliseconds, swVersion: SwVer(), opsUsed: OpCounter.Count, questionType: "edit", questionSummary: spec.Name);
 
             if (o.Card != null) { o.Card["runId"] = _currentRunId; o.Card["handler"] = spec.Name; Send(o.Card); }
+            // Unverified but error-free: report the result HONESTLY — never a clean success claim.
+            else if (!o.Verified) Send(new { type = "answer", answer = (string.IsNullOrWhiteSpace(o.Info) ? "Ran, but nothing to show." : o.Info) + " (couldn't verify — check the model.)", runId = _currentRunId, handler = spec.Name });
             else Send(new { type = "answer", answer = o.Info, runId = _currentRunId, handler = spec.Name });
             return o;
         }
@@ -5671,7 +5673,10 @@ namespace Forge.SolidWorks
                 try { if (_alive != null && !_alive()) return; } catch { return; }
                 try
                 {
-                    if (_ui != null) _ui.Post(_ => { try { _send(msg); } catch { } }, null);
+                    // Re-check inside the marshalled callback: the run can be superseded between
+                    // queueing and UI-thread execution, and the queued chunk must not land in the
+                    // new run's thinking block (nor close it, via a stale thinkEnd).
+                    if (_ui != null) _ui.Post(_ => { try { if (_alive != null && !_alive()) return; _send(msg); } catch { } }, null);
                     else _send(msg);
                 }
                 catch { }
@@ -5733,7 +5738,7 @@ namespace Forge.SolidWorks
             // a superseded run's late card can't hijack the new run's approval flow.
             var mySender = new Action<JObject>(card => { if (myId == _currentRunId) Send(card); });
             McpBuild.CardSender = mySender;
-            try { mc = await McpBuild.RunAgent(intent, emitM, ct, relay.OnDelta, sid); relay.End(false); }
+            try { mc = await McpBuild.RunAgent(intent, emitM, ct, relay.OnDelta, sid, mySender); relay.End(false); }
             catch (OperationCanceledException)
             {
                 relay.End(true);

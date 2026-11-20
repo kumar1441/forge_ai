@@ -50,7 +50,10 @@ namespace Forge.Providers
             if (messages == null) throw new ArgumentNullException("messages");
             string model = (opts != null && !string.IsNullOrWhiteSpace(opts.Model)) ? opts.Model : _defaultModel;
             if (string.IsNullOrWhiteSpace(model))
-                throw new ProviderException("No model selected for provider " + Id + " — pick a model in settings, then resend.");
+                throw new ProviderException("No model selected for " + ProviderFactory.DisplayNameFor(Id, _baseUrl) + " — pick one in the model picker (▲), then resend.");
+            string noKey = null;
+            try { noKey = ProviderFactory.MissingKeyMessage(Id, _baseUrl); } catch { noKey = null; }
+            if (!string.IsNullOrWhiteSpace(noKey) && string.IsNullOrWhiteSpace(_apiKey)) throw new ProviderException(noKey);
 
             string url;
             string body;
@@ -93,7 +96,10 @@ namespace Forge.Providers
                         int code = (int)resp.StatusCode;
                         bool transient = code == 408 || code == 429 || code == 500 || code == 502 || code == 503 || code == 504 || code == 529;
                         if (!transient || attempt >= 3)
+                        {
+                            if (code == 401 || code == 403) throw new ProviderException(ProviderFactory.AuthRefusedMessage(Id, _baseUrl, code));
                             throw new ProviderException("Provider HTTP " + code + " (" + resp.StatusCode + "): " + Truncate(text) + " — try again; if it repeats, wait and resend or switch model.");
+                        }
                         try { await Task.Delay(TimeSpan.FromSeconds(5 * (attempt + 1)), ct).ConfigureAwait(false); }
                         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                     }
@@ -173,7 +179,10 @@ namespace Forge.Providers
             if (messages == null) throw new ArgumentNullException("messages");
             string model = (opts != null && !string.IsNullOrWhiteSpace(opts.Model)) ? opts.Model : _defaultModel;
             if (string.IsNullOrWhiteSpace(model))
-                throw new ProviderException("No model selected for provider " + Id + " — pick a model in settings, then resend.");
+                throw new ProviderException("No model selected for " + ProviderFactory.DisplayNameFor(Id, _baseUrl) + " — pick one in the model picker (▲), then resend.");
+            string noKeyS = null;
+            try { noKeyS = ProviderFactory.MissingKeyMessage(Id, _baseUrl); } catch { noKeyS = null; }
+            if (!string.IsNullOrWhiteSpace(noKeyS) && string.IsNullOrWhiteSpace(_apiKey)) throw new ProviderException(noKeyS);
             string body = BuildBody(messages, opts, model, true);
             return await CompleteStreamingBodyAsync(body, model, opts, ct, onDelta);
         }
@@ -188,7 +197,10 @@ namespace Forge.Providers
             if (messages == null) throw new ArgumentNullException("messages");
             string model = (opts != null && !string.IsNullOrWhiteSpace(opts.Model)) ? opts.Model : _defaultModel;
             if (string.IsNullOrWhiteSpace(model))
-                throw new ProviderException("No model selected for provider " + Id + " — pick a model in settings, then resend.");
+                throw new ProviderException("No model selected for " + ProviderFactory.DisplayNameFor(Id, _baseUrl) + " — pick one in the model picker (▲), then resend.");
+            string noKeyR = null;
+            try { noKeyR = ProviderFactory.MissingKeyMessage(Id, _baseUrl); } catch { noKeyR = null; }
+            if (!string.IsNullOrWhiteSpace(noKeyR) && string.IsNullOrWhiteSpace(_apiKey)) throw new ProviderException(noKeyR);
             var j = new JObject { ["model"] = model, ["messages"] = messages };
             if (opts != null)
             {
@@ -242,7 +254,10 @@ namespace Forge.Providers
                 resp = null;
                 bool transient = code == 408 || code == 429 || code == 500 || code == 502 || code == 503 || code == 504 || code == 529;
                 if (!transient || attempt >= 3)
+                {
+                    if (code == 401 || code == 403) throw new ProviderException(ProviderFactory.AuthRefusedMessage(Id, _baseUrl, code));
                     throw new ProviderException("Provider HTTP " + code + " (" + ((System.Net.HttpStatusCode)code) + "): " + Truncate(t) + " — try again; if it repeats, wait and resend or switch model.");
+                }
                 try { await Task.Delay(TimeSpan.FromSeconds(5 * (attempt + 1)), ct).ConfigureAwait(false); }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             }

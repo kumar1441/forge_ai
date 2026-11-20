@@ -211,6 +211,28 @@ namespace Forge.SolidWorks
             // rules list. Kept as a no-op so existing callers keep compiling.
         }
 
+        /// <returns>The last matching rule's pattern (deny or allow), or null when no rule matches.</returns>
+        public static string MatchedPatternFor(string tool)
+        {
+            if (string.IsNullOrWhiteSpace(tool)) return null;
+            string t = tool.Trim();
+            string found = null;
+            lock (Rules)
+            {
+                foreach (var r in Rules)
+                    if (GlobMatch(r.Pattern, t)) found = r.Pattern;
+            }
+            return found;
+        }
+
+        private static string DenyText(string tool)
+        {
+            string pat = null;
+            try { pat = MatchedPatternFor(tool); } catch { pat = null; }
+            string why = string.IsNullOrWhiteSpace(pat) ? "it is on the deny list" : ("deny rule '" + pat.Trim() + "' blocks it");
+            return "Tool '" + tool + "' is blocked (" + why + ") — remove it in Settings → Denied list, or ask for a workaround.";
+        }
+
         /// <returns>null = ask (card), "allow" / "deny" = last matching rule wins (Kilo parity).</returns>
         public static string ApprovalFor(string tool)
         {
@@ -311,18 +333,18 @@ namespace Forge.SolidWorks
         /// refused ToolResult when the user rejects.
         /// </summary>
         public static async Task<McpBridge.ToolResult> GateToolAsync(
-            string tool, JObject args, Func<string, string, string, string, Task> emit, System.Threading.CancellationToken ct)
+            string tool, JObject args, Func<string, string, string, string, Task> emit, System.Threading.CancellationToken ct, Action<JObject> cardSender = null)
         {
             if (ApprovalFor(tool) == "deny")
-                return new McpBridge.ToolResult { Ok = false, Text = "Tool '" + tool + "' is on your deny list — work around it or remove the denial." };
+                return new McpBridge.ToolResult { Ok = false, Text = DenyText(tool) };
             if (IsApproved(tool)) return null;
-            string verdict = await AskApproval(tool, args, emit, ct);
+            string verdict = await AskApproval(tool, args, emit, ct, cardSender);
             // Panel-gone is fail-closed with its own text: it is not a user reject.
             if (verdict == "panel-gone")
                 return new McpBridge.ToolResult { Ok = false, Text = "Stopped: the panel is gone so the approval card can't be answered — resend to continue." };
             // A deny landing while the card was pending wins over a later approve click.
             if (verdict == "approve" && ApprovalFor(tool) == "deny")
-                return new McpBridge.ToolResult { Ok = false, Text = "Tool '" + tool + "' is on your deny list — work around it or remove the denial." };
+                return new McpBridge.ToolResult { Ok = false, Text = DenyText(tool) };
             if (verdict == "approve") return null;
             return new McpBridge.ToolResult { Ok = false, Text = "User rejected this step — work around it or ask what to do instead." };
         }
@@ -331,13 +353,17 @@ namespace Forge.SolidWorks
         // consumed into a rule by ResolveApproval first). Throws OperationCanceledException when
         // the run is stopped while waiting. Shared by the tool gate and the doom-loop guard.
         private static async Task<string> AskApproval(
-            string tool, JObject args, Func<string, string, string, string, Task> emit, System.Threading.CancellationToken ct)
+            string tool, JObject args, Func<string, string, string, string, Task> emit, System.Threading.CancellationToken ct, Action<JObject> senderOverride = null, string reason = null)
         {
             string id = "appr_" + Guid.NewGuid().ToString("N").Substring(0, 8) + "_" + tool;
             var tcs = new System.Threading.Tasks.TaskCompletionSource<string>();
             lock (PendingApprovals) { PendingApprovals[id] = tcs; }
             lock (ApprovalToolById) { ApprovalToolById[id] = tool ?? ""; }
-            var sender = CardSender;
+            // Run-scoped sender when the pipeline supplied one: the shared CardSender slot can
+            // already point at a NEWER run's sender (it is overwritten per Generate), and reading
+            // it here would post this run's card through the new run's stale-guard — delivering a
+            // dead run's card into the live run's approval flow.
+            var sender = senderOverride ?? CardSender;
             if (sender == null)
             {
                 // Panel is gone: no card can ever be answered, so fail closed instead of
@@ -362,7 +388,7 @@ namespace Forge.SolidWorks
                 lock (ApprovalToolById) { ApprovalToolById.Remove(id); }
                 return "panel-gone";
             }
-            try { await emit("Builder", "needs approval: " + tool, "run", null); }
+            try { await emit("Builder", string.IsNullOrWhiteSpace(reason) ? ("needs approval: " + tool) : reason, "run", null); }
             catch { /* emit is best-effort: a dead panel must not break the gate wait */ }
             string verdict;
             try
@@ -505,8 +531,7 @@ namespace Forge.SolidWorks
 
         public static void ClearHistory()
         {
-            lock (Sessions) { Sessions.Clear(); CurrentSid = null; }
-            AgentMsgCount = 0;
+            lock (Sessions) { Sessions.Clear(); CurrentSid = null; AgentMsgCount = 0; }
             // Fail pending approval gates instead of orphaning them: the panel is gone and no
             // verdict can ever arrive, so waiting runs would hang until their own cancel.
             lock (PendingApprovals)
@@ -568,8 +593,8 @@ namespace Forge.SolidWorks
         /// <summary>Summarize (never silently drop) the oldest half once history passes the threshold.</summary>
         private static async Task CompactHistoryIfNeeded(IProviderClient client, string sid, string model, System.Threading.CancellationToken ct)
         {
-            if (!CompactOn || CompactAt <= 0) return; // the settings toggle alone disables — no magic numbers
-            int at = CompactAt < 10 ? 60 : CompactAt;
+            if (!CompactOn) return; // the settings toggle alone disables — no magic numbers
+            int at = CompactAt < 10 ? 10 : CompactAt; // panel clamps to min 10; host matches, never silent 60
             AgentSession session = EnsureSession(sid);
             int count;
             lock (session.Msgs) { count = session.Msgs.Count; }
@@ -717,7 +742,7 @@ namespace Forge.SolidWorks
             public string Error;
         }
 
-        public static async Task<McpBuildOutcome> Run(string intent, Func<string, string, string, string, Task> emit, System.Threading.CancellationToken ct, Action<string, string> onThink)
+        public static async Task<McpBuildOutcome> Run(string intent, Func<string, string, string, string, Task> emit, System.Threading.CancellationToken ct, Action<string, string> onThink, Action<JObject> cardSender = null)
         {
             var outcome = new McpBuildOutcome();
             if (!IsMcpCreate(intent)) return outcome;
@@ -817,7 +842,7 @@ namespace Forge.SolidWorks
                 n_++;
                 await emit("Builder", "step " + n_ + "/" + steps.Count + ": " + tool, "run", null);
                 McpBridge.ToolResult r;
-                var gate = await GateToolAsync(tool, args, emit, ct);
+                var gate = await GateToolAsync(tool, args, emit, ct, cardSender);
                 if (gate != null)
                 {
                     // Surface the gate's own text: a deny-list refusal reads differently
@@ -862,7 +887,7 @@ namespace Forge.SolidWorks
         /// to the JSON-plan path rather than pretending a text reply built anything.
         /// </summary>
         public static async Task<McpBuildOutcome> RunAgent(
-            string intent, Func<string, string, string, string, Task> emit, System.Threading.CancellationToken ct, Action<string, string> onThink, string sid)
+            string intent, Func<string, string, string, string, Task> emit, System.Threading.CancellationToken ct, Action<string, string> onThink, string sid, Action<JObject> cardSender = null)
         {
             var outcome = new McpBuildOutcome();
             if (!IsMcpCreate(intent)) return outcome;
@@ -878,7 +903,7 @@ namespace Forge.SolidWorks
             }
             catch { return outcome; }
             if (client.Id != "openai-compatible")
-                return await Run(intent, emit, ct, onThink); // no function calling here: single-shot path
+                return await Run(intent, emit, ct, onThink, cardSender); // no function calling here: single-shot path
 
             outcome.Attempted = true;
             JArray tools;
@@ -940,9 +965,10 @@ namespace Forge.SolidWorks
             SaveSession(sid);
             await CompactHistoryIfNeeded(client, sid, model, ct);
 
-            var opts = new ProviderOptions { MaxTokens = 16000, Temperature = 0, Model = model, ToolsJson = toolsJson, ToolChoice = "auto" };
+            var opts = new ProviderOptions { MaxTokens = 16000, Temperature = ProviderFactory.SupportsTemperature(model) ? 0 : (double?)null, Model = model, ToolsJson = toolsJson, ToolChoice = "auto" };
             var log = new List<string>();
             int executed = 0;
+            int succeeded = 0; // tool calls that returned Ok: the success line reports these, never attempts
             var DoomWindow = new System.Collections.Generic.List<string>(); // per-run rolling window, Kilo parity (fresh each run: a rejected loop re-asks next run, never auto-stops)
             int mark = 0; // Msgs.Count before this iteration's assistant turn (dangling-tail trim bound)
             // Rolling window of the last single calls seen (name + FULL arguments, exact equality),
@@ -989,9 +1015,21 @@ namespace Forge.SolidWorks
                             SaveSession(sid);
                             return outcome;
                         }
-                        outcome.Summary = executed == 0
-                            ? summary
-                            : ("Built in " + executed + " tool steps" + (string.IsNullOrEmpty(summary) ? "." : ". " + summary));
+                        if (executed == 0)
+                        {
+                            outcome.Summary = summary;
+                        }
+                        else if (succeeded == 0 && string.IsNullOrEmpty(summary))
+                        {
+                            outcome.Error = "The build steps all failed and the model had nothing to add — rephrase or simplify the request.";
+                            SaveSession(sid);
+                            return outcome;
+                        }
+                        else
+                        {
+                            string built = succeeded == executed ? ("Built in " + executed + " tool steps") : ("Built in " + succeeded + " of " + executed + " tool steps (some steps failed)");
+                            outcome.Summary = built + (string.IsNullOrEmpty(summary) ? "." : ". " + summary);
+                        }
                         SaveSession(sid);
                         return outcome;
                     }
@@ -1009,17 +1047,24 @@ namespace Forge.SolidWorks
                             string.Equals(DoomWindow[1], DoomWindow[2], StringComparison.Ordinal);
                         if (loop)
                         {
-                            // Single-call repeats ask under the real tool name so "always" persists
-                            // a real rule; multi-call batches keep the synthetic label (never persisted).
-                            string doomTool = res.ToolCalls.Count == 1 && !string.IsNullOrWhiteSpace(res.ToolCalls[0].Name)
-                                ? res.ToolCalls[0].Name
-                                : "(repeat loop)";
+                            // Ask under a real tool name whenever the window names exactly one tool
+                            // (single call or a batch repeating the same tool) so "always" persists a
+                            // real rule; mixed batches keep the synthetic label (never persisted).
+                            // Kilo parity: no window reset on approve — the very next identical call
+                            // re-asks instead of granting two free repeats.
+                            string doomTool = "(repeat loop)";
+                            {
+                                var distinct = new System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal);
+                                foreach (var sc in res.ToolCalls) { if (!string.IsNullOrWhiteSpace(sc.Name)) distinct.Add(sc.Name); }
+                                if (distinct.Count == 1) { foreach (var dn in distinct) doomTool = dn; }
+                            }
                             string verdict;
                             try
                             {
                                 verdict = await AskApproval(doomTool,
-                                    new JObject { ["repeated_call"] = res.ToolCalls.Count == 1 ? (res.ToolCalls[0].Name ?? "?") : (res.ToolCalls.Count + " calls"), ["times"] = 3 },
-                                    emit, ct);
+                                    new JObject { ["repeated_call"] = res.ToolCalls.Count == 1 ? (res.ToolCalls[0].Name ?? "?") : (res.ToolCalls.Count + " calls"), ["times"] = 3, ["note"] = "The model repeated the same call 3 times, so it looks stuck — approve to let it continue, reject to stop and rephrase." },
+                                    emit, ct, cardSender,
+                                    "Stuck in a loop on " + doomTool + " — approval needed to continue");
                             }
                             catch (OperationCanceledException) { throw; }
                             if (verdict == "panel-gone")
@@ -1035,7 +1080,8 @@ namespace Forge.SolidWorks
                                 SaveSession(sid);
                                 return outcome;
                             }
-                            DoomWindow.Clear(); // approve-then-retrip resets the window: the next identical triple re-asks
+                            // Kilo parity: the window is NOT cleared on approve, so the very next
+                            // identical call re-asks immediately instead of granting free repeats.
                             try { await emit("Builder", "continuing anyway — watching for another loop", "run", null); }
                             catch { }
                         }
@@ -1087,7 +1133,7 @@ namespace Forge.SolidWorks
                         try { await emit("Builder", "step " + executed + ": " + c.Name, "run", null); }
                         catch { /* dead panel: keep executing, the user just sees nothing */ }
                         McpBridge.ToolResult r;
-                        var gate = await GateToolAsync(c.Name, args, emit, ct);
+                        var gate = await GateToolAsync(c.Name, args, emit, ct, cardSender);
                         if (gate != null) r = gate;
                         else
                         {
@@ -1099,7 +1145,8 @@ namespace Forge.SolidWorks
                         }
                         string text = r.Text ?? "";
                         if (text.Length > 2000) text = text.Substring(0, 2000) + "…(truncated)";
-                        log.Add(c.Name + " -> " + (r.Ok ? "ok" : "FAILED"));
+                            log.Add(c.Name + " -> " + (r.Ok ? "ok" : "FAILED"));
+                            if (r.Ok) succeeded++;
                         // The tool ran but stop/revert/supersede landed before the append:
                         // throwing here (trimmed below) beats grafting a stale result onto
                         // truncated history.
@@ -1190,7 +1237,7 @@ namespace Forge.SolidWorks
             // Finite cap: uncapped lets reasoning models think forever and the call never returns.
             // Verified live: capped calls complete; uncapped hang past the 10-minute timeout.
             // Model is the run's snapshot (caller's Resolve), never a fresh CurrentModel read.
-            var opts = new ProviderOptions { MaxTokens = 32000, Temperature = 0, Model = model };
+            var opts = new ProviderOptions { MaxTokens = 32000, Temperature = ProviderFactory.SupportsTemperature(model) ? 0 : (double?)null, Model = model };
             // The intent is untrusted data (framed as such below, dims verbatim — even inch
             // marks survive); the 2000-char cap keeps a pasted blob from becoming a token blowup.
             string safe = (intent ?? "").Trim();

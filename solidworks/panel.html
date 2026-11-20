@@ -472,7 +472,7 @@
       <div class="srow"><label>Usage data</label>
         <span class="toggle"><input type="checkbox" id="telmtgl" /><span class="tk"></span></span>
       </div>
-      <div class="sfoot">usage data = anonymous hashes only · off = nothing leaves this machine</div>
+      <div class="sfoot">usage data = anonymous masked events only · off = nothing leaves this machine</div>
     </div>
     <div class="history" id="history" style="display:none" role="dialog" aria-label="Chat history">
       <input class="hsearch" id="hsearch" placeholder="Search chats…" autocomplete="off" />
@@ -485,8 +485,8 @@
       <div class="crow"><span>Local storage</span><b id="ctxstore">–</b></div>
       <div class="crow"><span>Turns (live / stored)</span><b id="ctxturns">–</b></div>
       <div class="crow"><span>Provider · model</span><b id="ctxprov">–</b></div>
-      <div class="crow"><span>Tokens today (in / out)</span><b id="ctxtok">–</b></div>
-    <div class="crow"><span>Agent history</span><b id="ctxagent">–</b></div>
+      <div class="crow"><span>Model tokens today (agent/enhance)</span><b id="ctxtok">–</b></div>
+      <div class="crow"><span>Agent history (this session)</span><b id="ctxagent">–</b></div>
     </div>
   </div>
 
@@ -558,11 +558,17 @@
 
   const grow = () => { intent.style.height = "auto"; intent.style.height = Math.min(intent.scrollHeight,200) + "px"; };
   // Quota-safe localStorage: reads fall back to memory, writes prune then keep memory copy.
-  const memStore = {}; let quotaFull = false;
-  function safeGet(k) { try { const v = localStorage.getItem(k); return v === null && (k in memStore) ? memStore[k] : v; } catch (e) { return (k in memStore) ? memStore[k] : null; } }
+  const memStore = {}; let quotaFull = false, quotaNoticed = false;
+  function safeGet(k) { try { if (quotaFull && (k in memStore)) return memStore[k]; const v = localStorage.getItem(k); return v === null && (k in memStore) ? memStore[k] : v; } catch (e) { return (k in memStore) ? memStore[k] : null; } }
+  function noteQuota(full) {
+    try {
+      if (full && !quotaNoticed) { quotaNoticed = true; systemCard("Local storage is full — keeping everything for this session only. Nothing was lost; free space (or delete an old chat) and saving resumes."); }
+      else if (!full && quotaNoticed) { quotaNoticed = false; systemCard("Storage is available again — saving resumed."); }
+    } catch (e) {}
+  }
   function safeSet(k, v) {
     memStore[k] = v;
-    try { localStorage.setItem(k, v); if (quotaFull) { quotaFull = false; renderCtx(); } return; } catch (e) {}
+    try { localStorage.setItem(k, v); if (quotaFull) { quotaFull = false; renderCtx(); noteQuota(false); } return; } catch (e) {}
     try {
       const all = JSON.parse(localStorage.getItem("forge_sessions") || "[]");
       if (Array.isArray(all) && all.length > 1) {
@@ -570,7 +576,7 @@
         localStorage.setItem("forge_sessions", JSON.stringify(all.slice(0, 10)));
       } else { try { localStorage.removeItem("forge_history"); } catch (e2) {} }
     } catch (e3) {}
-    try { localStorage.setItem(k, v); if (quotaFull) { quotaFull = false; renderCtx(); } } catch (e4) { quotaFull = true; try { renderCtx(); } catch (e5) {} }
+    try { localStorage.setItem(k, v); if (quotaFull) { quotaFull = false; renderCtx(); noteQuota(false); } } catch (e4) { quotaFull = true; try { renderCtx(); } catch (e5) {} try { noteQuota(true); } catch (e6) {} }
   }
   function popHidden(el) { try { return el && el.style.display === "none"; } catch (e) { return true; } }
   function setExpanded(id, open) { try { const b = $(id); if (b) b.setAttribute("aria-expanded", open ? "true" : "false"); } catch (e) {} }
@@ -606,12 +612,29 @@
     };
     paint("allowlist", al, (t) => { safeSet(allowKey, JSON.stringify(loadList(allowKey).filter(x => x !== t))); renderRules(); post({ action: "allowTool", tool: t, remove: true }); });
     paint("denylist", dl, (t) => { safeSet(denyKey, JSON.stringify(loadList(denyKey).filter(x => x !== t))); renderRules(); post({ action: "denyTool", tool: t, denied: false }); });
+    try {
+      const dl2 = hostDeny || loadList(denyKey);
+      if (Array.isArray(dl2)) dl2.forEach(t => expireApprovalsFor(t, "🔶 Refused — deny added while waiting"));
+    } catch (e) {}
   }
   function trackAllow(t) { const l = loadList(allowKey); if (!l.includes(t)) { l.push(t); safeSet(allowKey, JSON.stringify(l.slice(-30))); } renderRules(); }
   function trackDeny(t, denied) {
     const l = loadList(denyKey).filter(x => x !== t);
     if (denied) l.push(t);
     safeSet(denyKey, JSON.stringify(l.slice(-30))); renderRules();
+    if (denied) expireApprovalsFor(t, "🔶 Refused — deny added while waiting");
+  }
+  // Live always→deny flip: a deny landing while a card is pending wins over a later approve click.
+  function expireApprovalsFor(tool, label) {
+    try {
+      transcript.querySelectorAll(".appr:not(.done)").forEach(box => {
+        if (box.dataset.tool !== tool) return;
+        box.classList.add("done");
+        box.querySelectorAll("button").forEach(x => { x.disabled = true; });
+        const hd = box.querySelector(".ahead");
+        if (hd && hd.firstChild) hd.firstChild.textContent = label || "🔶 Expired — rule changed";
+      });
+    } catch (e) {}
   }
   intent.addEventListener("input", () => { grow(); preEnhance = null; $("enhanceUndo").style.display = "none"; });
 
@@ -709,8 +732,8 @@
     } catch (e) {}
     const amsgs = Number(usage.agentMsgs || 0);
     const apct = (compactOn && amsgs > 0) ? Math.min(99, Math.floor(amsgs / compactAt * 100)) : null;
-    $("ctxpill").textContent = (apct !== null ? `ctx ${apct}% · ` : "") + `disk ${dpct}%`;
-    $("ctxpill").title = (apct !== null ? `Agent context ${apct}% of ${compactAt} msgs · ` : "") + `Local storage ${dpct}% of ~5 MB — click for exact usage`;
+    $("ctxpill").textContent = (apct !== null ? `hist ${apct}% · ` : "") + `disk ${dpct}%`;
+    $("ctxpill").title = (apct !== null ? `History ${amsgs} of ${compactAt} entries before auto-compact · ` : "") + `Local storage ${dpct}% of ~5 MB — click for exact usage`;
     let live = 0; try { live = transcript.querySelectorAll(":scope > .turn").length; } catch (e) {}
     let stored = 0; try { stored = loadSessions().reduce((a, s) => a + s.turns.length, 0); } catch (e2) {}
     $("ctxpct").textContent = dpct + "%";
@@ -744,7 +767,17 @@
   }
   function paintFind() {
     findMarks.forEach(m => m.classList.remove("cur"));
-    if (findIdx >= 0 && findMarks[findIdx]) { findMarks[findIdx].classList.add("cur"); try { findMarks[findIdx].scrollIntoView({ block: "center" }); } catch (e) {} }
+    if (findIdx >= 0 && findMarks[findIdx]) {
+      const cur = findMarks[findIdx];
+      try {
+        // Expand a collapsed ancestor first so the jump lands on visible text.
+        const cbody = cur.closest ? cur.closest(".cbody") : null;
+        if (cbody && cbody.style.display === "none") cbody.style.display = "";
+        const th = cur.closest ? cur.closest(".think.collapsed") : null;
+        if (th) th.classList.remove("collapsed");
+      } catch (e2) {}
+      cur.classList.add("cur"); try { cur.scrollIntoView({ block: "center" }); } catch (e) {}
+    }
     $("fcount").textContent = findMarks.length ? `${findIdx + 1}/${findMarks.length}` : ( $("findinput").value ? "none" : "" );
     $("fcount").title = findMarks.length ? "" : "No matches — keep typing, or Esc closes search";
   }
@@ -863,6 +896,7 @@
 
   // ---- auto-compaction controls (Kilo parity: threshold + off switch, persisted, pushed to host) ----
   const autoCompactOn = () => { try { return safeGet("forge_compact_on") !== "0"; } catch (e) { return true; } };
+  const effectiveCompactAt = (fb) => { try { const a = parseInt(safeGet("forge_compact_at"), 10); if (!isNaN(a) && a >= 10) return a; } catch (e) {} return fb || 60; };
   function loadCompactCfg() {
     try {
       const on = safeGet("forge_compact_on");
@@ -937,6 +971,7 @@
       e.preventDefault();
       const text = intent.value.trim();
       if (text) run(text);
+      else if (mentionPaths.length || ($("chip") && $("chip").style.display !== "none")) systemCard("Add a prompt to send with those files — e.g. “compare these”, then Enter.");
     }
     // Kilo parity: Ctrl/Cmd+Z right after an enhance restores the pre-enhance draft.
     if ((e.key === "z" || e.key === "Z") && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && preEnhance !== null) {
@@ -1016,20 +1051,27 @@
     menClose(); grow(); intent.focus();
     try { intent.setSelectionRange(caret, caret); } catch (e) {}
   }
+  const escRx = (s) => String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const menHas = (name) => new RegExp("(?:^|\\s)@" + escRx(name) + "(?=\\s|$)").test(intent.value);
   function renderChips() {
     const box = $("mchips"); box.innerHTML = "";
     box.style.display = mentionPaths.length ? "flex" : "none";
+    const dup = {};
+    mentionPaths.forEach(p => { dup[p.name] = (dup[p.name] || 0) + 1; });
     mentionPaths.forEach(p => {
       const c = document.createElement("span"); c.className = "mchip";
-      const t = document.createElement("span"); t.textContent = "@" + p.name; t.title = p.path;
+      // Same filename in two dirs: show the parent dir so the chips stay distinguishable.
+      let label = "@" + p.name;
+      if (dup[p.name] > 1) { const seg = String(p.path || "").split(/[\\/]/).filter(Boolean); const parent = seg.length > 1 ? seg[seg.length - 2] : ""; if (parent) label += " (" + parent + ")"; }
+      const t = document.createElement("span"); t.textContent = label; t.title = p.path;
       const x = document.createElement("button"); x.className = "x"; x.textContent = "✕"; x.title = "Remove";
       x.addEventListener("click", () => { const k = mentionPaths.findIndex(q => q.path === p.path); if (k >= 0) mentionPaths.splice(k, 1); renderChips(); });
       c.append(t, x); box.appendChild(c);
     });
   }
   function menCheck() {
-    if (mentionPaths.length && !mentionPaths.every(p => intent.value.includes("@" + p.name))) {
-      for (let i = mentionPaths.length - 1; i >= 0; i--) if (!intent.value.includes("@" + mentionPaths[i].name)) mentionPaths.splice(i, 1);
+    if (mentionPaths.length && !mentionPaths.every(p => menHas(p.name))) {
+      for (let i = mentionPaths.length - 1; i >= 0; i--) if (!menHas(mentionPaths[i].name)) mentionPaths.splice(i, 1);
       renderChips();
     }
     const q = menQuery();
@@ -1087,7 +1129,11 @@
   // ---- chat history (Kilo-style sessions: search, restore, delete, new) ----
   let sessionId = null;
   const sessKey = "forge_sessions";
-  const loadSessions = () => { try { const v = JSON.parse(safeGet(sessKey)); return Array.isArray(v) ? v : []; } catch (e) { return []; } };
+  const loadSessions = () => { try { const v = JSON.parse(safeGet(sessKey)); if (!Array.isArray(v)) return []; return v.filter(s => s && typeof s === "object").map(s => {
+      let turns = Array.isArray(s.turns) ? s.turns : (Array.isArray(s.messages) ? s.messages : []);
+      turns = turns.map(t => typeof t === "string" ? { q: t, a: "" } : (t && typeof t === "object" ? { q: String(t.q ?? t.prompt ?? ""), a: String(t.a ?? t.html ?? t.answer ?? "") } : { q: "", a: "" }));
+      return { id: String(s.id || ""), title: String(s.title || (turns[0] && turns[0].q) || "chat").slice(0, 60), started: Number(s.started) || Date.now(), updated: Number(s.updated || s.started) || Date.now(), model: s.model ? String(s.model) : "", turns };
+    }).filter(s => s.id); } catch (e) { return []; } };
   const saveSessions = (s) => { try { safeSet(sessKey, JSON.stringify(s.slice(0, 30))); } catch (e) {} };
   const ago = (t) => { const m = Math.floor((Date.now() - t) / 60000); if (m < 1) return "just now"; if (m < 60) return m + "m ago"; const h = Math.floor(m / 60); if (h < 24) return h + "h ago"; return Math.floor(h / 24) + "d ago"; };
   const shortModel = (id) => String(id || "").split("/").pop();
@@ -1143,11 +1189,11 @@
     stopWords(); clearThinkTimeout(); working = false; turn = null; thinkEl = null; pendingCompact = null; lastReverted = null; ebReset();
     clearFind(); closePops();
     transcript.innerHTML = "";
-    s.turns.forEach(t => {
+    (Array.isArray(s.turns) ? s.turns : []).forEach(t => {
       const d = document.createElement("div"); d.className = "turn";
-      const u = document.createElement("div"); u.className = "bubble user"; u.textContent = t.q;
+      const u = document.createElement("div"); u.className = "bubble user"; u.textContent = (t && t.q) || "";
     const rv = document.createElement("button"); rv.className = "revertbtn"; rv.title = "Revert to here — edit and resend from this point (/unrevert restores this once)"; rv.textContent = "↩ revert";
-    const f = document.createElement("div"); f.className = "forge"; f.innerHTML = t.a || "";
+    const f = document.createElement("div"); f.className = "forge"; f.innerHTML = (t && t.a) || "";
       d.append(u, rv, f); transcript.appendChild(d);
     });
     sessionId = id;
@@ -1164,6 +1210,16 @@
     }
     renderHistoryList(); scroll(true); intent.focus();
     try { transcript.querySelectorAll(".appr:not(.done)").forEach(box => { box.classList.add("done"); box.querySelectorAll("button").forEach(x => { x.disabled = true; }); }); } catch (e) {}
+    try { transcript.querySelectorAll(".think .thead").forEach(hd => { if (/live/.test(hd.textContent || "")) { hd.textContent = "Thought (restored — click to expand)"; const th = hd.closest(".think"); if (th) th.classList.add("collapsed"); } }); } catch (e2) {}
+    if (!s.turns.length) systemCard("This saved chat is empty — nothing to show. Send a prompt to start it again.");
+    else {
+      const notes = [];
+      try {
+        if (s.model && chatModels.length && !chatModels.some(id => String(id).split("/").pop() === s.model) && !chatModels.includes(s.model)) notes.push(`It was saved with model <b>${String(s.model).replace(/</g, "&lt;")}</b>, which isn't in the current list — you're on <b>${String(shortModel(curModel) || curSlug || "the current model").replace(/</g, "&lt;")}</b>. Sending still works.`);
+        if (needsKey()) notes.push(`<b>${curSlug}</b> has no key saved — add one in Settings → API key before sending, or the run will fail. The restored text is kept.`);
+      } catch (e3) {}
+      if (notes.length) systemCard(notes.join("<br>"));
+    }
     renderCtx();
   }
 
@@ -1218,7 +1274,7 @@
 
     const mpaths = mentionPaths.map(p => p.path).filter(p => {
       const nm = (mentionPaths.find(q => q.path === p) || {}).name || "";
-      return !nm || text.includes("@" + nm);
+      return !nm || new RegExp("(?:^|\\s)@" + escRx(nm) + "(?=\\s|$)").test(text);
     });
     mentionPaths.length = 0; renderChips(); menClose();
     if (hasBridge && needsKey()) systemCard(`No key saved for <b>${curSlug}</b> — sending anyway, but add one in Settings → API key and hit Save so the next run succeeds. Your prompt is kept.`);
@@ -1327,7 +1383,7 @@
     if (summaryText) sum.textContent = summaryText;
     bd.appendChild(sum);
     oldTurns.forEach(t => bd.appendChild(t));
-    const toggle = () => { bd.style.display = bd.style.display === "none" ? "" : "none"; scroll(); };
+    const toggle = () => { bd.style.display = bd.style.display === "none" ? "" : "none"; scroll(); if (bd.style.display !== "none" && $("findbar") && $("findbar").style.display !== "none" && $("findinput").value) runFind(); };
     hd.addEventListener("click", toggle);
     hd.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
     block.append(hd, bd);
@@ -1452,7 +1508,7 @@
     if (wasTurn) recordTurn(html);
     working = false; turn = null;
     scroll(); renderCtx();
-    if (autoCompactOn() && !pendingCompact && transcript.querySelectorAll(":scope > .turn").length > 40) compactTranscript(true);
+    if (autoCompactOn() && !pendingCompact && transcript.querySelectorAll(":scope > .turn").length > effectiveCompactAt(60)) compactTranscript(true);
   }
 
   function renderRedWave(m) {
@@ -1540,9 +1596,12 @@
       if (!thinkEl || !thinkEl.isConnected) return;
       const bd = thinkEl.querySelector(".tbody");
       if (bd && m.text) {
+        if ((thinkEl._len || 0) > 50000) return; // very long single delta: stop appending, header already notes truncation
+        let txt = m.text;
+        if (thinkEl._len + txt.length > 50000) txt = txt.slice(0, 50000 - thinkEl._len);
         const last = bd.lastChild; // coalesce into one text node so long runs can't grow unbounded DOM
-        if (last && last.nodeType === 3) last.data += m.text; else bd.append(document.createTextNode(m.text));
-        thinkEl._len = (thinkEl._len || 0) + m.text.length; // O(1) length tracking, not O(n) textContent scan
+        if (last && last.nodeType === 3) last.data += txt; else bd.append(document.createTextNode(txt));
+        thinkEl._len = (thinkEl._len || 0) + txt.length; // O(1) length tracking, not O(n) textContent scan
         if (thinkEl._len > 4000) thinkEl.classList.add("collapsed"); // auto-collapse long blocks
         const hd2 = thinkEl.querySelector(".thead");
         if (hd2) {
@@ -1550,7 +1609,9 @@
           const base = `✨ ${thinkEl._label || "Thinking"}` + (thinkEl._model ? ` · ${thinkEl._model}` : "") + `… (live · ${s}s)`;
           hd2.textContent = thinkEl.classList.contains("collapsed") ? base + " — long output collapsed, click to expand" : base;
         }
-        scroll();
+        const now = Date.now();
+        if (!thinkEl._st || now - thinkEl._st > 250) { thinkEl._st = now; scroll(); }
+        if ($("findbar") && $("findbar").style.display !== "none" && $("findinput").value) { try { if (findTimer) clearTimeout(findTimer); } catch (e2) {} findTimer = setTimeout(runFind, 400); }
       }
     }
     else if (m.type === "thinkEnd") {
@@ -1578,6 +1639,7 @@
       const box = document.createElement("div");
       box.className = "appr";
       box.dataset.apprId = m.id || "";
+      box.dataset.tool = m.tool || "";
       const hd = document.createElement("div"); hd.className = "ahead";
       hd.innerHTML = `<span>🔶 Approval needed</span>`;
       const tn = document.createElement("span"); tn.className = "atool"; tn.textContent = m.tool || "tool";
@@ -1626,7 +1688,9 @@
       if (menQuery()) { menOpen = true; showPop("menpop"); renderMenList(); }
     }
 
-    else if (m.type === "enhanced") {      if (preEnhance === null) preEnhance = (typeof enhanceDraft === "string" && enhanceDraft) ? enhanceDraft : intent.value;
+    else if (m.type === "enhanced") {
+      if (working) { ebReset(); return; } // enhance→send race: the new turn owns the composer, never clobber it
+      if (preEnhance === null) preEnhance = (typeof enhanceDraft === "string" && enhanceDraft) ? enhanceDraft : intent.value;
       intent.value = m.text || ""; grow();
       $("enhanceUndo").style.display = "";
       ebReset();
@@ -1668,6 +1732,7 @@
     else if (m.type === "provider") {
       if (!m.error) {
         curModel = m.model || null; curDynamic = !!m.dynamic; curSlug = m.slug || null;
+        if (m.model || m.baseUrl) onboardHasConfig = true;
         lastHasKey = (m.slug === "ollama") ? true : !!m.hasKey;
         if (!curDynamic && chatModels.length) { chatModels = []; renderModelList($("msearch") ? $("msearch").value : ""); }
         renderPill();
@@ -1801,6 +1866,9 @@
   // FDL 3-page onboarding (trap.md LOCKED 08-12): welcome+key / trust / try-it. Skip on every page.
   // Pure panel UI; the host (ForgePanel.cs) later sends { type:"firstrun" } and handles the key save via DPAPI.
   let onboarded = false;
+  // True once the host has reported an existing provider/model: empty-key Continue/Skip must
+  // never overwrite a configured setup with the dropdown default (Kilo preserves existing config).
+  let onboardHasConfig = false;
   function showOnboard() {
     if (onboarded || safeGet("forge_onboarded")) return;
     onboarded = true;
@@ -1846,22 +1914,32 @@
     };
     const render = () => {
       o.innerHTML = `<button class="obskip" id="obskipall">Skip</button>${page===1?page1:page===2?page2:page3}${dots()}`;
+      try {
+        // Existing config wins: show the host's provider, not the dropdown default, so Continue/Skip can't fork it.
+        const pr0 = o.querySelector("#obprov");
+        if (pr0 && page === 1 && (curSlug || $("setprov").value) && pr0.querySelector(`option[value="${curSlug || $("setprov").value}"]`)) pr0.value = curSlug || $("setprov").value;
+      } catch (e0) {}
       const doSave = () => {
         const k = o.querySelector("#obkey");
         const pr = o.querySelector("#obprov");
         const md = o.querySelector("#obmodel");
         const slug = pr ? pr.value : (o.dataset.prov || "deepseek");
         if (slug) o.dataset.prov = slug;
+        // Providers whose model list is a Bearer-token GET away (host fetchModels).
+        // Anthropic uses a different auth header server-side; Ollama needs no key at all.
+        const listable = pr && ["deepseek", "openrouter", "nvidia", "openai"].indexOf(pr.value) >= 0;
         if (k && k.value.trim()) {
           const msg = { action: "saveKey", provider: slug, key: k.value.trim() };
-          if (pr && pr.value === "nvidia" && md && md.style.display !== "none" && md.value) msg.model = md.value;
+          if (listable && md && md.style.display !== "none" && md.value) msg.model = md.value;
           if (!hasBridge) systemCard("Preview mode — keys are stored by the SolidWorks host, so this key wasn't saved. Your provider pick is kept locally; reconnect to save it for real.");
           post(msg);
           try { post({ action: "getProvider" }); } catch (e) {} // key state + pill refresh before first chat
           o.dataset.saved = "1";
           lastHasKey = true;
           applyLocalProvider(slug, msg.model || null);
-        } else if (pr) {
+        } else if (pr && !onboardHasConfig) {
+          // Fresh machine only: lay down the picked provider so the first chat has one.
+          // Never fires when the host already has a config — Kilo preserves existing setup.
           try { post({ action: "setProvider", provider: pr.value }); } catch (e) {}
           applyLocalProvider(pr.value, null);
         }
@@ -1869,7 +1947,7 @@
       const tryFetch = () => {
         const pr = o.querySelector("#obprov"), kv = o.querySelector("#obkey"), st = o.querySelector("#obmstat");
         const md = o.querySelector("#obmodel");
-        if (!pr || pr.value !== "nvidia" || !kv) return;
+        if (!pr || ["deepseek", "openrouter", "nvidia", "openai"].indexOf(pr.value) < 0 || !kv) return;
         if (!kv.value.trim()) {
           if (st) st.textContent = "Paste a key to load live models, or Continue with the default.";
           return;
@@ -1880,20 +1958,20 @@
           return;
         }
         if (st) st.textContent = "Loading models…";
-        post({ action: "fetchModels", provider: "nvidia", key: kv.value.trim() });
+        post({ action: "fetchModels", provider: pr.value, key: kv.value.trim() });
         setTimeout(() => { const s2 = o.querySelector("#obmstat"); if (s2 && s2.textContent === "Loading models…") s2.textContent = "Couldn't load models — check the key, then hit Load models, or Continue with the default."; }, 8000);
       };
       const syncProv = () => {
         const pr = o.querySelector("#obprov"), md = o.querySelector("#obmodel"),
               rl = o.querySelector("#obreload"), st = o.querySelector("#obmstat"),
               kv = o.querySelector("#obkey");
-        const isNv = pr && pr.value === "nvidia";
+        const canList = pr && ["deepseek", "openrouter", "nvidia", "openai"].indexOf(pr.value) >= 0;
         const noKey = pr && pr.value === "ollama";
         if (kv) kv.style.display = noKey ? "none" : "";
-        if (md) md.style.display = isNv ? "" : "none";
-        if (rl) rl.style.display = isNv ? "" : "none";
-        if (st) st.style.display = isNv ? "" : "none";
-        if (isNv) tryFetch();
+        if (md) md.style.display = canList ? "" : "none";
+        if (rl) rl.style.display = canList ? "" : "none";
+        if (st) st.style.display = canList ? "" : "none";
+        if (canList) tryFetch();
       };
       const nxt = o.querySelector("#obnext");
       if (nxt) nxt.addEventListener("click", () => { doSave(); page++; render(); });
@@ -1913,9 +1991,15 @@
       if (k) k.addEventListener("keydown", (e) => { if (e.key === "Enter") { doSave(); page++; render(); } });
       try { const f = o.querySelector(page === 1 ? "#obprov" : page === 2 ? "#obnext" : "#obfinish"); if (f && o.isConnected) f.focus(); } catch (e) {}
     };
-    const done = () => {
+      const done = () => {
         const pr = o.querySelector("#obprov");
-        applyLocalProvider((pr && pr.value) || o.dataset.prov || null, null);
+        // Skip = change nothing: with an existing host config the local UI already matches it
+        // (or will on the next provider message); only a fresh machine adopts the dropdown pick.
+        if (o.dataset.saved || !onboardHasConfig) {
+          const adopted = (pr && pr.value) || o.dataset.prov || curSlug || $("setprov").value || null;
+          applyLocalProvider(adopted, null);
+          if (!o.dataset.saved && !onboardHasConfig && adopted && hasBridge) { try { post({ action: "setProvider", provider: adopted }); } catch (e3) {} }
+        }
         try { safeSet("forge_onboarded","1"); } catch (e) {} try { if (o.dataset.saved) post({ action: "getProvider" }); } catch (e2) {} o.remove(); refresh(); intent.focus(); };
     render();
     transcript.appendChild(o);
@@ -2045,12 +2129,23 @@
     }
     let top = turnEl;
     while (top.parentElement && top.parentElement !== transcript) top = top.parentElement;
+    expireApprovals(); // kept turns must not keep live approval buttons after the run ends
+    if (top.classList && top.classList.contains("compact")) {
+      const body = turnEl.parentElement;
+      if (body && body.classList && body.classList.contains("cbody")) {
+        const earlier = [];
+        let ch = body.firstElementChild;
+        while (ch && ch !== turnEl) { const nx2 = ch.nextElementSibling; earlier.push(ch); ch = nx2; }
+        earlier.filter(n => n.classList && n.classList.contains("turn")).forEach(n => transcript.insertBefore(n, top));
+      }
+    }
     const removed = [];
     let nxt = top.nextElementSibling;
     while (nxt) { const rm = nxt; nxt = nxt.nextElementSibling; removed.push(rm); rm.remove(); }
     removed.unshift(top); top.remove();
     if (pendingCompact && !document.contains(pendingCompact.body)) pendingCompact = null;
     if (thinkEl && !thinkEl.isConnected) thinkEl = null;
+    try { transcript.querySelectorAll(".think .thead").forEach(hd => { if (/live/.test(hd.textContent || "")) { hd.textContent = "Thought (run ended — click to expand)"; const th = hd.closest(".think"); if (th) th.classList.add("collapsed"); } }); } catch (e9) {}
     if (bubble) { intent.value = bubble.textContent; grow(); }
     const banner = systemCard("Rewound conversation here — the CAD model itself is unchanged. Edit and resend to continue from this point.");
     if (removed.length) lastReverted = { nodes: removed, refNext: banner || null, sid: sessionId, turns: savedTurns, keep: keepCount };
@@ -2077,7 +2172,13 @@
     eb.innerHTML = `✨ <span class="wdot">●</span> <span class="wdot">●</span> <span class="wdot">●</span> ${s}s`;
   };
   $("enhance").addEventListener("click", () => {
-    if (enhanceActive) return;
+    if (enhanceActive) { // second Enhance supersedes the first: the host drops the stale run, the latest draft wins
+      const draft2 = intent.value.trim();
+      if (!draft2) return;
+      enhanceDraft = draft2; enhanceT0 = Date.now(); ebTick();
+      post({ action: "enhance", text: draft2 });
+      return;
+    }
     if (!hasBridge) { systemCard(needBridgeMsg("✨ Enhance") + " Tip: open Settings (⚙) to add a provider key first."); return; }
     if (needsKey()) { systemCard(`✨ Enhance needs a provider key — paste it in Settings → API key for <b>${curSlug}</b>, hit Save, then Enhance again. Your draft is kept.`); showPop("settings"); return; }
     const eb = $("enhance");
@@ -2153,11 +2254,15 @@
     const list = $("mlist"); list.innerHTML = "";
     const query = String(q || "").toLowerCase();
     const match = (id) => !query || shortName(id).toLowerCase().includes(query) || String(id).toLowerCase().includes(query);
+    const MODEL_MAX = 200; // render perf: cap rows, note the rest
     const items = chatModels.filter(match);
+    // Empty live list + stored selection: keep the current pick visible so the pill and list agree.
+    const curMissing = curModel && !items.includes(curModel) && match(curModel);
     const recents = getRecents().map(r => r.m).filter(id => items.includes(id));
     const showFavs = !query && items.some(isFav);
     const showRecents = !query && recents.length > 0;
     const groups = [];
+    if (curMissing) groups.push({ label: "Current", rows: [curModel] });
     if (showFavs) groups.push({ label: "★ Favorites", rows: items.filter(isFav) });
     if (showRecents) groups.push({ label: "🕘 Recent", rows: recents, clearable: true });
     const rest = query ? items : items.filter(id => !isFav(id));
@@ -2176,9 +2281,9 @@
     const vendors = [...new Set(rest.map(vendorFor))];
     if (!query && vendors.length > 1) vendors.sort().forEach(v => groups.push({ label: v, rows: rest.filter(id => vendorFor(id) === v) }));
     else groups.push({ label: "Models", rows: rest });
-    let shown = 0;
+    let shown = 0, capped = false;
     groups.forEach(g => {
-      if (!g.rows.length) return;
+      if (!g.rows.length || capped) return;
       const gl = document.createElement("div"); gl.className = "mgroup"; gl.textContent = g.label; list.appendChild(gl);
       if (g.clearable) {
         const clr = document.createElement("span");
@@ -2192,6 +2297,7 @@
         gl.appendChild(clr);
       }
       g.rows.forEach(id => {
+        if (shown >= MODEL_MAX) { capped = true; return; }
         shown++;
         const row = document.createElement("div");
         row.className = "mrow" + (id === curModel ? " active" : "");
@@ -2228,7 +2334,7 @@
       }
       list.appendChild(em);
     }
-    $("mcount").textContent = chatModels.length ? chatModels.length + " models" : "";
+    $("mcount").textContent = chatModels.length ? chatModels.length + " models" + (capped ? ` — showing first ${MODEL_MAX}, refine the search` : "") : (curMissing ? "1 model (current)" : "");
   }
   $("modelpick").addEventListener("click", (e) => {
     e.stopPropagation();

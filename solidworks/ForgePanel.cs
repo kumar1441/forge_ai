@@ -85,6 +85,7 @@ namespace Forge.SolidWorks
         private static bool _noticesShown;   // crash-recovery + update notice, once per session
         private static bool _firstrunShown;  // onboarding overlay, once per process (panel also gates on localStorage)
         private string _currentRunId;        // per-command id: ties thumbs feedback + corrections to the run
+        private int _enhanceSeq;              // Enhance supersede guard: only the newest Enhance may write
         private static System.Threading.CancellationTokenSource _runCts;     // current Generate run (Esc/stop cancels it)
         private static System.Threading.CancellationTokenSource _enhanceCts; // current Enhance call (Esc/stop cancels it)
 
@@ -235,12 +236,19 @@ namespace Forge.SolidWorks
                     string text = null;
                     try { text = (string)msg.text; } catch { }
                     if (string.IsNullOrWhiteSpace(text))
-                    { Send(new { type = "error", message = "Nothing to compact — paste the chat text first, then compact." }); return; }
+                    { Send(new { type = "error", message = "Nothing to compact yet — send a prompt first, then /compact." }); return; }
                     IProviderClient c2;
                     string compactModel;
                     try { c2 = ProviderFactory.Resolve(out compactModel); } catch { c2 = null; compactModel = null; }
                     if (c2 == null)
-                    { Send(new { type = "error", message = "Compaction needs a provider — save a key in settings, then compact again. History kept as-is.", localCompact = true }); return; }
+                    {
+                        string cslug = null;
+                        try { var ccfg = ReadForgeConfig(); cslug = PresetSlugFor((string)ccfg["provider"], (string)ccfg["baseUrl"]); } catch { cslug = null; }
+                        string cwhere = "Settings → API key";
+                        if (!string.IsNullOrWhiteSpace(cslug) && !string.Equals(cslug.Trim(), "ollama", StringComparison.OrdinalIgnoreCase))
+                            cwhere += " (or set FORGE_PROVIDER_KEY_" + cslug.Trim().ToUpperInvariant() + ")";
+                        Send(new { type = "error", message = "Compaction needs a provider — save a key in " + cwhere + ", then compact again. History kept as-is.", localCompact = true }); return;
+                    }
                     try
                     {
                         // A hostile/pasted transcript must not become a token blowup: summarize the
@@ -265,7 +273,7 @@ namespace Forge.SolidWorks
                     }
                     catch (Exception ex)
                     {
-                        Send(new { type = "error", message = "Compaction failed: " + ex.Message + " — keeping full history.", localCompact = true });
+                        Send(new { type = "error", message = "Compaction failed: " + ex.Message + " — keeping full history; try again.", localCompact = true });
                     }
                 }
                 else if (action == "usage")   // top-bar context dropdown: today's provider token totals + agent history
@@ -408,7 +416,7 @@ namespace Forge.SolidWorks
                         catch { }
                         Send(new { type = "files", files = out_ });
                     }
-                    catch (Exception ex) { Send(new { type = "error", message = "File search failed: " + ex.Message }); }
+                    catch (Exception ex) { Send(new { type = "error", message = "File search failed: " + ex.Message + " — try again or type the file name." }); }
                 }
                 else if (action == "stop")   // Kilo-style interrupt: cancel the in-flight run/enhance; partial CoT stays
                 {
@@ -444,7 +452,7 @@ namespace Forge.SolidWorks
                         }
                         catch { haveKeep = false; }
                         if (string.IsNullOrWhiteSpace(rsid)) McpBuild.ClearHistory();
-                        else if (!haveKeep) Send(new { type = "error", message = "Revert needs a turn count — history untouched." });
+                        else if (!haveKeep) Send(new { type = "error", message = "Couldn't rewind — I lost track of which turn to keep to, so history is untouched. Click a turn's ↩ revert button to rewind." });
                         else McpBuild.TruncateHistory(rsid, keep);
                     }
                     catch { }
@@ -461,7 +469,7 @@ namespace Forge.SolidWorks
                             Send(new { type = "historyLoaded", turns = McpBuild.HistoryCount() });
                         }
                     }
-                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't load chat history: " + ex.Message }); }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't load chat history: " + ex.Message + " — try again." }); }
                 }
                 else if (action == "reset")   // rehearsal/recording: wipe the panel + every pending thread for a clean take
                 {
@@ -550,7 +558,7 @@ namespace Forge.SolidWorks
                         var ids = await FetchServableModels(preset.BaseUrl, key.Trim());
                         Send(new { type = "models", models = ids, selected = preset.Model });
                     }
-                    catch (Exception ex) { Send(new { type = "models", models = new string[0], error = ex.Message }); }
+                    catch (Exception ex) { Send(new { type = "models", models = new string[0], error = MapModelsError(ex) }); }
                 }
 
                 // Persistent chat model picker (Kilo-style): current provider/model for the pill,
@@ -602,7 +610,7 @@ namespace Forge.SolidWorks
                         Send(new { type = "provider", slug = slug, provider = p, baseUrl = preset.BaseUrl, model = keptModel ?? preset.Model, dynamic = IsDynamicProvider(p), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(slug, p)) });
                         Send(new { type = "answer", answer = "Provider switched to " + slug + " (" + (keptModel ?? preset.Model) + ") — pick another model from the pill if you like." });
                     }
-                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't switch provider: " + ex.Message }); }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't switch provider: " + ex.Message + " — check the selection/key and try again." }); }
                 }
                 else if (action == "refreshModels")
                 {
@@ -613,19 +621,22 @@ namespace Forge.SolidWorks
                         string baseUrl = (string)cfg["baseUrl"];
                         if (!IsDynamicProvider(p)) throw new Exception("This provider has a fixed model.");
                         if (string.IsNullOrWhiteSpace(baseUrl)) throw new Exception("No provider configured yet.");
+                        string rslug = null;
+                        try { rslug = PresetSlugFor(p, baseUrl); } catch { rslug = null; }
+                        bool rlocal = !string.IsNullOrWhiteSpace(rslug) && string.Equals(rslug.Trim(), "ollama", StringComparison.OrdinalIgnoreCase);
                         string key = StoredProviderKeyForSlug(PresetSlugFor(p, baseUrl), p);
-                        if (string.IsNullOrWhiteSpace(key)) throw new Exception("No provider key stored — save one first.");
-                        var ids = await FetchServableModels(baseUrl, key.Trim());
+                        if (string.IsNullOrWhiteSpace(key) && !rlocal) throw new Exception("No key saved for " + (rslug ?? p) + " — save one in Settings → API key (or set FORGE_PROVIDER_KEY_" + (rslug ?? "PROVIDER").Trim().ToUpperInvariant() + "), then Refresh.");
+                        var ids = await FetchServableModels(baseUrl, (key ?? "").Trim());
                         Send(new { type = "models", models = ids, selected = (string)cfg["model"] });
                     }
-                    catch (Exception ex) { Send(new { type = "models", models = new string[0], error = ex.Message }); }
+                    catch (Exception ex) { Send(new { type = "models", models = new string[0], error = MapModelsError(ex) }); }
                 }
                 else if (action == "setModel")
                 {
                     string model = null;
                     try { model = (string)msg.model; } catch { }
                     if (string.IsNullOrWhiteSpace(model))
-                    { Send(new { type = "error", message = "No model picked." }); return; }
+                    { Send(new { type = "error", message = "No model picked — choose one in the model picker (▲) or Settings → Provider, then try again." }); return; }
                     try
                     {
                         var cfg = ReadForgeConfig();
@@ -642,7 +653,7 @@ namespace Forge.SolidWorks
                         Send(new { type = "provider", slug = smslug, provider = sp, baseUrl = sbu, model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(smslug, sp)) });
                         Send(new { type = "answer", answer = "Model switched to " + model.Trim() + " — it applies to the next run." });
                     }
-                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't switch model: " + ex.Message }); }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't switch model: " + ex.Message + " — check the selection/key and try again." }); }
                 }
 
                 // Settings usage-data toggle (trap.md item 2: off switch easy to find). Host = source of truth:
@@ -657,9 +668,9 @@ namespace Forge.SolidWorks
             }
             catch (Exception ex)
             {
-                // Telemetry gets the exception TYPE only â€” never ex.Message (it can contain a file path).
+                // Telemetry gets the exception TYPE only — never ex.Message (it can contain a file path).
                 Telemetry.Log("crash", success: false, errorCode: ex.GetType().Name, swVersion: SwVer());
-                Send(new { type = "error", message = ex.Message });
+                Send(new { type = "error", message = "Couldn't finish that run: " + ex.Message + " — check the model for partial changes, then retry or say what you expected." });
             }
         }
 
@@ -770,7 +781,7 @@ namespace Forge.SolidWorks
             }
             catch (Exception ex)
             {
-                Send(new { type = "error", message = "Couldn't attach that file: " + ex.Message });
+                Send(new { type = "error", message = "Couldn't attach that file: " + ex.Message + " — try again." });
             }
         }
 
@@ -888,15 +899,15 @@ namespace Forge.SolidWorks
             catch { return null; }
         }
 
-        // Slug-aware key lookup: per-slug files first (see SaveProviderKey), then the
-        // legacy shared client-id file, then the env var. A legacy file is adopted once
-        // under the current slug and removed, so a pre-fix shared key is attributed to
-        // the selected provider instead of silently serving every other provider too.
+        // Slug-aware key lookup: per-slug files first (see SaveProviderKey), then a per-slug
+        // env var (FORGE_PROVIDER_KEY_<SLUG>), then the legacy shared client-id file (adopted
+        // once under the current slug), then the bare FORGE_PROVIDER_KEY env fallback.
+        // Order matters: a key saved for one provider must never authenticate another.
         private static string StoredProviderKeyForSlug(string slug, string provider)
         {
             string s = (slug ?? "").Trim().ToLowerInvariant();
             string pid = (provider ?? "").Trim();
-            if (!string.IsNullOrWhiteSpace(s) && !string.Equals(s, pid, StringComparison.OrdinalIgnoreCase))
+            if (!string.IsNullOrWhiteSpace(s))
             {
                 try
                 {
@@ -904,19 +915,48 @@ namespace Forge.SolidWorks
                     if (!string.IsNullOrWhiteSpace(k)) return k;
                 }
                 catch { }
-                try
+                // Per-slug env beats the legacy shared file: an explicit key for THIS
+                // provider outranks an unattributed old one. Checked even when slug ==
+                // provider (e.g. anthropic) so the advertised FORGE_PROVIDER_KEY_<SLUG>
+                // is actually read; ollama needs no key so it has no env.
+                if (!string.Equals(s, "ollama", StringComparison.OrdinalIgnoreCase))
                 {
-                    var legacy = KeyStore.Load(pid);
-                    if (!string.IsNullOrWhiteSpace(legacy))
+                    try
                     {
-                        try { KeyStore.Save(s, legacy); } catch { }
-                        try { KeyStore.Delete(pid); } catch { }
-                        return legacy;
+                        var k = System.Environment.GetEnvironmentVariable("FORGE_PROVIDER_KEY_" + s.ToUpperInvariant());
+                        if (!string.IsNullOrWhiteSpace(k)) return k;
                     }
+                    catch { }
                 }
-                catch { }
+                if (!string.Equals(s, pid, StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        var legacy = KeyStore.Load(pid);
+                        if (!string.IsNullOrWhiteSpace(legacy))
+                        {
+                            bool saved = false;
+                            try { KeyStore.Save(s, legacy); saved = true; } catch { saved = false; }
+                            if (saved) { try { KeyStore.Delete(pid); } catch { } }
+                            return legacy;
+                        }
+                    }
+                    catch { }
+                    // Missed everything slug-specific: fall through to StoredProviderKey(pid)
+                    // so the bare FORGE_PROVIDER_KEY single-provider fallback still applies.
+                }
             }
             return StoredProviderKey(pid);
+        }
+
+        // A 401/403 from /models almost always means a wrong or revoked key, not a broken
+        // endpoint — report "nokey" so the panel shows key guidance instead of a raw HTTP error.
+        private static string MapModelsError(Exception ex)
+        {
+            string m = ex != null ? ex.Message : "";
+            if ((m ?? "").Contains(" 401") || (m ?? "").Contains("(401)")) return "nokey";
+            if ((m ?? "").Contains(" 403") || (m ?? "").Contains("(403)")) return "nokey";
+            return m;
         }
 
         private static async Task<System.Collections.Generic.List<string>> FetchServableModels(string baseUrl, string apiKey)
@@ -984,13 +1024,19 @@ namespace Forge.SolidWorks
             catch { client = null; picked = null; }
             if (client == null)
             {
-                Send(new { type = "error", message = "Enhance needs an LLM provider — save a key in the welcome screen first, then try again." });
+                string eslug0 = null;
+                try { var ec0 = ReadForgeConfig(); eslug0 = PresetSlugFor((string)ec0["provider"], (string)ec0["baseUrl"]); } catch { eslug0 = null; }
+                string ewhere = "Settings → API key";
+                if (!string.IsNullOrWhiteSpace(eslug0) && !string.Equals(eslug0.Trim(), "ollama", StringComparison.OrdinalIgnoreCase))
+                    ewhere += " (or set FORGE_PROVIDER_KEY_" + eslug0.Trim().ToUpperInvariant() + ")";
+                Send(new { type = "error", message = "Enhance needs an LLM provider — save a key in " + ewhere + ", then try again." });
                 return;
             }
             try { if (_enhanceCts != null) _enhanceCts.Cancel(); } catch { }
             try { if (_enhanceCts != null) _enhanceCts.Dispose(); } catch { }
             _enhanceCts = new System.Threading.CancellationTokenSource();
             var ect = _enhanceCts.Token;
+            int myE = ++_enhanceSeq; // a newer Enhance owns the panel: stay silent when stale
             // Small model for rewrites: cheap + fast, falls back to the picked model
             // when no known-cheap model exists for this provider. Temp 0.7: rewrites
             // want a little variance, not determinism.
@@ -1024,6 +1070,7 @@ namespace Forge.SolidWorks
                         (kind, delta) =>
                         {
                             if (kind != "reasoning" || string.IsNullOrEmpty(delta)) return;
+                            if (myE != _enhanceSeq) return; // superseded: don't interleave the new Enhance's block
                             try
                             {
                                 if (ui != null) ui.Post(_ => { try { Send(new { type = "think", text = delta }); } catch { } }, null);
@@ -1040,6 +1087,7 @@ namespace Forge.SolidWorks
                         ect);
                 }
                 watch.Stop();
+                if (myE != _enhanceSeq) return; // superseded while streaming: the new Enhance owns the panel
                 Send(new { type = "thinkEnd", seconds = (int)watch.Elapsed.TotalSeconds });
                 string clean = CleanEnhanced(res != null ? res.Text : null);
                 if (string.IsNullOrWhiteSpace(clean)) throw new Exception("empty enhancement");
@@ -1048,11 +1096,13 @@ namespace Forge.SolidWorks
             }
             catch (OperationCanceledException)
             {
+                if (myE != _enhanceSeq) return; // superseded: the new Enhance owns the panel
                 try { Send(new { type = "thinkEnd", seconds = 0, interrupted = true }); } catch { }
                 Send(new { type = "answer", answer = "Enhance interrupted — partial thinking is kept above. Edit and resend, or ✨ again." });
             }
             catch (Exception ex)
             {
+                if (myE != _enhanceSeq) return; // superseded: the new Enhance owns the panel
                 string detail = ex.Message;
                 if ((detail ?? "").Contains("timed out"))
                     detail = "TIMED OUT after 10 minutes — the model is overloaded or thinking too long; try again or switch to a faster model in the picker";
@@ -1160,7 +1210,7 @@ namespace Forge.SolidWorks
             {
                 _noticesShown = true;
                 try { var crash = ForgeData.CheckInterrupted(); if (crash != null) Send(new { type = "answer", answer = crash }); } catch { }
-                if (Telemetry.Enabled) { try { var upd = await ForgeData.UpdateNotice(); if (upd != null) Send(new { type = "answer", answer = upd }); } catch { } }
+                if (Telemetry.Enabled) { try { var upd = await ForgeData.UpdateNotice(); if (upd != null && myRun == _currentRunId) Send(new { type = "answer", answer = upd }); } catch { } }
             }
             if (myRun != _currentRunId) return; // superseded during the notices: stay silent
 
@@ -1208,6 +1258,7 @@ namespace Forge.SolidWorks
                 { Send(new { type = "step", agent, gloss, state, result }); await Task.Delay(60); };
 
                 ResizeResult rr = await Resizer.Run(SwAddin.SwApp, doc, intent, emitR);
+                if (myRun != _currentRunId) return; // superseded while awaiting: the new run owns the panel
                 Telemetry.Log("edit_run", success: rr.Error == null && rr.Switched > 0, featuresCount: rr.Switched, swVersion: SwVer(),
                     opsUsed: OpCounter.Count, errorCode: rr.Error == null ? null : "resize", questionType: "edit", questionSummary: "bulk resize fasteners");
                 if (rr.Error != null) { LogRun("resize", intent, doc, "error", false, 0, errorCode: "resize"); Send(new { type = "error", message = rr.Error }); return; }
@@ -1249,6 +1300,7 @@ namespace Forge.SolidWorks
                 { Send(new { type = "step", agent, gloss, state, result }); await Task.Delay(60); };
 
                 MateResult mr = await AutoMate.Run(SwAddin.SwApp, doc, emit);
+                if (myRun != _currentRunId) return; // superseded while awaiting: the new run owns the panel
                 Telemetry.Log("edit_run", success: mr.Error == null && mr.Mated > 0, featuresCount: mr.Mated,
                     durationMs: swM.ElapsedMilliseconds, swVersion: SwVer(), opsUsed: OpCounter.Count,
                     errorCode: mr.Error == null ? null : "auto_mate", questionType: "edit", questionSummary: "auto-mate fasteners");
@@ -1273,6 +1325,7 @@ namespace Forge.SolidWorks
                 { Send(new { type = "step", agent, gloss, state, result }); await Task.Delay(60); };
 
                 MirrorResult mir = await Mirror.Run(SwAddin.SwApp, doc, intent, emitMir);
+                if (myRun != _currentRunId) return; // superseded while awaiting: the new run owns the panel
                 Telemetry.Log("edit_run", success: mir.Error == null && (mir.Created || mir.AlreadyDone), swVersion: SwVer(),
                     opsUsed: OpCounter.Count, errorCode: mir.Error == null ? null : "mirror", questionType: "edit", questionSummary: "mirror component");
                 if (mir.Error != null) { LogRun("mirror", intent, doc, "error", false, 0, errorCode: "mirror"); Send(new { type = "error", message = mir.Error }); return; }
@@ -1295,6 +1348,7 @@ namespace Forge.SolidWorks
                 { Send(new { type = "step", agent, gloss, state, result }); await Task.Delay(60); };
 
                 ExplodeResult xr = await Exploder.Run(SwAddin.SwApp, doc, intent, emitX);
+                if (myRun != _currentRunId) return; // superseded while awaiting: the new run owns the panel
                 Telemetry.Log("edit_run", success: xr.Error == null, featuresCount: xr.Moved, swVersion: SwVer(),
                     opsUsed: OpCounter.Count, errorCode: xr.Error == null ? null : "explode", questionType: "edit", questionSummary: "explode assembly");
                 if (xr.Error != null) { LogRun("explode", intent, doc, "error", false, 0, errorCode: "explode"); Send(new { type = "error", message = xr.Error }); return; }
@@ -1313,6 +1367,7 @@ namespace Forge.SolidWorks
                 OpCounter.Increment();
                 ForgeData.RunBegin("set_material", ForgeData.Mask(intent, IntentLayer.ComponentNames(doc)), 0);
                 var mPlan = await IntentLayer.Parse(intent, doc);
+                if (myRun != _currentRunId) return; // superseded while awaiting: the new run owns the panel
                 if (mPlan.Error != null) { Send(new { type = "error", message = mPlan.Error }); return; }
                 await RunMaterialPlan(doc, mPlan, intent);
                 return;
@@ -1331,6 +1386,7 @@ namespace Forge.SolidWorks
                 { Send(new { type = "step", agent, gloss, state, result }); await Task.Delay(60); };
 
                 ScoutResult scr = await Scout.Run(SwAddin.SwApp, doc, emitSc);
+                if (myRun != _currentRunId) return; // superseded while awaiting: the new run owns the panel
                 Telemetry.Log("read_run", success: scr.Error == null, featuresCount: scr.Total, swVersion: SwVer(),
                     opsUsed: OpCounter.Count, errorCode: scr.Error == null ? null : "scan", questionType: "assess", questionSummary: "scan assembly");
                 if (scr.Error != null) { LogRun("scan", intent, doc, "error", false, 0, errorCode: "scan"); Send(new { type = "error", message = scr.Error }); return; }
@@ -1353,6 +1409,7 @@ namespace Forge.SolidWorks
                 { Send(new { type = "step", agent, gloss, state, result }); await Task.Delay(60); };
 
                 IsolateResult ir = await Isolator.Run(SwAddin.SwApp, doc, intent, emitI);
+                if (myRun != _currentRunId) return; // superseded while awaiting: the new run owns the panel
                 Telemetry.Log("edit_run", success: ir.Error == null, featuresCount: ir.Hidden, swVersion: SwVer(),
                     opsUsed: OpCounter.Count, errorCode: ir.Error == null ? null : "isolate", questionType: "edit", questionSummary: "isolate subsystem");
                 if (ir.Error != null) { LogRun("isolate", intent, doc, "error", false, 0, errorCode: "isolate"); Send(new { type = "error", message = ir.Error }); return; }
@@ -1375,6 +1432,7 @@ namespace Forge.SolidWorks
                 { Send(new { type = "step", agent, gloss, state, result }); await Task.Delay(60); };
 
                 BatchResult br = await Batcher.Run(SwAddin.SwApp, doc, intent, emitB);
+                if (myRun != _currentRunId) return; // superseded while awaiting: the new run owns the panel
                 Telemetry.Log("edit_run", success: br.Error == null, featuresCount: br.TotalSuppressed, swVersion: SwVer(),
                     opsUsed: OpCounter.Count, errorCode: br.Error == null ? null : "batch", questionType: "edit", questionSummary: "batch simplify parts");
                 if (br.Error != null) { LogRun("batch", intent, doc, "error", false, 0, errorCode: "batch"); Send(new { type = "error", message = br.Error }); return; }
@@ -1398,6 +1456,7 @@ namespace Forge.SolidWorks
                 if ((int)doc.GetType() == (int)swDocumentTypes_e.swDocASSEMBLY)
                 {
                     BatchResult br = await Batcher.Run(SwAddin.SwApp, doc, intent, emitS);
+                    if (myRun != _currentRunId) return; // superseded while awaiting: the new run owns the panel
                     Telemetry.Log("edit_run", success: br.Error == null, featuresCount: br.TotalSuppressed, swVersion: SwVer(),
                         opsUsed: OpCounter.Count, errorCode: br.Error == null ? null : "batch", questionType: "edit", questionSummary: "batch simplify parts");
                     if (br.Error != null) { LogRun("batch", intent, doc, "error", false, 0, errorCode: "batch"); Send(new { type = "error", message = br.Error }); return; }
@@ -1407,6 +1466,7 @@ namespace Forge.SolidWorks
                 }
 
                 SimplifyResult sr = await Simplifier.Run(SwAddin.SwApp, doc, intent, emitS);
+                if (myRun != _currentRunId) return; // superseded while awaiting: the new run owns the panel
                 Telemetry.Log("edit_run", success: sr.Error == null, featuresCount: sr.Suppressed, swVersion: SwVer(),
                     opsUsed: OpCounter.Count, errorCode: sr.Error == null ? null : "simplify", questionType: "edit", questionSummary: "simplify / print-prep");
                 if (sr.Error != null) { LogRun("simplify", intent, doc, "error", false, 0, errorCode: "simplify"); Send(new { type = "error", message = sr.Error }); return; }
@@ -1450,6 +1510,7 @@ namespace Forge.SolidWorks
                 if (string.IsNullOrEmpty(project)) { Send(new { type = "error", message = "Save the part before sharing." }); return; }
                 if (!Telemetry.Enabled) { Send(new { type = "error", message = "Sharing is OFF while usage sharing is OFF — say \"share data on\" or flip it in Settings to share. Nothing left this machine." }); return; }
                 await ForgeApi.PushModel(project, "", dims);   // anonymous: never send the Windows username
+                if (myRun != _currentRunId) return; // superseded while awaiting: the new run owns the panel
                 Send(new { type = "shared", count = dims.Count });
                 return;
             }
@@ -1469,6 +1530,7 @@ namespace Forge.SolidWorks
 
             Send(new { type = "status", message = "Thinkingâ€¦" });
             ActResult act = await ForgeApi.Act(effective, dims, deps, selectedFeatures, _lastBoardChange);
+            if (myRun != _currentRunId) return; // superseded while awaiting: the new run owns the panel
 
             // The server hit the per-operation token ceiling (the model is too large for one pass).
             if (act.Action == "ceiling")
