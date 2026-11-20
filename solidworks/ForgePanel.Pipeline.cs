@@ -5574,7 +5574,7 @@ namespace Forge.SolidWorks
             var spec = action == null ? null : Specs().Find(s => Array.IndexOf(s.Actions, action) >= 0);
             if (spec == null)
             {
-                Send(new { type = "error", message = "I couldn't route the first step of \"" + comp.PrimaryIntent + "\" to a create handler." });
+                Send(new { type = "error", message = "I couldn't route the first step of \"" + comp.PrimaryIntent + "\" to a create handler — rephrase as explicit steps, then resend." });
                 return true;
             }
 
@@ -5695,7 +5695,7 @@ namespace Forge.SolidWorks
             CreateFromRecipe.RecipeCreateOutcome rc;
             try { rc = await CreateFromRecipe.Run(App, intent, emitR, ct); }
             catch (OperationCanceledException) { if (myIdR == _currentRunId) Send(new { type = "answer", answer = "Interrupted — nothing was built. Edit and resend, or ↩ revert to an earlier prompt.", runId = _currentRunId, handler = "create_recipe" }); return true; }
-            catch (Exception ex) { if (myIdR == _currentRunId) Send(new { type = "answer", answer = "Recipe build failed (" + ex.GetType().Name + ": " + ex.Message + ") — nothing was built; edit and resend.", runId = _currentRunId, handler = "create_recipe" }); return true; }
+            catch (Exception ex) { if (myIdR == _currentRunId) Send(new { type = "answer", answer = "Recipe build failed: " + ex.Message + " — nothing was built; edit and resend.", runId = _currentRunId, handler = "create_recipe" }); return true; }
             if (myIdR != _currentRunId) return true; // superseded: don't attribute our answer to the new run
             if (rc == null || !rc.Attempted) return false; // no provider / not claimable: existing paths keep behaviour
             if (!string.IsNullOrEmpty(rc.Error))
@@ -5726,7 +5726,7 @@ namespace Forge.SolidWorks
             Func<string, string, string, string, Task> emitM = async (a, g, s, r) =>
             { if (myId != _currentRunId) return; Send(new { type = "step", agent = a, gloss = g, state = s, result = r }); await Task.Delay(60); };
             var relay = new ThinkRelay("Planning", msg => Send(msg), () => myId == _currentRunId);
-            try { relay.Start(Forge.Providers.ProviderFactory.CurrentModel()); } catch { }
+            try { relay.Start(Forge.Providers.ProviderFactory.CurrentModel() ?? "the selected model"); } catch { }
             McpBuild.McpBuildOutcome mc;
             // The approval gate posts its cards through this sender: without it the panel never
             // shows the approve/reject card and any gated tool hangs until stop. Stale-guarded so
@@ -5745,7 +5745,7 @@ namespace Forge.SolidWorks
             {
                 try { relay.End(true); } catch { }
                 if (myId == _currentRunId)
-                    Send(new { type = "answer", answer = "Build failed (" + ex.GetType().Name + ": " + ex.Message + ") — what built so far stays open; edit and resend.", runId = _currentRunId, handler = "mcp_build" });
+                    Send(new { type = "answer", answer = "Build failed: " + ex.Message + " — what built so far stays open; edit and resend.", runId = _currentRunId, handler = "mcp_build" });
                 return true;
             }
             finally { if (McpBuild.CardSender == mySender) McpBuild.CardSender = null; }

@@ -50,13 +50,13 @@ namespace Forge.Providers
             if (messages == null) throw new ArgumentNullException("messages");
             string model = (opts != null && !string.IsNullOrWhiteSpace(opts.Model)) ? opts.Model : _defaultModel;
             if (string.IsNullOrWhiteSpace(model))
-                throw new ProviderException("No model configured for provider " + Id + " — set \"model\" in config.json or pass ProviderOptions.Model.");
+                throw new ProviderException("No model selected for provider " + Id + " — pick a model in settings, then resend.");
 
             string url;
             string body;
             try { url = BuildUrl(opts); body = BuildBody(messages, opts, model); }
             catch (ProviderException) { throw; }
-            catch (Exception ex) { throw new ProviderException("Provider request failed to build (" + ex.GetType().Name + "): " + ex.Message, ex); }
+            catch (Exception ex) { throw new ProviderException("Provider request failed to build: " + ex.Message, ex); }
 
             // Transient provider overload (429/5xx incl. Anthropic-style 529) retries with backoff
             // instead of failing the run on the first busy signal. Non-transient errors throw at once.
@@ -65,7 +65,7 @@ namespace Forge.Providers
             {
                 HttpRequestMessage req;
                 try { req = new HttpRequestMessage(HttpMethod.Post, url); }
-                catch (Exception ex) { throw new ProviderException("Provider misconfigured (bad base URL \"" + url + "\"): " + ex.Message, ex); }
+                catch (Exception ex) { throw new ProviderException("Provider address looks wrong (bad base URL \"" + url + "\") — check the provider URL in settings, then resend: " + ex.Message, ex); }
                 using (req)
                 {
                     if (!string.IsNullOrEmpty(_apiKey))
@@ -75,17 +75,17 @@ namespace Forge.Providers
                     HttpResponseMessage resp;
                     try { resp = await Http.SendAsync(req, ct).ConfigureAwait(false); }
                     catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-                    catch (TaskCanceledException) { throw new ProviderException("Provider request timed out."); }
-                    catch (HttpRequestException ex) { throw new ProviderException("Provider network failure: " + ex.Message, ex); }
-                    catch (InvalidOperationException ex) { throw new ProviderException("Provider misconfigured (bad base URL \"" + url + "\"): " + ex.Message, ex); }
-                    catch (UriFormatException ex) { throw new ProviderException("Provider misconfigured (bad base URL \"" + url + "\"): " + ex.Message, ex); }
+                    catch (TaskCanceledException) { throw new ProviderException("Provider request timed out after 10 minutes — the model is overloaded; try again or switch to a faster model."); }
+                    catch (HttpRequestException ex) { throw new ProviderException("Provider network failure: " + ex.Message + " — check the connection and try again.", ex); }
+                    catch (InvalidOperationException ex) { throw new ProviderException("Provider address looks wrong (bad base URL \"" + url + "\") — check the provider URL in settings, then resend: " + ex.Message, ex); }
+                    catch (UriFormatException ex) { throw new ProviderException("Provider address looks wrong (bad base URL \"" + url + "\") — check the provider URL in settings, then resend: " + ex.Message, ex); }
 
                     using (resp)
                     {
                         string text;
                         try { text = await resp.Content.ReadAsStringAsync().ConfigureAwait(false); }
                         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-                        catch (OperationCanceledException) { throw new ProviderException("Provider request timed out."); }
+                        catch (OperationCanceledException) { throw new ProviderException("Provider request timed out after 10 minutes — the model is overloaded; try again or switch to a faster model."); }
                         // A hostile/garbled gateway can stream megabytes of non-JSON: bound what we parse.
                         if (text != null && text.Length > 5000000) throw new ProviderException("Provider returned an oversized response (" + text.Length + " chars) — retry or split the request.");
                         if (resp.IsSuccessStatusCode)
@@ -93,7 +93,7 @@ namespace Forge.Providers
                         int code = (int)resp.StatusCode;
                         bool transient = code == 408 || code == 429 || code == 500 || code == 502 || code == 503 || code == 504 || code == 529;
                         if (!transient || attempt >= 3)
-                            throw new ProviderException("Provider HTTP " + code + " (" + resp.StatusCode + "): " + Truncate(text));
+                            throw new ProviderException("Provider HTTP " + code + " (" + resp.StatusCode + "): " + Truncate(text) + " — try again; if it repeats, wait and resend or switch model.");
                         try { await Task.Delay(TimeSpan.FromSeconds(5 * (attempt + 1)), ct).ConfigureAwait(false); }
                         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                     }
@@ -152,7 +152,7 @@ namespace Forge.Providers
             }
             JArray parsed;
             try { parsed = JArray.Parse(toolsJson); }
-            catch (Exception ex) { throw new ProviderException("Invalid ToolsJson (not a JSON array): " + ex.Message, ex); }
+            catch (Exception ex) { throw new ProviderException("Invalid tool list (not an array): " + ex.Message, ex); }
             lock (ToolsCacheGate)
             {
                 CachedToolsJson = toolsJson;
@@ -173,7 +173,7 @@ namespace Forge.Providers
             if (messages == null) throw new ArgumentNullException("messages");
             string model = (opts != null && !string.IsNullOrWhiteSpace(opts.Model)) ? opts.Model : _defaultModel;
             if (string.IsNullOrWhiteSpace(model))
-                throw new ProviderException("No model configured for provider " + Id + " — set \"model\" in config.json or pass ProviderOptions.Model.");
+                throw new ProviderException("No model selected for provider " + Id + " — pick a model in settings, then resend.");
             string body = BuildBody(messages, opts, model, true);
             return await CompleteStreamingBodyAsync(body, model, opts, ct, onDelta);
         }
@@ -188,7 +188,7 @@ namespace Forge.Providers
             if (messages == null) throw new ArgumentNullException("messages");
             string model = (opts != null && !string.IsNullOrWhiteSpace(opts.Model)) ? opts.Model : _defaultModel;
             if (string.IsNullOrWhiteSpace(model))
-                throw new ProviderException("No model configured for provider " + Id + " — set \"model\" in config.json or pass ProviderOptions.Model.");
+                throw new ProviderException("No model selected for provider " + Id + " — pick a model in settings, then resend.");
             var j = new JObject { ["model"] = model, ["messages"] = messages };
             if (opts != null)
             {
@@ -223,16 +223,16 @@ namespace Forge.Providers
             {
                 HttpRequestMessage req0;
                 try { req0 = new HttpRequestMessage(HttpMethod.Post, url); }
-                catch (Exception ex) { throw new ProviderException("Provider misconfigured (bad base URL \"" + url + "\"): " + ex.Message, ex); }
+                catch (Exception ex) { throw new ProviderException("Provider address looks wrong (bad base URL \"" + url + "\") — check the provider URL in settings, then resend: " + ex.Message, ex); }
                 if (!string.IsNullOrEmpty(_apiKey))
                     req0.Headers.TryAddWithoutValidation("Authorization", "Bearer " + _apiKey);
                 req0.Content = new StringContent(body, Encoding.UTF8, "application/json");
                 try { resp = await Http.SendAsync(req0, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false); }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { try { req0.Dispose(); } catch { } throw; }
-                catch (TaskCanceledException) { try { req0.Dispose(); } catch { } throw new ProviderException("Provider request timed out."); }
-                catch (HttpRequestException ex) { try { req0.Dispose(); } catch { } throw new ProviderException("Provider network failure: " + ex.Message, ex); }
-                catch (InvalidOperationException ex) { try { req0.Dispose(); } catch { } throw new ProviderException("Provider misconfigured (bad base URL \"" + url + "\"): " + ex.Message, ex); }
-                catch (UriFormatException ex) { try { req0.Dispose(); } catch { } throw new ProviderException("Provider misconfigured (bad base URL \"" + url + "\"): " + ex.Message, ex); }
+                catch (TaskCanceledException) { try { req0.Dispose(); } catch { } throw new ProviderException("Provider request timed out after 10 minutes — the model is overloaded; try again or switch to a faster model."); }
+                catch (HttpRequestException ex) { try { req0.Dispose(); } catch { } throw new ProviderException("Provider network failure: " + ex.Message + " — check the connection and try again.", ex); }
+                catch (InvalidOperationException ex) { try { req0.Dispose(); } catch { } throw new ProviderException("Provider address looks wrong (bad base URL \"" + url + "\") — check the provider URL in settings, then resend: " + ex.Message, ex); }
+                catch (UriFormatException ex) { try { req0.Dispose(); } catch { } throw new ProviderException("Provider address looks wrong (bad base URL \"" + url + "\") — check the provider URL in settings, then resend: " + ex.Message, ex); }
                 try { req0.Dispose(); } catch { } // sent: release it on every path (success + retries)
                 if (resp.IsSuccessStatusCode) break;
                 string t = "";
@@ -242,7 +242,7 @@ namespace Forge.Providers
                 resp = null;
                 bool transient = code == 408 || code == 429 || code == 500 || code == 502 || code == 503 || code == 504 || code == 529;
                 if (!transient || attempt >= 3)
-                    throw new ProviderException("Provider HTTP " + code + " (" + ((System.Net.HttpStatusCode)code) + "): " + Truncate(t));
+                    throw new ProviderException("Provider HTTP " + code + " (" + ((System.Net.HttpStatusCode)code) + "): " + Truncate(t) + " — try again; if it repeats, wait and resend or switch model.");
                 try { await Task.Delay(TimeSpan.FromSeconds(5 * (attempt + 1)), ct).ConfigureAwait(false); }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             }
@@ -274,7 +274,7 @@ namespace Forge.Providers
                             if (streamErr != null && streamErr.Type != JTokenType.Null)
                             {
                                 string em = (streamErr as JObject) != null ? (string)((JObject)streamErr)["message"] : null;
-                                throw new ProviderException("Provider stream error: " + (em ?? streamErr.ToString()));
+                                throw new ProviderException("Provider stream error: " + (em ?? streamErr.ToString()) + " — try again; if it repeats, switch model.");
                             }
                              try
                              {
@@ -360,7 +360,7 @@ namespace Forge.Providers
             var calls = new System.Collections.Generic.List<ToolCall>(ordered.Count);
             foreach (int k in ordered) calls.Add(toolParts[k]);
             if (string.IsNullOrWhiteSpace(content) && calls.Count == 0)
-                throw new ProviderException("Provider returned no content.");
+                throw new ProviderException("Provider returned no content — try again or rephrase.");
             return new ProviderResult { Text = content, TokIn = tokIn, TokOut = tokOut, Model = gotModel ?? model, ToolCalls = calls };
         }
 
@@ -368,7 +368,7 @@ namespace Forge.Providers
         {
             JObject j;
             try { j = JObject.Parse(text); }
-            catch (Exception ex) { throw new ProviderException("Provider returned non-JSON: " + Truncate(text), ex); }
+            catch (Exception ex) { throw new ProviderException("Provider returned an unreadable reply — try again; if it repeats, switch model. " + Truncate(text), ex); }
 
             var choices = j["choices"] as JArray;
             var choice = choices != null && choices.Count > 0 ? choices[0] : null;
@@ -423,7 +423,7 @@ namespace Forge.Providers
                 catch { }
             }
             if (string.IsNullOrWhiteSpace(content) && calls.Count == 0)
-                throw new ProviderException("Provider returned no content. " + Truncate(text));
+                throw new ProviderException("Provider returned no content — try again or rephrase. " + Truncate(text));
 
             long tokIn = 0, tokOut = 0;
             try

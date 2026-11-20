@@ -44,13 +44,13 @@ namespace Forge.Providers
             if (messages == null) throw new ArgumentNullException("messages");
             string model = (opts != null && !string.IsNullOrWhiteSpace(opts.Model)) ? opts.Model : _defaultModel;
             if (string.IsNullOrWhiteSpace(model))
-                throw new ProviderException("No model configured for provider " + Id + " — set \"model\" in config.json or pass ProviderOptions.Model.");
+                throw new ProviderException("No model selected for provider " + Id + " — pick a model in settings, then resend.");
 
             string url;
             string body;
             try { url = BuildUrl(opts); body = BuildBody(messages, opts, model); }
             catch (ProviderException) { throw; }
-            catch (Exception ex) { throw new ProviderException("Provider request failed to build (" + ex.GetType().Name + "): " + ex.Message, ex); }
+            catch (Exception ex) { throw new ProviderException("Provider request failed to build: " + ex.Message, ex); }
 
             // Transient overload (429/5xx incl. 529) retries with backoff; fresh message per
             // attempt since Framework HttpClient won't resend one. Non-transient errors throw at once.
@@ -58,7 +58,7 @@ namespace Forge.Providers
             {
                 HttpRequestMessage req;
                 try { req = new HttpRequestMessage(HttpMethod.Post, url); }
-                catch (Exception ex) { throw new ProviderException("Provider misconfigured (bad base URL \"" + url + "\"): " + ex.Message, ex); }
+                catch (Exception ex) { throw new ProviderException("Provider address looks wrong (bad base URL \"" + url + "\") — check the provider URL in settings, then resend: " + ex.Message, ex); }
                 using (req)
                 {
                     if (!string.IsNullOrEmpty(_apiKey))
@@ -69,17 +69,17 @@ namespace Forge.Providers
                     HttpResponseMessage resp;
                     try { resp = await Http.SendAsync(req, ct).ConfigureAwait(false); }
                     catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-                    catch (TaskCanceledException) { throw new ProviderException("Provider request timed out."); }
-                    catch (HttpRequestException ex) { throw new ProviderException("Provider network failure: " + ex.Message, ex); }
-                    catch (InvalidOperationException ex) { throw new ProviderException("Provider misconfigured (bad base URL \"" + url + "\"): " + ex.Message, ex); }
-                    catch (UriFormatException ex) { throw new ProviderException("Provider misconfigured (bad base URL \"" + url + "\"): " + ex.Message, ex); }
+                    catch (TaskCanceledException) { throw new ProviderException("Provider request timed out after 10 minutes — the model is overloaded; try again or switch to a faster model."); }
+                    catch (HttpRequestException ex) { throw new ProviderException("Provider network failure: " + ex.Message + " — check the connection and try again.", ex); }
+                    catch (InvalidOperationException ex) { throw new ProviderException("Provider address looks wrong (bad base URL \"" + url + "\") — check the provider URL in settings, then resend: " + ex.Message, ex); }
+                    catch (UriFormatException ex) { throw new ProviderException("Provider address looks wrong (bad base URL \"" + url + "\") — check the provider URL in settings, then resend: " + ex.Message, ex); }
 
                     using (resp)
                     {
                         string text;
                         try { text = await resp.Content.ReadAsStringAsync().ConfigureAwait(false); }
                         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-                        catch (OperationCanceledException) { throw new ProviderException("Provider request timed out."); }
+                        catch (OperationCanceledException) { throw new ProviderException("Provider request timed out after 10 minutes — the model is overloaded; try again or switch to a faster model."); }
                         // Bound what we parse: a garbled gateway must error, never OOM the host.
                         if (text != null && text.Length > 5000000) throw new ProviderException("Provider returned an oversized response (" + text.Length + " chars) — retry or split the request.");
                         if (resp.IsSuccessStatusCode)
@@ -87,7 +87,7 @@ namespace Forge.Providers
                         int code = (int)resp.StatusCode;
                         bool transient = code == 408 || code == 429 || code == 500 || code == 502 || code == 503 || code == 504 || code == 529;
                         if (!transient || attempt >= 3)
-                            throw new ProviderException("Provider HTTP " + code + " (" + resp.StatusCode + "): " + Truncate(text));
+                            throw new ProviderException("Provider HTTP " + code + " (" + resp.StatusCode + "): " + Truncate(text) + " — try again; if it repeats, wait and resend or switch model.");
                         try { await Task.Delay(TimeSpan.FromSeconds(5 * (attempt + 1)), ct).ConfigureAwait(false); }
                         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                     }
@@ -153,7 +153,7 @@ namespace Forge.Providers
         {
             JObject j;
             try { j = JObject.Parse(text); }
-            catch (Exception ex) { throw new ProviderException("Provider returned non-JSON: " + Truncate(text), ex); }
+            catch (Exception ex) { throw new ProviderException("Provider returned an unreadable reply — try again; if it repeats, switch model. " + Truncate(text), ex); }
 
             // A 200 with an error envelope must surface the message, not "no content".
             var apiErr = j["error"];
@@ -201,7 +201,7 @@ namespace Forge.Providers
                 }
             string outText = sb.Length > 0 ? sb.ToString() : (think.Length > 0 ? think.ToString() : null);
             if (string.IsNullOrEmpty(outText) && toolCalls.Count == 0)
-                throw new ProviderException("Provider returned no content. " + Truncate(text));
+                throw new ProviderException("Provider returned no content — try again or rephrase. " + Truncate(text));
 
             long tokIn = 0, tokOut = 0;
             try

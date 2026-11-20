@@ -74,12 +74,13 @@ namespace Forge.SolidWorks
             // between Clear and fill would otherwise be wiped.
             var staged = new List<Rule>();
             bool loaded = false;
+            string rulesPath = null;
             try
             {
-                string p = RulesPath();
-                if (File.Exists(p))
+                rulesPath = RulesPath();
+                if (File.Exists(rulesPath))
                 {
-                    var arr = JArray.Parse(File.ReadAllText(p));
+                    var arr = JArray.Parse(File.ReadAllText(rulesPath));
                     foreach (var t in arr)
                     {
                         var o = t as JObject;
@@ -92,7 +93,13 @@ namespace Forge.SolidWorks
                     loaded = true;
                 }
             }
-            catch { staged.Clear(); loaded = false; }
+            catch
+            {
+                // Corrupt/unreadable rules file: fail closed to category toggles. Never migrate
+                // legacy files over a corrupt file (that would resurrect stale allows).
+                if (!string.IsNullOrEmpty(rulesPath) && File.Exists(rulesPath)) { lock (Rules) { Rules.Clear(); } return; }
+                staged.Clear(); loaded = false;
+            }
             if (loaded) { lock (Rules) { Rules.Clear(); Rules.AddRange(staged); } return; }
             // One-time migration from the legacy split files (allows first, denies appended
             // so historical deny-wins ties keep working under last-match-wins).
@@ -116,6 +123,7 @@ namespace Forge.SolidWorks
                 }
             }
             catch { }
+            if (staged.Count == 0) return; // nothing to migrate: keep in-memory rules, don't wipe
             lock (Rules) { Rules.Clear(); Rules.AddRange(staged); }
             if (staged.Count > 0) SaveApprovals();
         }
@@ -143,11 +151,20 @@ namespace Forge.SolidWorks
             lock (Rules)
             {
                 // Last-match-wins, same as ApprovalFor: a pattern denied after being
-                // allowed (legacy migration) must not show up in both lists.
+                // allowed (legacy migration) must not show up in both lists. Emit in
+                // rules order (last occurrence wins) so the panel matches evaluation order.
                 var eff = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 foreach (var r in Rules) eff[r.Pattern] = r.Action;
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 var out_ = new System.Collections.Generic.List<string>();
-                foreach (var kv in eff) if (kv.Value == "allow") out_.Add(kv.Key);
+                for (int i = Rules.Count - 1; i >= 0; i--)
+                {
+                    var r = Rules[i];
+                    if (r == null || string.IsNullOrWhiteSpace(r.Pattern)) continue;
+                    if (!seen.Add(r.Pattern)) continue;
+                    if (eff[r.Pattern] == "allow") out_.Add(r.Pattern);
+                }
+                out_.Reverse();
                 return out_;
             }
         }
@@ -158,8 +175,16 @@ namespace Forge.SolidWorks
             {
                 var eff = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 foreach (var r in Rules) eff[r.Pattern] = r.Action;
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 var out_ = new System.Collections.Generic.List<string>();
-                foreach (var kv in eff) if (kv.Value == "deny") out_.Add(kv.Key);
+                for (int i = Rules.Count - 1; i >= 0; i--)
+                {
+                    var r = Rules[i];
+                    if (r == null || string.IsNullOrWhiteSpace(r.Pattern)) continue;
+                    if (!seen.Add(r.Pattern)) continue;
+                    if (eff[r.Pattern] == "deny") out_.Add(r.Pattern);
+                }
+                out_.Reverse();
                 return out_;
             }
         }
@@ -560,9 +585,9 @@ namespace Forge.SolidWorks
                     new ChatMessage { Role = "system", Content = "Summarize this CAD agent history into durable facts: what was built, key dims/decisions, open issues. Plain text, under 200 words." },
                     new ChatMessage { Role = "user", Content = new JArray(old.ToArray()).ToString(Newtonsoft.Json.Formatting.None) }
                 };
-                var res = await client.CompleteAsync(msgs,
-                    new ProviderOptions { MaxTokens = 800, Temperature = 0, Model = ProviderFactory.SmallModelForCurrentConfig() ?? model },
-                    ct);
+                    var res = await client.CompleteAsync(msgs,
+                        new ProviderOptions { MaxTokens = 800, Model = ProviderFactory.SmallModelForCurrentConfig() ?? model },
+                        ct);
                 summary = res != null ? res.Text : null;
             }
             catch (OperationCanceledException) { return; } // stop wins: leave history untouched
@@ -720,7 +745,7 @@ namespace Forge.SolidWorks
             catch (OperationCanceledException) { outcome.Error = "INTERRUPTED"; return outcome; }
             catch (Exception ex)
             {
-                outcome.Error = "Couldn't start the SolidWorks-MCP server: " + ex.Message;
+                outcome.Error = "Couldn't start the SolidWorks-MCP server: " + ex.Message + " — restart SolidWorks, then resend.";
                 return outcome;
             }
 
@@ -743,7 +768,7 @@ namespace Forge.SolidWorks
             catch (OperationCanceledException) { outcome.Error = "INTERRUPTED"; return outcome; }
             catch (Exception ex)
             {
-                outcome.Error = "The build planner failed (" + ex.GetType().Name + ") — try splitting the request into smaller steps.";
+                outcome.Error = "The build planner failed: " + ex.Message + " — try splitting the request into smaller steps.";
                 return outcome;
             }
             var plan = authored.Item1;
@@ -767,14 +792,14 @@ namespace Forge.SolidWorks
                 try { toolName = (string)so["tool"]; } catch { toolName = null; }
                 if (so == null || string.IsNullOrWhiteSpace(toolName) || !names.Contains(toolName))
                 {
-                    outcome.Error = "The plan calls an unknown tool ('" + TruncPlan(toolName, 60) + "') — ask again.";
+                    outcome.Error = "The plan calls an unknown tool ('" + TruncPlan(toolName, 60) + "') — the model invented a name outside the tool list; ask again.";
                     return outcome;
                 }
                 // Wrong-type args (string/array/number from a garbled model) must fail the plan here:
                 // silently defaulting to {} would run a mutating tool with invented dims.
                 if (so["args"] != null && !(so["args"] is JObject))
                 {
-                    outcome.Error = "The plan's '" + TruncPlan(toolName, 60) + "' step has non-object args — ask again.";
+                    outcome.Error = "The plan's '" + TruncPlan(toolName, 60) + "' step sent unusable settings (not a settings object) — ask again.";
                     return outcome;
                 }
             }
@@ -809,7 +834,7 @@ namespace Forge.SolidWorks
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
-                    outcome.Error = "Step " + n_ + " (" + tool + ") transport failed: " + ex.Message + " — what built so far stays open in SolidWorks.";
+                    outcome.Error = "Step " + n_ + " (" + tool + ") transport failed: " + ex.Message + " — what built so far stays open in SolidWorks; fix that step and ask again.";
                     return outcome;
                 }
                 string text = (r.Text ?? "").Length > 600 ? r.Text.Substring(0, 600) + "…" : (r.Text ?? "");
@@ -866,7 +891,7 @@ namespace Forge.SolidWorks
             catch (OperationCanceledException) { outcome.Error = "INTERRUPTED"; return outcome; }
             catch (Exception ex)
             {
-                outcome.Error = "Couldn't start the SolidWorks-MCP server: " + ex.Message;
+                outcome.Error = "Couldn't start the SolidWorks-MCP server: " + ex.Message + " — restart SolidWorks, then resend.";
                 return outcome;
             }
 
@@ -890,7 +915,7 @@ namespace Forge.SolidWorks
             }
             if (names.Count == 0)
             {
-                outcome.Error = "Couldn't start the SolidWorks-MCP server: tool list came back empty.";
+                outcome.Error = "Couldn't start the SolidWorks-MCP server: the tool list came back empty — restart SolidWorks, then resend.";
                 return outcome;
             }
             string toolsJson = fns.ToString(Newtonsoft.Json.Formatting.None);
@@ -918,7 +943,7 @@ namespace Forge.SolidWorks
             var opts = new ProviderOptions { MaxTokens = 16000, Temperature = 0, Model = model, ToolsJson = toolsJson, ToolChoice = "auto" };
             var log = new List<string>();
             int executed = 0;
-            var DoomWindow = new System.Collections.Generic.List<string>(); // per-run rolling window, Kilo parity
+            var DoomWindow = new System.Collections.Generic.List<string>(); // per-run rolling window, Kilo parity (fresh each run: a rejected loop re-asks next run, never auto-stops)
             int mark = 0; // Msgs.Count before this iteration's assistant turn (dangling-tail trim bound)
             // Rolling window of the last single calls seen (name + FULL arguments, exact equality),
             // Kilo parity: three identical consecutive calls = doom loop. Reads count too.
@@ -984,10 +1009,15 @@ namespace Forge.SolidWorks
                             string.Equals(DoomWindow[1], DoomWindow[2], StringComparison.Ordinal);
                         if (loop)
                         {
+                            // Single-call repeats ask under the real tool name so "always" persists
+                            // a real rule; multi-call batches keep the synthetic label (never persisted).
+                            string doomTool = res.ToolCalls.Count == 1 && !string.IsNullOrWhiteSpace(res.ToolCalls[0].Name)
+                                ? res.ToolCalls[0].Name
+                                : "(repeat loop)";
                             string verdict;
                             try
                             {
-                                verdict = await AskApproval("(repeat loop)",
+                                verdict = await AskApproval(doomTool,
                                     new JObject { ["repeated_call"] = res.ToolCalls.Count == 1 ? (res.ToolCalls[0].Name ?? "?") : (res.ToolCalls.Count + " calls"), ["times"] = 3 },
                                     emit, ct);
                             }
@@ -1005,7 +1035,7 @@ namespace Forge.SolidWorks
                                 SaveSession(sid);
                                 return outcome;
                             }
-                            lock (DoomWindow) { DoomWindow.Clear(); }
+                            DoomWindow.Clear(); // approve-then-retrip resets the window: the next identical triple re-asks
                             try { await emit("Builder", "continuing anyway — watching for another loop", "run", null); }
                             catch { }
                         }
@@ -1111,7 +1141,7 @@ namespace Forge.SolidWorks
             catch (Exception ex)
             {
                 SaveSession(sid);
-                outcome.Error = "The agent loop failed (" + ex.GetType().Name + ": " + ex.Message + ") — try again or split the request.";
+                outcome.Error = "The agent loop failed: " + ex.Message + " — try again or split the request.";
                 return outcome;
             }
         }
@@ -1122,7 +1152,7 @@ namespace Forge.SolidWorks
             IProviderClient client, JArray history, ProviderOptions opts, System.Threading.CancellationToken ct, Action<string, string> onThink)
         {
             var oc = client as OpenAiCompatibleClient;
-            if (oc == null) throw new Exception("agent loop needs an OpenAI-compatible provider");
+            if (oc == null) throw new Exception("The agent loop needs an OpenAI-compatible provider — switch provider in settings to build.");
             var res = await oc.CompleteStreamingRawAsync(history, opts, ct, onThink);
             return res;
         }
@@ -1183,14 +1213,14 @@ namespace Forge.SolidWorks
                     // Non-streaming backends (Anthropic): same prompt as one unary call, no live deltas.
                     try { res = await client.CompleteAsync(msgs, opts, ct); }
                     catch (OperationCanceledException) { throw; }
-                    catch (Exception ex2) { return new Tuple<JObject, string>(null, "provider call failed: " + ex2.GetType().Name + " " + ex2.Message); }
+                    catch (Exception ex2) { return new Tuple<JObject, string>(null, "provider call failed: " + ex2.Message); }
                 }
                 catch (Exception ex)
                 {
                     string why = (ex.Message ?? "");
                     if (why.Contains("timed out"))
                         return new Tuple<JObject, string>(null, "TIMED OUT after 10 minutes of thinking — the model is overloaded or the plan is too big; retry, simplify, or switch to a faster model");
-                    return new Tuple<JObject, string>(null, "provider call failed: " + ex.GetType().Name + " " + ex.Message);
+                    return new Tuple<JObject, string>(null, "provider call failed: " + ex.Message);
                 }
                 string raw = res != null ? res.Text : null;
                 // A hostile/garbled model reply (MBs, 10k-deep nesting) fails the attempt, never

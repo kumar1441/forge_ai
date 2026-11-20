@@ -41,7 +41,7 @@ namespace Forge.Providers
         public static void Save(string provider, string apiKey)
         {
             if (string.IsNullOrWhiteSpace(apiKey))
-                throw new ArgumentException("apiKey must not be empty.", "apiKey");
+                throw new ArgumentException("Enter a key before saving.", "apiKey");
             byte[] protectedBlob;
             try
             {
@@ -50,7 +50,7 @@ namespace Forge.Providers
             }
             catch (CryptographicException ex)
             {
-                throw new CryptographicException("Could not encrypt the key with DPAPI (roaming profile or restricted account?): " + ex.Message, ex);
+                throw new CryptographicException("Could not lock the key in Windows secure storage (roaming profile or restricted account?): " + ex.Message, ex);
             }
             Directory.CreateDirectory(Dir);
             // Atomic write (temp + replace): a crash or a concurrent Save/Load can

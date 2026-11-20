@@ -664,8 +664,9 @@
   // Clear the panel for a fresh recording take: wipe the transcript + reset Forge's pending threads.
   function clearPanel() {
     if (working || enhanceActive) { try { post({ action: "stop" }); } catch (e) {} }
-    stopWords();
+    stopWords(); clearThinkTimeout();
     working = false; turn = null; thinkEl = null; sessionId = null; lastPrompt = "";
+    usage.agentMsgs = 0; usage.agentTokens = 0;
     pendingCompact = null; lastReverted = null;
     try { post({ action: "reset" }); } catch (e) {} // fresh agent conversation host-side too
     clearFind(); closePops();
@@ -678,6 +679,7 @@
     hIdx = -1; draftStash = null;
     preEnhance = null; $("enhanceUndo").style.display = "none"; ebReset();
     intent.value = ""; grow();
+    renderCtx();
     intent.focus();
   }
   $("clearbtn").addEventListener("click", clearPanel);
@@ -819,6 +821,7 @@
   function renderSettings(m) {
     const sel = $("setprov"), row = $("setkeyrow"), sub = $("setsub");
     if (!sel) return;
+    if (m.baseUrl !== undefined) lastBaseUrl = m.baseUrl || "";
     const known = m.slug && sel.querySelector(`option[value="${m.slug}"]`) ? m.slug : null;
     if (known) sel.value = known;
     curSlug = known || sel.value;
@@ -832,6 +835,8 @@
     curSlug = $("setprov").value; // optimistic: pill/ctx stop showing the previous provider
     lastHasKey = curSlug === "ollama" ? true : null;
     curModel = null; renderPill(); renderCtx();
+    if ($("setkeyrow")) $("setkeyrow").style.display = curSlug === "ollama" ? "none" : "";
+    if ($("setsub")) $("setsub").textContent = curSlug + " · …";
     chatModels = []; renderModelList($("msearch") ? $("msearch").value : "");
     if ($("mcount")) $("mcount").textContent = hasBridge ? "Loading…" : "Preview mode — model list needs SolidWorks.";
     if (!hasBridge) { systemCard(needBridgeMsg("Switching providers")); return; }
@@ -845,7 +850,9 @@
     if (!hasBridge) { systemCard(needBridgeMsg("Saving keys") + " Keys are stored by the SolidWorks host (DPAPI) — reconnect there to save."); return; }
     post({ action: "saveKey", provider: $("setprov").value, key: k });
     post({ action: "getProvider" }); // refresh key state + model list immediately after save
-    lastHasKey = true; renderSettings({ slug: $("setprov").value, hasKey: true, model: curModel });
+    lastHasKey = true; renderSettings({ slug: $("setprov").value, hasKey: true, model: curModel, baseUrl: lastBaseUrl });
+    renderPill(); renderCtx();
+    if (curDynamic) { if ($("mcount")) $("mcount").textContent = "Loading…"; post({ action: "refreshModels" }); }
     $("setkey").value = "";
   });
   $("setkey").addEventListener("keydown", (e) => {
@@ -876,6 +883,7 @@
     safeSet("forge_compact_at", String(at));
     syncCompactRow();
     post({ action: "setCompact", on: $("compacttgl").checked, at: at });
+    renderCtx();
   }
   $("compacttgl").addEventListener("change", pushCompactCfg);
   $("compactat").addEventListener("change", pushCompactCfg);
@@ -1049,6 +1057,31 @@
   const histSave = () => { try { safeSet("forge_history", JSON.stringify(histList.slice(-100))); } catch (e) {} };
   let turn = null, thinkEl = null;          // { steps, thinking, result } DOM refs for the active Forge turn
   let wordTimer = null;
+  let thinkTimer = null, lastBaseUrl = "";
+  function clearThinkTimeout() { try { if (thinkTimer) { clearTimeout(thinkTimer); thinkTimer = null; } } catch (e) {} }
+  function armThinkTimeout(el) {
+    clearThinkTimeout();
+    thinkTimer = setTimeout(() => {
+      try {
+        if (thinkEl === el && el.isConnected && working) {
+          const hd = el.querySelector(".thead");
+          if (hd) hd.textContent = "Thought (timed out — showing partial) — click to expand";
+          el.classList.add("collapsed");
+          thinkEl = null;
+        }
+      } catch (e) {} thinkTimer = null;
+    }, 120000);
+  }
+  function expireApprovals() {
+    try {
+      transcript.querySelectorAll(".appr:not(.done)").forEach(box => {
+        box.classList.add("done");
+        box.querySelectorAll("button").forEach(x => { x.disabled = true; });
+        const hd = box.querySelector(".ahead");
+        if (hd && hd.firstChild) hd.firstChild.textContent = "🔶 Expired — run ended";
+      });
+    } catch (e) {}
+  }
   let lastPrompt = "";
 
   // ---- chat history (Kilo-style sessions: search, restore, delete, new) ----
@@ -1107,7 +1140,7 @@
     const s = loadSessions().find(x => x.id === id);
     if (!s) return;
     if (working || enhanceActive) { try { post({ action: "stop" }); } catch (e) {} }
-    stopWords(); working = false; turn = null; thinkEl = null; pendingCompact = null; lastReverted = null; ebReset();
+    stopWords(); clearThinkTimeout(); working = false; turn = null; thinkEl = null; pendingCompact = null; lastReverted = null; ebReset();
     clearFind(); closePops();
     transcript.innerHTML = "";
     s.turns.forEach(t => {
@@ -1118,6 +1151,7 @@
       d.append(u, rv, f); transcript.appendChild(d);
     });
     sessionId = id;
+    lastPrompt = (s.turns.length ? s.turns[s.turns.length - 1].q : "") || "";
     hideChip(); hIdx = -1; draftStash = null; preEnhance = null; $("enhanceUndo").style.display = "none";
     focusIfHidden($("history")); $("history").style.display = "none"; setExpanded("histbtn", false);
     post({ action: "loadHistory", sid: id });
@@ -1129,6 +1163,8 @@
       transcript.insertBefore(block, rt[rt.length - 10]);
     }
     renderHistoryList(); scroll(true); intent.focus();
+    try { transcript.querySelectorAll(".appr:not(.done)").forEach(box => { box.classList.add("done"); box.querySelectorAll("button").forEach(x => { x.disabled = true; }); }); } catch (e) {}
+    renderCtx();
   }
 
   function nearBottom() { return transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 60; }
@@ -1210,6 +1246,8 @@
           if (!$("setprov").querySelector(`option[value="${pv}"]`)) { systemCard(`Unknown provider <b>${pv.replace(/</g, "&lt;")}</b> — pick one in Settings.`); showPop("settings"); break; }
           $("setprov").value = pv;
           curSlug = pv; curModel = null; renderPill(); renderCtx();
+          if ($("setkeyrow")) $("setkeyrow").style.display = pv === "ollama" ? "none" : "";
+          if ($("setsub")) $("setsub").textContent = pv + " · …";
           chatModels = []; renderModelList($("msearch") ? $("msearch").value : "");
           if (!hasBridge) { systemCard(needBridgeMsg("Switching providers")); break; }
           if (needsKey()) { systemCard(`No key saved for <b>${pv}</b> — paste it in Settings → API key, hit Save, then pick a model.`); showPop("settings"); }
@@ -1274,6 +1312,7 @@
       if (s) { s.turns = (lastReverted.turns || []).slice(0, 100); s.updated = Date.now(); saveSessions(all); }
     }
     lastReverted = null;
+    renderCtx();
     scroll(true); intent.focus();
   }
   function buildCompactBlock(oldTurns, summaryText) {
@@ -1395,7 +1434,7 @@
   // finish the turn: stop the gerund, drop the thinking line, render the result card(s).
   // System answers outside a turn (key saved, telemetry toggled, notices) render as system cards.
   function finish(html) {
-    stopWords();
+    stopWords(); clearThinkTimeout(); expireApprovals();
     const wasTurn = !!turn && !!lastPrompt;
     if (thinkEl) { // a zero-tool text finish still closes a live think block (Kilo text-response parity)
       try { const hd = thinkEl.querySelector(".thead"); if (hd && /live/.test(hd.textContent)) hd.textContent = "Thought — click to expand"; thinkEl.classList.add("collapsed"); } catch (e) {}
@@ -1477,7 +1516,8 @@
 
     else if (m.type === "thinkStart") {
       if (!working || !turn) return; // orphan think after revert/clear — never leave a stray live block
-      if (thinkEl && thinkEl.isConnected) { try { thinkEl.querySelector(".thead").textContent = "Thought — click to expand"; } catch (e) {} thinkEl = null; }
+      if (thinkEl && thinkEl.isConnected) { try { thinkEl.querySelector(".thead").textContent = "Thought — click to expand"; thinkEl.classList.add("collapsed"); } catch (e) {} thinkEl = null; }
+      clearThinkTimeout();
       thinkEl = document.createElement("div");
       thinkEl.className = "think";
       thinkEl.setAttribute("aria-live", "polite");
@@ -1494,6 +1534,7 @@
       hd.addEventListener("click", toggleThink);
       hd.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleThink(); } });
       turn.result.appendChild(thinkEl); scroll();
+      armThinkTimeout(thinkEl);
     }
     else if (m.type === "think") {
       if (!thinkEl || !thinkEl.isConnected) return;
@@ -1513,6 +1554,7 @@
       }
     }
     else if (m.type === "thinkEnd") {
+      clearThinkTimeout();
       if (!thinkEl) return;
       const done = thinkEl; thinkEl = null;
       if (!done.isConnected) return;
@@ -1549,6 +1591,12 @@
         const b = document.createElement("button"); b.textContent = label; if (cls) b.className = cls;
         b.addEventListener("click", () => {
           if (box.classList.contains("done")) return; // double-click race: one decision only
+          if (!working || !turn || !box.isConnected || !turn.result.contains(box)) {
+            box.classList.add("done");
+            btns.querySelectorAll("button").forEach(x => x.disabled = true);
+            hd.firstChild.textContent = "🔶 Expired — run ended";
+            return; // stale verdict: ignored, visibly expired, nothing posted
+          }
           box.classList.add("done");
           btns.querySelectorAll("button").forEach(x => x.disabled = true);
           hd.firstChild.textContent = `🔶 ${label} — ${m.tool || "tool"}`;
@@ -1621,13 +1669,17 @@
       if (!m.error) {
         curModel = m.model || null; curDynamic = !!m.dynamic; curSlug = m.slug || null;
         lastHasKey = (m.slug === "ollama") ? true : !!m.hasKey;
+        if (!curDynamic && chatModels.length) { chatModels = []; renderModelList($("msearch") ? $("msearch").value : ""); }
         renderPill();
         renderSettings(m);
         renderCtx();
         $("mrefresh").style.display = curDynamic ? "" : "none";
         if (curDynamic && !chatModels.length) post({ action: "refreshModels" });
       } else if (m.error === "nokey") {
-        lastHasKey = false; renderCtx();
+        lastHasKey = false;
+        if ($("setkeyrow") && curSlug !== "ollama") $("setkeyrow").style.display = "";
+        if ($("setsub") && curSlug) $("setsub").textContent = curSlug + " · no key";
+        renderCtx();
       }
     }
 
@@ -2004,8 +2056,8 @@
     if (removed.length) lastReverted = { nodes: removed, refNext: banner || null, sid: sessionId, turns: savedTurns, keep: keepCount };
     else lastReverted = null;
     preEnhance = null; $("enhanceUndo").style.display = "none";
-    turn = null; thinkEl = null; working = false; stopWords();
-    clearFind(); closePops();
+    turn = null; thinkEl = null; working = false; stopWords(); clearThinkTimeout();
+    clearFind(); closePops(); renderCtx();
     intent.focus(); scroll(true);
   });
 
@@ -2158,6 +2210,7 @@
           }
           pushRecent(id);
           curModel = id; renderPill(); renderCtx(); // optimistic: pill follows the click, host confirms
+          if ($("setsub")) $("setsub").textContent = (lastBaseUrl ? lastBaseUrl + " · " : "") + id + (lastHasKey === true ? " · key saved ✓" : lastHasKey === false ? " · no key" : "");
           post({ action: "setModel", model: id });
           closeModels();
         });
@@ -2200,7 +2253,7 @@
     else if (e.key === "Enter") {
       e.preventDefault();
       const pick = (i >= 0 ? rows[i] : null) || rows.find(r => r.classList.contains("active")) || rows[0];
-      if (pick) { const id = pick.getAttribute("data-id"); pushRecent(id); curModel = id; renderPill(); renderCtx(); post({ action: "setModel", model: id }); closeModels(); }
+      if (pick) { const id = pick.getAttribute("data-id"); pushRecent(id); curModel = id; renderPill(); renderCtx(); if ($("setsub")) $("setsub").textContent = (lastBaseUrl ? lastBaseUrl + " · " : "") + id + (lastHasKey === true ? " · key saved ✓" : lastHasKey === false ? " · no key" : ""); post({ action: "setModel", model: id }); closeModels(); }
     }
   });
   $("mrefresh").addEventListener("click", (e) => {

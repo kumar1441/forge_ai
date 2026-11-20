@@ -235,12 +235,12 @@ namespace Forge.SolidWorks
                     string text = null;
                     try { text = (string)msg.text; } catch { }
                     if (string.IsNullOrWhiteSpace(text))
-                    { Send(new { type = "error", message = "Nothing to compact." }); return; }
+                    { Send(new { type = "error", message = "Nothing to compact — paste the chat text first, then compact." }); return; }
                     IProviderClient c2;
                     string compactModel;
                     try { c2 = ProviderFactory.Resolve(out compactModel); } catch { c2 = null; compactModel = null; }
                     if (c2 == null)
-                    { Send(new { type = "error", message = "Compaction needs an LLM provider — using local titles instead.", localCompact = true }); return; }
+                    { Send(new { type = "error", message = "Compaction needs a provider — save a key in settings, then compact again. History kept as-is.", localCompact = true }); return; }
                     try
                     {
                         // A hostile/pasted transcript must not become a token blowup: summarize the
@@ -253,7 +253,7 @@ namespace Forge.SolidWorks
                             new ChatMessage { Role = "user", Content = compactText }
                         };
                         var res = await c2.CompleteAsync(msgs,
-                            new ProviderOptions { MaxTokens = 1000, Temperature = 0.2, Model = ProviderFactory.SmallModelForCurrentConfig() ?? compactModel },
+                            new ProviderOptions { MaxTokens = 1000, Model = ProviderFactory.SmallModelForCurrentConfig() ?? compactModel },
                             System.Threading.CancellationToken.None);
                         string s = res != null ? res.Text : null;
                         if (!string.IsNullOrWhiteSpace(s))
@@ -261,7 +261,7 @@ namespace Forge.SolidWorks
                             s = System.Text.RegularExpressions.Regex.Replace(s.Trim(), @"^```\w*\n?|```$", "").Trim();
                             Send(new { type = "compacted", summary = s });
                         }
-                        else Send(new { type = "error", message = "Compaction came back empty — keeping full history.", localCompact = true });
+                        else Send(new { type = "error", message = "Compaction came back empty — keeping full history; try again.", localCompact = true });
                     }
                     catch (Exception ex)
                     {
@@ -517,7 +517,7 @@ namespace Forge.SolidWorks
                     try
                     {
                         SaveProviderKey(provider, key.Trim(), model);
-                        Send(new { type = "answer", answer = "Provider key saved — encrypted locally (DPAPI), never leaves this machine." });
+                        Send(new { type = "answer", answer = "Provider key saved — encrypted with Windows secure storage on this machine; it never leaves the device." });
                         // Confirm the new key state to the panel (pill/ctx/settings) directly:
                         // the panel's follow-up getProvider can race this handler on a busy UI thread.
                         try
@@ -529,7 +529,7 @@ namespace Forge.SolidWorks
                         }
                         catch { }
                     }
-                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't save the key: " + ex.Message }); }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't save the key: " + ex.Message + " — check the key and try again." }); }
                 }
 
                 // Dynamic model list: the panel asks the host to GET {baseUrl}/models with the
@@ -1012,11 +1012,14 @@ namespace Forge.SolidWorks
                 var ui = System.Threading.SynchronizationContext.Current;
                 var watch = System.Diagnostics.Stopwatch.StartNew();
                 Send(new { type = "thinkStart", model = useModel, label = "Enhancing" });
+                // Temp 0.7 only when the model accepts custom temperatures (Kilo enhance-prompt.ts);
+                // reasoning variants get the provider default instead of a rejected param.
+                double? enhanceTemp = ProviderFactory.SupportsTemperature(useModel) ? 0.7 : (double?)null;
                 ProviderResult res;
                 try
                 {
                     res = await client.CompleteStreamingAsync(msgs,
-                        new ProviderOptions { MaxTokens = 32000, Temperature = 0.7, Model = useModel },
+                        new ProviderOptions { MaxTokens = 32000, Temperature = enhanceTemp, Model = useModel },
                         ect,
                         (kind, delta) =>
                         {
@@ -1033,7 +1036,7 @@ namespace Forge.SolidWorks
                 {
                     // Non-streaming backends (Anthropic): same prompt as one unary call, no live deltas.
                     res = await client.CompleteAsync(msgs,
-                        new ProviderOptions { MaxTokens = 32000, Temperature = 0.7, Model = useModel },
+                        new ProviderOptions { MaxTokens = 32000, Temperature = enhanceTemp, Model = useModel },
                         ect);
                 }
                 watch.Stop();
@@ -1514,7 +1517,7 @@ namespace Forge.SolidWorks
 
                 // Tripwire: prove the original is byte-for-byte unchanged before reporting anything.
                 if (!guardE.AllIntact())
-                { Telemetry.Log("guardrail_violation", success: false, swVersion: SwVer()); Send(new { type = "error", message = "Forge stopped: a safety check flagged a change to an original. Your files are untouched â€” please tell Ravi." }); return; }
+                { Telemetry.Log("guardrail_violation", success: false, swVersion: SwVer()); Send(new { type = "error", message = "Forge stopped: a safety check flagged a change to an original. Your files are untouched â€” rephrase with a smaller change and resend." }); return; }
 
                 Telemetry.Log("edit_run", success: er.Error == null, featuresCount: act.EditChanges.Count, durationMs: swE.ElapsedMilliseconds, swVersion: SwVer(), errorCode: er.Error == null ? null : "edit_error",
                     tokensIn: act.Meter.TokensIn, tokensOut: act.Meter.TokensOut, modelName: act.Meter.ModelName, llmCalls: act.Meter.LlmCalls, cacheHits: act.Meter.CacheHits, estCostUsd: act.Meter.EstCostUsd, opsUsed: OpCounter.Count,
@@ -1572,7 +1575,7 @@ namespace Forge.SolidWorks
 
             // Tripwire: the base part and its references must be byte-for-byte unchanged.
             if (!guardV.AllIntact())
-            { Telemetry.Log("guardrail_violation", success: false, swVersion: SwVer()); Send(new { type = "error", message = "Forge stopped: a safety check flagged a change to an original. Your files are untouched â€” please tell Ravi." }); return; }
+            { Telemetry.Log("guardrail_violation", success: false, swVersion: SwVer()); Send(new { type = "error", message = "Forge stopped: a safety check flagged a change to an original. Your files are untouched â€” rephrase with a smaller change and resend." }); return; }
 
             int cleanV = summary.Variants.FindAll(v => v.Success).Count;
             Telemetry.Log("variant_run", success: cleanV > 0, partsCount: plan.Count, featuresCount: plan.Changes.Count, durationMs: swV.ElapsedMilliseconds, swVersion: SwVer(),

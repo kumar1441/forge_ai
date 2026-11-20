@@ -69,16 +69,38 @@ namespace Forge.Providers
         }
 
         /// <summary>
-        /// Cheap model for rewrite chores (enhance, compaction summaries) — Kilo parity: small
-        /// model first, main-model fallback. Only providers with a known-cheap mapping resolve here
-        /// (intentional subset; elsewhere the caller keeps the current model).
+        /// Cheap model for rewrite chores (enhance, compaction summaries) — Kilo parity: explicit
+        /// per-config override first, then known-cheap provider mappings, else null and the caller
+        /// keeps the current model (intentional subset: no guessing at model IDs that may not exist).
         /// </summary>
         public static string GetSmallModel(string provider, string baseUrl)
         {
+            try
+            {
+                JObject cfg = ReadConfig();
+                string explicit_ = cfg != null ? (string)cfg["smallModel"] : null;
+                if (!string.IsNullOrWhiteSpace(explicit_)) return explicit_.Trim();
+            }
+            catch { }
             string bu = (baseUrl ?? "").Trim().ToLowerInvariant();
             if (bu.Contains("api.deepseek.com")) return "deepseek-chat";
             if (bu.Contains("api.openai.com")) return "gpt-4o-mini";
+            if (bu.Contains("api.anthropic.com")) return "claude-3-5-haiku-latest";
             return null;
+        }
+
+        /// <summary>
+        /// True unless the model is a known reasoning variant that rejects custom temperatures
+        /// (OpenAI o-series errors on anything but the default; thinking variants ignore it).
+        /// When false, callers omit Temperature so the provider default applies.
+        /// </summary>
+        public static bool SupportsTemperature(string model)
+        {
+            if (string.IsNullOrWhiteSpace(model)) return true;
+            string m = model.Trim().ToLowerInvariant();
+            if (System.Text.RegularExpressions.Regex.IsMatch(m, @"(^|[^a-z0-9])o[13]([^a-z0-9]|$)")) return false;
+            if (m.Contains("think") || m.Contains("reason")) return false;
+            return true;
         }
 
         /// <summary>Small model for the current config (rewrite chores), or null to keep current.</summary>

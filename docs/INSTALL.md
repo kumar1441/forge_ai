@@ -126,7 +126,7 @@ Each user turn has a `↩ revert` button. It stops any in-flight run, drops that
 
 ### Slash commands
 
-The dispatcher (`slashRun`) supports exactly: `/clear` (= `/new`: fresh chat, resets host conversation), `/help` (command list), `/regen` (= `/regenerate`: re-run last prompt), `/model` (open model picker), `/provider [slug]` (switch with `deepseek|openrouter|nvidia|openai|anthropic|ollama`, or open Settings with no arg), `/allow <tool>` (always allow), `/deny <tool>` (block), `/undeny <tool>` (unblock), `/unrevert` (restore last revert), `/auto-approve [on|off]` (master switch, or report state), `/history` (open chat history), `/compact` (fold older turns). Anything else renders the unknown-command card plus the same help text. Leading-`/` input never reaches the agent.
+The dispatcher (`slashRun`) supports exactly: `/clear` (= `/new`: fresh chat, resets host conversation), `/help` (command list), `/regen` (= `/regenerate`: re-run last prompt), `/model` (= `/models`: open model picker), `/provider [slug]` (switch with `deepseek|openrouter|nvidia|openai|anthropic|ollama`, or open Settings with no arg), `/allow <tool>` (always allow), `/deny <tool>` (block), `/undeny <tool>` (unblock), `/unrevert` (= `/redo`: restore last revert; `/undo` reverts the last turn), `/auto-approve [on|off]` (master switch, or report state), `/history` (= `/sessions`, `/resume`, `/continue`: open chat history), `/status` (open the usage dropdown), `/compact` (= `/summarize`: fold older turns). Anything else renders the unknown-command card plus the same help text. Leading-`/` input never reaches the agent.
 
 ### Auto-approve
 
