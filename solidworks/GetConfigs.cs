@@ -37,7 +37,7 @@ namespace Forge.SolidWorks
         public static async Task<ConfigsResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new ConfigsResult();
-            if (model == null) { res.Error = "Open a part or assembly to list its configurations."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly (.SLDPRT/.SLDASM) to list its configurations."; return res; }
 
             await emit("Ledger", "reading configurations", "run", null);
             try

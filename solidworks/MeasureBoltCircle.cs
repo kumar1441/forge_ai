@@ -48,7 +48,7 @@ namespace Forge.SolidWorks
         public static async Task<BoltCircleResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new BoltCircleResult();
-            if (model == null) { res.Error = "Open a part or assembly to measure its bolt circle."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly (.SLDPRT/.SLDASM) to measure its bolt circle."; return res; }
 
             await emit("Caliper", "measuring the bolt-hole pattern", "run", null);
 

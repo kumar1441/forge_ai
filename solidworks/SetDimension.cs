@@ -98,7 +98,7 @@ namespace Forge.SolidWorks
         public static async Task<SetDimensionResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new SetDimensionResult();
-            if (model == null) { res.Error = "Open a part first — there's no model to set a dimension on."; return res; }
+            if (model == null) { res.Error = "Open a part first (.SLDPRT) — open it, then resend."; return res; }
 
             // test-loop hedged findings change-roller-taper-angle / change-inner-ring-bore: on an ASSEMBLY, the cloud
             // correctly NAMED the target sub-component ("Inner ring with case and rollers-1") but Forge had no code

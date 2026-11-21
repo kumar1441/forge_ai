@@ -47,7 +47,7 @@ namespace Forge.SolidWorks
         public static async Task<SetActiveConfigurationResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new SetActiveConfigurationResult();
-            if (model == null) { res.Error = "Open a part or assembly to switch configuration."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly (.SLDPRT/.SLDASM) to switch configuration."; return res; }
 
             // parse the config name: after to/activate/show, or quoted
             string name = null;

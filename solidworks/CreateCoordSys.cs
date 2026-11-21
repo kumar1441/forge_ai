@@ -51,7 +51,7 @@ namespace Forge.SolidWorks
         public static async Task<CreateCoordSysResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new CreateCoordSysResult();
-            if (model == null) { res.Error = "Open a part or assembly to add a coordinate system."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly (.SLDPRT/.SLDASM) to add a coordinate system."; return res; }
 
             // ---- parse the location. Never guess a partial one (Rule #2): 1 or 2 numbers is a question, not a guess.
             double[] xyz;

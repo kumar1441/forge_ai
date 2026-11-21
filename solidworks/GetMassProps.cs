@@ -37,7 +37,7 @@ namespace Forge.SolidWorks
         public static async Task<MassPropsResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new MassPropsResult();
-            if (model == null) { res.Error = "Open a part or assembly first — there's nothing to weigh."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly first (.SLDPRT/.SLDASM) — open it, then resend."; return res; }
 
             await emit("Scale", "computing mass properties", "run", null);
             try

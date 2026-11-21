@@ -38,7 +38,7 @@ namespace Forge.SolidWorks
         public static async Task<RenameConfigurationResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new RenameConfigurationResult();
-            if (model == null) { res.Error = "Open a part or assembly to rename a configuration."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly (.SLDPRT/.SLDASM) to rename a configuration."; return res; }
             string txt = intent ?? "";
 
             // Parse "rename <old> to <new>" / "rename config <old> to <new>", honoring quoted names first.

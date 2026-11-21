@@ -49,6 +49,8 @@ The Forge panel appears as a task pane inside SolidWorks.
 
 ## Configure a provider
 
+Unlike Kilo there is no sign-in, zero-config provider, or provisioning wizard: `/connect` and `/provider` only open Settings or switch slugs. Create `config.json` + a key as below, or run keyless — the deterministic local parser handles a large part of the catalog with no provider at all.
+
 Forge reads chat settings (provider, base URL, model) from `%APPDATA%\Forge\config.json`. Keys never live in the config file. Resolution order, everywhere: (1) per-slug DPAPI file `%APPDATA%\Forge\keys\<slug>.key` (e.g. `nvidia.key`), (2) per-slug env var, (3) the legacy shared client-id file (auto-adopted under the slug on first use), (4) the bare `FORGE_PROVIDER_KEY` fallback.
 
 | Slug | Per-slug env var |
@@ -118,7 +120,7 @@ The composer sits at the bottom of the panel: `Enter` sends, `Shift+Enter` adds 
 
 ### Model picker
 
-The pill next to Attach shows the short model id (or `model` when none is set). Clicking it opens the model popover: search box on top, rows grouped as Recent / Favorites / vendor prefix, footer with count plus Refresh. Refresh asks the host for the live list (`refreshModels`); providers backed by `openai-compatible` return a live list, others report one fixed model. Star toggles a favorite (persisted in `forge_fav_models`); the last five picks are kept in `forge_recent_models`. Keyboard in the search box: `Up/Down/Home/End` move, `Enter` picks (highlighted row, else the active model, else the first row), `Esc` closes. Switching posts `setModel` and applies to the next run.
+The pill next to Attach shows the short model id (or `model` when none is set). Clicking it opens the model popover: search box on top, rows grouped as Recent / Favorites / vendor prefix, footer with count plus Refresh; the list renders at most 200 rows — refine the search for more. Refresh asks the host for the live list (`refreshModels`); providers backed by `openai-compatible` return a live list, others report one fixed model. Star toggles a favorite (persisted in `forge_fav_models`); the last five picks are kept in `forge_recent_models`. Keyboard in the search box: `Up/Down/Home/End` move, `Enter` picks (highlighted row, else the active model, else the first row), `Esc` closes. Switching posts `setModel` and applies to the next run.
 
 ### Enhance
 
@@ -126,11 +128,13 @@ The pill next to Attach shows the short model id (or `model` when none is set). 
 
 ### Prompt history and chat history
 
-`↑` recalls the previous sent prompt, `↓` moves newer (persisted in `forge_history`, last 100). Navigation only triggers on the first/last line so multiline editing keeps caret movement; the unsent draft is stashed on the first `↑` and restored when paging past the newest. `🕘` opens the chat-history popover (persisted in `forge_sessions`, newest 30 chats, 100 turns each): search filters by title or prompt text, clicking a row restores that transcript and loads its agent conversation host-side, `✕` deletes one chat, `+ New chat` clears the panel.
+`↑` recalls the previous sent prompt, `↓` moves newer (persisted in `forge_history`, last 100). Navigation only triggers on the first/last line so multiline editing keeps caret movement; the unsent draft is stashed on the first `↑` and restored when paging past the newest. `🕘` opens the chat-history popover (persisted in `forge_sessions`, newest 30 chats, 100 turns each; if localStorage quota is hit, old turns are trimmed harder to keep saving working): search filters by title or prompt text, clicking a row restores that transcript and loads its agent conversation host-side, `✕` deletes one chat, `+ New chat` clears the panel.
 
 ### Revert, unrevert, regen
 
-Each user turn has a `↩ revert` button. It stops any in-flight run, drops that turn and everything after it from the transcript, truncates the host agent history to the kept turn count (`revert` with `sid` + `keep`), puts the reverted prompt back in the composer for editing, and stashes the removed turns for one step. `/unrevert` restores that stash (same chat only; a chat switch clears it). `↻` and `/regen` re-run the last non-command prompt; with no prior prompt they report that there is nothing to regenerate.
+Each user turn has a `↩ revert` button. It stops any in-flight run, drops that turn and everything after it from the transcript, truncates the host agent history to the kept turn count (`revert` with `sid` + `keep`), puts the reverted prompt back in the composer for editing, and stashes the removed turns for one step. `/unrevert` restores that stash (same chat only; a chat switch, provider change, or any new message after the revert clears it). `↻` and `/regen` re-run the last non-command prompt; with no prior prompt they report that there is nothing to regenerate.
+
+Intentionally omitted vs Kilo Settings: per-tool Ask dropdowns (Forge asks implicitly unless a rule allows), custom model registration (fixed presets + live provider lists), notification/sound packs, and privacy-blur.
 
 ### Transcript compaction
 

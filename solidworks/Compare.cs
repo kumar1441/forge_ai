@@ -68,7 +68,7 @@ namespace Forge.SolidWorks
             if (model == null) { res.Error = "Open a version first, then tell me which other version to compare it against."; return res; }
             int thisType = (int)model.GetType();
             if (thisType != (int)swDocumentTypes_e.swDocASSEMBLY && thisType != (int)swDocumentTypes_e.swDocPART)
-            { res.Error = "Open a part or an assembly to compare versions."; return res; }
+            { res.Error = "Open a part or an assembly (.SLDPRT/.SLDASM) to compare versions."; return res; }
             string thisPath = null; try { thisPath = model.GetPathName(); } catch { }
 
             // ---- resolve the SECOND version. A real user never types a PC path (panel-testing.md): resolve, in order,

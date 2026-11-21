@@ -36,7 +36,7 @@ namespace Forge.SolidWorks
         public static async Task<CreateRefAxisResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new CreateRefAxisResult();
-            if (model == null) { res.Error = "Open a part or assembly to add a reference axis."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly (.SLDPRT/.SLDASM) to add a reference axis."; return res; }
 
             await emit("Gauge", "counting existing axes", "run", null);
             res.AxesBefore = AxisCount(model);

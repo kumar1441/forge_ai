@@ -5394,7 +5394,7 @@ namespace Forge.SolidWorks
         {
             // The doc is captured before awaits (cloud parse, approvals): it can be null or closed
             // by the time we run. Fail closed with an actionable message — never a COM cascade.
-            if (doc == null) { Send(new { type = "error", message = "Open a part or assembly first, then tell me what to do." }); return new HOutcome { Error = "no open document — open a part or assembly first, then tell me what to do" }; }
+            if (doc == null) { Send(new { type = "error", message = "Open a part or assembly first (.SLDPRT/.SLDASM) — open it, then resend." }); return new HOutcome { Error = "no open document — open a part or assembly first (.SLDPRT/.SLDASM), then resend" }; }
             try { string probe = doc.GetTitle(); }
             catch { Send(new { type = "error", message = "The model was closed — reopen it and ask again." }); return new HOutcome { Error = "model was closed — reopen it and ask again" }; }
             OpCounter.Increment();

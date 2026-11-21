@@ -50,7 +50,7 @@ namespace Forge.SolidWorks
         public static async Task<Create3DSketchResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new Create3DSketchResult();
-            if (model == null) { res.Error = "Open a part or assembly to start a 3D sketch on."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly (.SLDPRT/.SLDASM) to start a 3D sketch on."; return res; }
 
             var existing = FindTaggedFeature(model);
             if (existing != null)

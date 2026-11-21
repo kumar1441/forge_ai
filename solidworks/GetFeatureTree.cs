@@ -36,7 +36,7 @@ namespace Forge.SolidWorks
         public static async Task<FeatureTreeResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new FeatureTreeResult();
-            if (model == null) { res.Error = "Open a part or assembly to read its feature tree."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly (.SLDPRT/.SLDASM) to read its feature tree."; return res; }
 
             await emit("Scribe", "walking the feature tree", "run", null);
             int total = 0, suppressed = 0;

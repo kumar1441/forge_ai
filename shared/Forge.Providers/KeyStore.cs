@@ -62,13 +62,34 @@ namespace Forge.Providers
             try
             {
                 File.WriteAllText(tmp, Convert.ToBase64String(protectedBlob));
-                if (File.Exists(path)) File.Replace(tmp, path, null);
-                else File.Move(tmp, path);
+                // Replace-or-move with fallback both ways: the Exists check can race a
+                // concurrent rotation/removal between check and write.
+                bool replaced = false;
+                if (File.Exists(path))
+                {
+                    try { File.Replace(tmp, path, null); replaced = true; }
+                    catch (FileNotFoundException) { replaced = false; }
+                }
+                if (!replaced)
+                {
+                    try { File.Move(tmp, path); }
+                    catch (IOException) { File.Replace(tmp, path, null); }
+                }
             }
             catch
             {
                 try { File.Delete(tmp); } catch { }
                 throw;
+            }
+            // Read-back verification: a save this user context cannot decrypt
+            // (roaming profile) must fail closed here, not surface as hasKey=false later.
+            string check = null;
+            try { check = Load(provider); } catch { check = null; }
+            if (!string.Equals(check, apiKey, StringComparison.Ordinal))
+            {
+                try { File.Delete(path); } catch { }
+                try { File.Delete(tmp); } catch { }
+                throw new CryptographicException("The key was saved but could not be read back in Windows secure storage — use a local Windows account profile (roaming profiles can block it).");
             }
         }
 

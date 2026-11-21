@@ -43,7 +43,7 @@ namespace Forge.SolidWorks
         public static async Task<FindFeatureByNameResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new FindFeatureByNameResult();
-            if (model == null) { res.Error = "Open a part or assembly to search its feature tree."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly (.SLDPRT/.SLDASM) to search its feature tree."; return res; }
 
             res.Query = ExtractQuery(intent);
             if (string.IsNullOrWhiteSpace(res.Query)) { res.Error = "Which feature name should I look for?"; return res; }

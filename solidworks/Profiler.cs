@@ -43,7 +43,7 @@ namespace Forge.SolidWorks
         public static async Task<ProfilerResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new ProfilerResult();
-            if (model == null) { res.Error = "Open a part or assembly to profile."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly (.SLDPRT/.SLDASM) to profile."; return res; }
 
             await emit("Profiler", "timing the rebuild", "run", null);
 

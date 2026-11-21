@@ -309,11 +309,12 @@ namespace Forge.Providers
                                     {
                                         var rawErr = JObject.Parse(line);
                                         var re = rawErr["error"];
-                                        if (re != null && re.Type != JTokenType.Null)
-                                        {
-                                            string em2 = (re as JObject) != null ? (string)((JObject)re)["message"] : null;
-                                            throw new ProviderException("Provider stream error (" + Truncate(em2 ?? re.ToString()) + ") — try again; if it repeats, switch model.");
-                                        }
+                                if (re != null && re.Type != JTokenType.Null)
+                                {
+                                    string em2 = (re as JObject) != null ? (string)((JObject)re)["message"] : null;
+                                    string code2 = (re as JObject) != null ? (string)((JObject)re)["code"] : null;
+                                    throw new ProviderException("Provider stream error" + (string.IsNullOrWhiteSpace(code2) ? "" : " [" + code2.Trim() + "]") + " (" + Truncate(em2 ?? re.ToString()) + ") — try again; if it repeats, switch model.");
+                                }
                                     }
                                     catch (ProviderException) { throw; }
                                     catch { }
@@ -335,12 +336,13 @@ namespace Forge.Providers
                             }
                             // 200-then-error mid-stream: without this the error event is skipped
                             // as delta-less and the run ends with misleading "no content".
-                            var streamErr = evt["error"];
-                            if (streamErr != null && streamErr.Type != JTokenType.Null)
-                            {
-                                string em = (streamErr as JObject) != null ? (string)((JObject)streamErr)["message"] : null;
-                                throw new ProviderException("Provider stream error (" + Truncate(em ?? streamErr.ToString()) + ") — try again; if it repeats, switch model.");
-                            }
+                        var streamErr = evt["error"];
+                        if (streamErr != null && streamErr.Type != JTokenType.Null)
+                        {
+                            string em = (streamErr as JObject) != null ? (string)((JObject)streamErr)["message"] : null;
+                            string scode = (streamErr as JObject) != null ? (string)((JObject)streamErr)["code"] : null;
+                            throw new ProviderException("Provider stream error" + (string.IsNullOrWhiteSpace(scode) ? "" : " [" + scode.Trim() + "]") + " (" + Truncate(em ?? streamErr.ToString()) + ") — try again; if it repeats, switch model.");
+                        }
                              try
                              {
                                  string mn = (string)evt["model"];

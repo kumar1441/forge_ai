@@ -838,7 +838,7 @@ namespace Forge.SolidWorks
         private IModelDoc2 ActivePart()
         {
             var model = (IModelDoc2)SwAddin.SwApp?.ActiveDoc;
-            if (model == null) throw new Exception("Open a part first.");
+            if (model == null) throw new Exception("Open a part first (.SLDPRT) — open it, then resend.");
             if ((int)model.GetType() != (int)swDocumentTypes_e.swDocPART)
                 throw new Exception("Active document must be a part (.SLDPRT).");
             return model;
@@ -890,7 +890,20 @@ namespace Forge.SolidWorks
             cfg["baseUrl"] = preset.BaseUrl;
             cfg["model"] = string.IsNullOrWhiteSpace(model) ? preset.Model : model.Trim();
             cfg["model_" + slug] = (string)cfg["model"];
-            File.WriteAllText(cfgPath, cfg.ToString());
+            // Atomic config write (temp + replace): a crash mid-save must never leave a
+            // half-written config.json that ReadForgeConfig then reads as "no provider".
+            string cfgTmp = cfgPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                File.WriteAllText(cfgTmp, cfg.ToString());
+                if (File.Exists(cfgPath)) File.Replace(cfgTmp, cfgPath, null);
+                else File.Move(cfgTmp, cfgPath);
+            }
+            catch
+            {
+                try { File.Delete(cfgTmp); } catch { }
+                throw;
+            }
         }
 
         private class ProviderPreset
@@ -1307,7 +1320,7 @@ namespace Forge.SolidWorks
 
             // FROM-SCRATCH CREATE — before every edit-oriented matcher (resizer/mate/mirror/...): an
             // enriched build spec is full of fastener callouts (M3/M4/M5) and mate words ("mount") that
-            // those matchers would otherwise claim with no doc open ("Open your assembly first"). Verb-gated
+            // those matchers would otherwise claim with no doc open ("Open your assembly first (.SLDASM) — open it, then resend"). Verb-gated
             // (create/make/build/...), so edit flows keep theirs. Needs no open document.
             if (await TryRunMcpBuild(intent, runCt, sid)) return;
             if (myRun != _currentRunId) return; // superseded while awaiting: the new run owns the panel
@@ -1320,7 +1333,7 @@ namespace Forge.SolidWorks
             if (Resizer.IsResizeIntent((intent ?? "").Trim().ToLowerInvariant()))
             {
                 var doc = SwAddin.SwApp?.ActiveDoc as IModelDoc2;
-                if (doc == null) { Send(new { type = "error", message = "Open your assembly first." }); return; }
+                if (doc == null) { Send(new { type = "error", message = "Open your assembly first (.SLDASM) — open it, then resend." }); return; }
                 if ((int)doc.GetType() != (int)swDocumentTypes_e.swDocASSEMBLY)
                 { Send(new { type = "error", message = "Open the assembly (.SLDASM) to resize fasteners." }); return; }
 
@@ -1361,7 +1374,7 @@ namespace Forge.SolidWorks
             if (AutoMate.IsMateIntent((intent ?? "").Trim().ToLowerInvariant()))
             {
                 var doc = SwAddin.SwApp?.ActiveDoc as IModelDoc2;
-                if (doc == null) { Send(new { type = "error", message = "Open your assembly first." }); return; }
+                if (doc == null) { Send(new { type = "error", message = "Open your assembly first (.SLDASM) — open it, then resend." }); return; }
                 if ((int)doc.GetType() != (int)swDocumentTypes_e.swDocASSEMBLY)
                 { Send(new { type = "error", message = "Open the assembly (.SLDASM) to mate fasteners." }); return; }
 
@@ -1387,7 +1400,7 @@ namespace Forge.SolidWorks
             if (Mirror.IsMirrorIntent((intent ?? "").Trim().ToLowerInvariant()))
             {
                 var doc = SwAddin.SwApp?.ActiveDoc as IModelDoc2;
-                if (doc == null) { Send(new { type = "error", message = "Open your assembly first." }); return; }
+                if (doc == null) { Send(new { type = "error", message = "Open your assembly first (.SLDASM) — open it, then resend." }); return; }
                 if ((int)doc.GetType() != (int)swDocumentTypes_e.swDocASSEMBLY)
                 { Send(new { type = "error", message = "Open the assembly (.SLDASM) to mirror a component." }); return; }
 
@@ -1410,7 +1423,7 @@ namespace Forge.SolidWorks
             if (Exploder.IsExplodeIntent((intent ?? "").Trim().ToLowerInvariant()))
             {
                 var doc = SwAddin.SwApp?.ActiveDoc as IModelDoc2;
-                if (doc == null) { Send(new { type = "error", message = "Open your assembly first." }); return; }
+                if (doc == null) { Send(new { type = "error", message = "Open your assembly first (.SLDASM) — open it, then resend." }); return; }
                 if ((int)doc.GetType() != (int)swDocumentTypes_e.swDocASSEMBLY)
                 { Send(new { type = "error", message = "Open the assembly (.SLDASM) to explode it." }); return; }
 
@@ -1434,7 +1447,7 @@ namespace Forge.SolidWorks
             if (Materializer.IsMaterialIntent((intent ?? "").Trim().ToLowerInvariant()))
             {
                 var doc = SwAddin.SwApp?.ActiveDoc as IModelDoc2;
-                if (doc == null) { Send(new { type = "error", message = "Open a part or assembly first." }); return; }
+                if (doc == null) { Send(new { type = "error", message = "Open a part or assembly first (.SLDPRT/.SLDASM) — open it, then resend." }); return; }
 
                 OpCounter.Increment();
                 ForgeData.RunBegin("set_material", ForgeData.Mask(intent, IntentLayer.ComponentNames(doc)), 0);
@@ -1449,7 +1462,7 @@ namespace Forge.SolidWorks
             if (Scout.IsScanIntent((intent ?? "").Trim().ToLowerInvariant()))
             {
                 var doc = SwAddin.SwApp?.ActiveDoc as IModelDoc2;
-                if (doc == null) { Send(new { type = "error", message = "Open your assembly first." }); return; }
+                if (doc == null) { Send(new { type = "error", message = "Open your assembly first (.SLDASM) — open it, then resend." }); return; }
                 if ((int)doc.GetType() != (int)swDocumentTypes_e.swDocASSEMBLY)
                 { Send(new { type = "error", message = "Open the assembly (.SLDASM) to scan it." }); return; }
 
@@ -1471,7 +1484,7 @@ namespace Forge.SolidWorks
             if (Isolator.IsIsolateIntent((intent ?? "").Trim().ToLowerInvariant()))
             {
                 var doc = SwAddin.SwApp?.ActiveDoc as IModelDoc2;
-                if (doc == null) { Send(new { type = "error", message = "Open your assembly first." }); return; }
+                if (doc == null) { Send(new { type = "error", message = "Open your assembly first (.SLDASM) — open it, then resend." }); return; }
                 if ((int)doc.GetType() != (int)swDocumentTypes_e.swDocASSEMBLY)
                 { Send(new { type = "error", message = "Open the assembly (.SLDASM) to isolate parts." }); return; }
 
@@ -1494,7 +1507,7 @@ namespace Forge.SolidWorks
             if (Batcher.IsBatchIntent((intent ?? "").Trim().ToLowerInvariant()))
             {
                 var doc = SwAddin.SwApp?.ActiveDoc as IModelDoc2;
-                if (doc == null) { Send(new { type = "error", message = "Open your assembly first." }); return; }
+                if (doc == null) { Send(new { type = "error", message = "Open your assembly first (.SLDASM) — open it, then resend." }); return; }
                 if ((int)doc.GetType() != (int)swDocumentTypes_e.swDocASSEMBLY)
                 { Send(new { type = "error", message = "Open the assembly (.SLDASM) to batch-simplify its parts." }); return; }
 
@@ -1518,7 +1531,7 @@ namespace Forge.SolidWorks
             if (Simplifier.IsSimplifyIntent((intent ?? "").Trim().ToLowerInvariant()))
             {
                 var doc = SwAddin.SwApp?.ActiveDoc as IModelDoc2;
-                if (doc == null) { Send(new { type = "error", message = "Open a part or assembly first." }); return; }
+                if (doc == null) { Send(new { type = "error", message = "Open a part or assembly first (.SLDPRT/.SLDASM) — open it, then resend." }); return; }
 
                 OpCounter.Increment();
                 ForgeData.RunBegin("simplify", ForgeData.Mask(intent, IntentLayer.ComponentNames(doc)), 0);
@@ -1554,7 +1567,7 @@ namespace Forge.SolidWorks
             var model = SwAddin.SwApp?.ActiveDoc as IModelDoc2;
             if (model == null)
             {
-                Send(new { type = "error", message = "Open a part or assembly first, then tell me what to do." });
+                Send(new { type = "error", message = "Open a part or assembly first (.SLDPRT/.SLDASM) — open it, then resend." });
                 return;
             }
             bool isPart = (int)model.GetType() == (int)swDocumentTypes_e.swDocPART;

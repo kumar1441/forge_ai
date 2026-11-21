@@ -55,7 +55,7 @@ namespace Forge.SolidWorks
         public static async Task<HandleRollbackBarResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new HandleRollbackBarResult();
-            if (model == null) { res.Error = "Open a part or assembly to check its rollback bar."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly (.SLDPRT/.SLDASM) to check its rollback bar."; return res; }
 
             await emit("Sentinel", "checking the rollback bar", "run", null);
 

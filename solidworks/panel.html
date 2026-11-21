@@ -888,7 +888,7 @@
     if (m.baseUrl !== undefined) lastBaseUrl = m.baseUrl || "";
     const known = m.slug && sel.querySelector(`option[value="${m.slug}"]`) ? m.slug : null;
     if (known) sel.value = known;
-    curSlug = known || sel.value;
+    curSlug = known || m.slug || sel.value; // keep custom slugs: no dropdown option, but pill/ctx/key-state must stay on the host's provider
     lastHasKey = (curSlug === "ollama") ? true : !!m.hasKey;
     const isOllama = curSlug === "ollama";
     const needKeyRow = !isOllama && !m.hasKey;
@@ -1882,7 +1882,7 @@
       } else if ($("mcount")) { $("mcount").title = ""; }
       const sel = document.querySelector("#obmodel");
       const obp = document.querySelector("#obprov");
-      const staleOb = !!(sel && obp && sel.dataset.prov && obp.value !== sel.dataset.prov);
+      const staleOb = !!(sel && obp && ((sel.dataset.prov && obp.value !== sel.dataset.prov) || (sel.dataset.req && obp.value !== sel.dataset.req)));
       if (sel && !staleOb) {
         const st = document.querySelector("#obmstat");
         sel.innerHTML = "";
@@ -1929,6 +1929,9 @@
         $("mrefresh").style.display = curDynamic ? "" : "none";
         if (!m.hasKey && m.slug && m.slug !== "ollama" && lastNoKeyPrompt !== m.slug && !document.getElementById("onboard")) { lastNoKeyPrompt = m.slug; systemCard(`No key saved for <b>${m.slug}</b> — paste it in Settings → API key, hit Save, then pick a model.`); }
         if (m.hasKey) lastNoKeyPrompt = null; // key present again: a later no-key episode re-warns once
+        // Late provider reply for a configured host while untouched onboarding shows: dismiss it —
+        // firstrun can win the race, but a stored provider means this user is configured, never fresh.
+        if (m.slug && document.getElementById("onboard")) { const ob = document.getElementById("onboard"); const okf = ob.querySelector("#obkey"); if (!ob.dataset.saved && !ob.dataset.prov && (!okf || !okf.value.trim())) { try { safeSet("forge_onboarded", "1"); } catch (eob2) {} ob.remove(); refresh(); try { intent.focus(); } catch (eob3) {} } }
         if (curDynamic && !chatModels.length) post({ action: "refreshModels" });
       } else if (m.error === "nokey") {
         lastHasKey = false;
@@ -2010,7 +2013,7 @@
     else if (m.type === "report") { finish(renderReport(m)); }
     else if (m.type === "share") { finish(renderShare(m)); }
     else if (m.type === "presence") { renderPresence(m); }
-    else if (m.type === "firstrun") { showOnboard(); }
+    else if (m.type === "firstrun") { if (!onboardHasConfig) showOnboard(); } // host sends firstrun every launch: only fresh (no stored provider yet) may see onboarding
     else if (m.type === "telemetryState") { if (telmTgl && typeof m.on === "boolean") { telmTgl.checked = m.on; try { safeSet("forge_telm", telmTgl.checked ? "1" : "0"); } catch (e) {} } }
 
     // cross-tool / teammate notifications arrive any time — append as a system card
@@ -2154,6 +2157,7 @@
           return;
         }
         if (st) st.textContent = "Loading models…";
+        if (md) md.dataset.req = pr.value; // remember who the request was for: a late reply must not populate another provider's list
         post({ action: "fetchModels", provider: pr.value, key: kv.value.trim() });
         setTimeout(() => { const s2 = o.querySelector("#obmstat"); if (s2 && s2.textContent === "Loading models…") s2.textContent = "Couldn't load models — check the key, then hit Load models, or Continue with the default."; }, 8000);
       };

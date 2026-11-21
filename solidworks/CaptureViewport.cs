@@ -65,7 +65,7 @@ namespace Forge.SolidWorks
         public static async Task<CaptureViewportResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new CaptureViewportResult();
-            if (model == null) { res.Error = "Open a part or assembly to capture a viewport image."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly (.SLDPRT/.SLDASM) to capture a viewport image."; return res; }
 
             string viewName = ParseViewName(intent);
             res.ViewName = viewName;
