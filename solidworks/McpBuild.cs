@@ -41,6 +41,8 @@ namespace Forge.SolidWorks
         {
             try { LoadApprovals(); } catch { }
             try { LoadDenials(); } catch { }
+            try { LoadToolPolicy(); } catch { }
+            try { LoadSeenTools(); } catch { }
         }
         public static bool ApproveMaster = true;
         public static bool ApproveRead = true;
@@ -55,8 +57,25 @@ namespace Forge.SolidWorks
         private static readonly Dictionary<string, System.Threading.Tasks.TaskCompletionSource<string>> PendingApprovals =
             new Dictionary<string, System.Threading.Tasks.TaskCompletionSource<string>>();
 
+        // Per-tool policy (exact names, case-insensitive): an explicit entry wins over the
+        // glob chain in ApprovalFor. "allow" runs free, "deny" refuses, "ask" forces a card
+        // (ApprovalFor returns null so the gate prompts). Absent entry falls through to globs.
+        // Stored separately in %APPDATA%\Forge\tool-policy.json (JObject name->action);
+        // approval-rules.json (JArray shape) is never touched by policy edits. Empty/missing/
+        // corrupt file means current behavior (no per-tool overrides). Never throws to SW.
+        private static readonly Dictionary<string, string> ToolPolicy =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        // Seen tool names (union source for the panel dropdown): appended at GateToolAsync
+        // entry, persisted to %APPDATA%\Forge\agent\seen-tools.json, capped at 200.
+        public static readonly HashSet<string> SeenTools =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         /// <summary>Set by the pipeline per run so the gate can post approval cards to the panel.</summary>
         public static Action<JObject> CardSender;
+
+        /// <summary>Set once by the panel so the gate can also raise an OS toast on approval arrival. Best-effort; never fails a run.</summary>
+        public static Action<string, string> NotifyHook;
 
         private static string ApprovalsPath()
         {
@@ -201,6 +220,168 @@ namespace Forge.SolidWorks
             catch { }
         }
 
+        private static string ToolPolicyPath()
+        {
+            return Path.Combine(AgentDir(), "..", "tool-policy.json");
+        }
+
+        public static void LoadToolPolicy()
+        {
+            // Stage off-lock, swap under one lock: mirrors LoadApprovals so a concurrent
+            // SetToolPolicy landing between Clear and fill is never wiped. Missing/corrupt/
+            // empty file means no overrides (current behavior). Never throws to SW.
+            var staged = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                string p = ToolPolicyPath();
+                if (!File.Exists(p)) { lock (ToolPolicy) { ToolPolicy.Clear(); } return; }
+                JObject j;
+                try { j = JObject.Parse(File.ReadAllText(p)); }
+                catch { lock (ToolPolicy) { ToolPolicy.Clear(); } return; }
+                if (j != null)
+                {
+                    foreach (var kv in j)
+                    {
+                        try
+                        {
+                            string k = (kv.Key ?? "").Trim();
+                            if (string.IsNullOrWhiteSpace(k)) continue;
+                            string v = null;
+                            try { v = (string)kv.Value; } catch { continue; }
+                            if (string.IsNullOrWhiteSpace(v)) continue;
+                            v = v.Trim().ToLowerInvariant();
+                            if (v != "allow" && v != "ask" && v != "deny") continue;
+                            staged[k] = v;
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { staged.Clear(); }
+            lock (ToolPolicy) { ToolPolicy.Clear(); foreach (var kv in staged) ToolPolicy[kv.Key] = kv.Value; }
+        }
+
+        private static void SaveToolPolicy()
+        {
+            // Mirrors SaveApprovals: snapshot under lock, best-effort write, never throws.
+            // Writes ONLY tool-policy.json; approval-rules.json bytes are untouched.
+            try
+            {
+                var o = new JObject();
+                lock (ToolPolicy) { foreach (var kv in ToolPolicy) o[kv.Key] = kv.Value; }
+                string p = ToolPolicyPath();
+                try { Directory.CreateDirectory(Path.GetDirectoryName(p)); } catch { }
+                File.WriteAllText(p, o.ToString(Newtonsoft.Json.Formatting.None));
+            }
+            catch { }
+        }
+
+        /// <summary>Set (allow|ask|deny) or clear (null/"clear"/empty) one exact tool's policy. Never throws.</summary>
+        public static void SetToolPolicy(string tool, string mode)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(tool)) return;
+                string t = tool.Trim();
+                if (t.Length == 0) return;
+                string m = (mode ?? "").Trim().ToLowerInvariant();
+                if (m == "" || m == "clear" || m == "null" || m == "default") m = null;
+                if (m != null && m != "allow" && m != "ask" && m != "deny") return;
+                lock (ToolPolicy)
+                {
+                    try { ToolPolicy.Remove(t); } catch { }
+                    if (m != null) ToolPolicy[t] = m;
+                }
+                SaveToolPolicy();
+            }
+            catch { }
+        }
+
+        /// <returns>"allow"|"ask"|"deny" (lowercase) or null when no explicit entry. Never throws.</returns>
+        public static string GetToolPolicy(string tool)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(tool)) return null;
+                string t = tool.Trim();
+                lock (ToolPolicy)
+                {
+                    string v;
+                    if (ToolPolicy.TryGetValue(t, out v)) return v;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        public static Dictionary<string, string> GetToolPolicies()
+        {
+            var out_ = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            try { lock (ToolPolicy) { foreach (var kv in ToolPolicy) out_[kv.Key] = kv.Value; } }
+            catch { }
+            return out_;
+        }
+
+        private static string SeenToolsPath()
+        {
+            return Path.Combine(AgentDir(), "seen-tools.json");
+        }
+
+        public static void LoadSeenTools()
+        {
+            var staged = new List<string>();
+            try
+            {
+                string p = SeenToolsPath();
+                if (!File.Exists(p)) return;
+                JArray arr;
+                try { arr = JArray.Parse(File.ReadAllText(p)); }
+                catch { return; }
+                if (arr != null)
+                {
+                    foreach (var t in arr)
+                    {
+                        try { string s = (string)t; if (!string.IsNullOrWhiteSpace(s)) staged.Add(s.Trim()); } catch { }
+                    }
+                }
+            }
+            catch { return; }
+            try
+            {
+                lock (SeenTools)
+                {
+                    foreach (var s in staged)
+                    {
+                        if (SeenTools.Count >= 200) break;
+                        SeenTools.Add(s);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private static void SaveSeenTools()
+        {
+            try
+            {
+                JArray arr;
+                lock (SeenTools)
+                {
+                    arr = new JArray();
+                    int n = 0;
+                    foreach (var s in SeenTools)
+                    {
+                        if (n++ >= 200) break;
+                        arr.Add(s);
+                    }
+                }
+                string p = SeenToolsPath();
+                try { Directory.CreateDirectory(Path.GetDirectoryName(p)); } catch { }
+                File.WriteAllText(p, arr.ToString(Newtonsoft.Json.Formatting.None));
+            }
+            catch { }
+        }
+
         private static string DenyPath()
         {
             return Path.Combine(AgentDir(), "..", "denials.json");
@@ -237,6 +418,20 @@ namespace Forge.SolidWorks
         /// <returns>null = ask (card), "allow" / "deny" = last matching rule wins (Kilo parity).</returns>
         public static string ApprovalFor(string tool)
         {
+            // PRECEDENCE: an explicit per-tool entry wins over every glob. "allow"->allow,
+            // "deny"->deny, "ask"->null (forces an approval card). Absent entry falls through
+            // to the existing glob chain below (last-match-wins).
+            if (!string.IsNullOrWhiteSpace(tool))
+            {
+                try
+                {
+                    string pol = GetToolPolicy(tool);
+                    if (pol == "allow") return "allow";
+                    if (pol == "deny") return "deny";
+                    if (pol == "ask") return null;
+                }
+                catch { }
+            }
             if (string.IsNullOrWhiteSpace(tool)) return null;
             string t = tool.Trim();
             string found = null;
@@ -299,6 +494,9 @@ namespace Forge.SolidWorks
         {
             if (ApprovalFor(tool) == "deny") return false;
             if (ApprovalFor(tool) == "allow") return true;
+            // Per-tool "ask" must force a card even when the master switch + category
+            // toggles would otherwise auto-approve (acceptance: ask + master ON -> card).
+            try { if (GetToolPolicy(tool) == "ask") return false; } catch { }
             if (!ApproveMaster) return false;
             switch (ToolCategory(tool))
             {
@@ -325,7 +523,9 @@ namespace Forge.SolidWorks
                     // Never persist synthetic card ids (doom-loop "(repeat loop)" etc.) as rules.
                     // A deny landing while the card was pending wins: persisting allow here would
                     // wipe that deny and defeat the GateToolAsync/doom-loop deny rechecks, so skip the write.
-                    if (!string.IsNullOrWhiteSpace(tool) && !tool.TrimStart().StartsWith("(") && ApprovalFor(tool) != "deny") AddAlwaysAllow(tool);
+                    // Also clear any explicit per-tool entry (ask/deny) so the new glob allow takes
+                    // effect: otherwise the per-tool entry would keep shadowing the glob (precedence).
+                    if (!string.IsNullOrWhiteSpace(tool) && !tool.TrimStart().StartsWith("(") && ApprovalFor(tool) != "deny") { AddAlwaysAllow(tool); try { SetToolPolicy(tool.Trim(), null); } catch { } }
                     d = "approve";
             }
             try { tcs.TrySetResult(d); } catch { }
@@ -337,12 +537,24 @@ namespace Forge.SolidWorks
         /// refused ToolResult when the user rejects.
         /// </summary>
         public static async Task<McpBridge.ToolResult> GateToolAsync(
-            string tool, JObject args, Func<string, string, string, string, Task> emit, System.Threading.CancellationToken ct, Action<JObject> cardSender = null)
+            string tool, JObject args, Func<string, string, string, string, Task> emit, System.Threading.CancellationToken ct, Action<JObject> cardSender = null, Func<bool> isCurrent = null)
         {
+            // Record every gated tool for the per-tool dropdown (SeenTools union source).
+            // Best-effort, capped at 200, never throws to SW.
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(tool))
+                {
+                    bool added = false;
+                    lock (SeenTools) { if (!SeenTools.Contains(tool.Trim())) { if (SeenTools.Count < 200) { SeenTools.Add(tool.Trim()); added = true; } } }
+                    if (added) SaveSeenTools();
+                }
+            }
+            catch { }
             if (ApprovalFor(tool) == "deny")
                 return new McpBridge.ToolResult { Ok = false, Text = DenyText(tool) };
             if (IsApproved(tool)) return null;
-            string verdict = await AskApproval(tool, args, emit, ct, cardSender);
+            string verdict = await AskApproval(tool, args, emit, ct, cardSender, null, isCurrent);
             // Panel-gone is fail-closed with its own text: it is not a user reject.
             if (verdict == "panel-gone")
                 return new McpBridge.ToolResult { Ok = false, Text = "Stopped: the panel is gone so the approval card can't be answered — resend to continue." };
@@ -357,7 +569,7 @@ namespace Forge.SolidWorks
         // consumed into a rule by ResolveApproval first). Throws OperationCanceledException when
         // the run is stopped while waiting. Shared by the tool gate and the doom-loop guard.
         private static async Task<string> AskApproval(
-            string tool, JObject args, Func<string, string, string, string, Task> emit, System.Threading.CancellationToken ct, Action<JObject> senderOverride = null, string reason = null)
+            string tool, JObject args, Func<string, string, string, string, Task> emit, System.Threading.CancellationToken ct, Action<JObject> senderOverride = null, string reason = null, Func<bool> isCurrent = null)
         {
             string id = "appr_" + Guid.NewGuid().ToString("N").Substring(0, 8) + "_" + tool;
             var tcs = new System.Threading.Tasks.TaskCompletionSource<string>();
@@ -396,6 +608,22 @@ namespace Forge.SolidWorks
                 lock (ApprovalToolById) { ApprovalToolById.Remove(id); }
                 return "panel-gone";
             }
+            // Approval card is on its way to the panel: raise an OS toast too (best-effort, never fails the gate).
+            // Suppressed when this run is already superseded: the run-scoped sender drops
+            // stale cards, so a toast here would point at a card that never renders.
+            try
+            {
+                bool current = true;
+                try { if (isCurrent != null) current = isCurrent(); } catch { current = true; }
+                var hook = NotifyHook;
+                if (hook != null && current)
+                {
+                    string hookArgs = null;
+                    try { hookArgs = cardArgs.ToString(Newtonsoft.Json.Formatting.None); if (hookArgs != null && hookArgs.Length > 255) hookArgs = hookArgs.Substring(0, 255); } catch { hookArgs = null; }
+                    hook(tool, hookArgs);
+                }
+            }
+            catch { }
             try { await emit("Builder", string.IsNullOrWhiteSpace(reason) ? ("needs approval: " + tool) : reason, "run", null); }
             catch { /* emit is best-effort: a dead panel must not break the gate wait */ }
             string verdict;
@@ -752,7 +980,7 @@ namespace Forge.SolidWorks
             public string Error;
         }
 
-        public static async Task<McpBuildOutcome> Run(string intent, Func<string, string, string, string, Task> emit, System.Threading.CancellationToken ct, Action<string, string> onThink, Action<JObject> cardSender = null)
+        public static async Task<McpBuildOutcome> Run(string intent, Func<string, string, string, string, Task> emit, System.Threading.CancellationToken ct, Action<string, string> onThink, Action<JObject> cardSender = null, Func<bool> isCurrent = null)
         {
             var outcome = new McpBuildOutcome();
             if (!IsMcpCreate(intent)) return outcome;
@@ -771,10 +999,13 @@ namespace Forge.SolidWorks
             await emit("Builder", "starting the MCP build server", "run", null);
 
             JArray tools;
+            string winnerName = null; // routed winner, pinned for every CallToolAsync in this run
             try
             {
-                await McpBridge.EnsureStartedAsync(0, ct);
-                tools = await McpBridge.ListToolsAsync(ct);
+                // Ordered failover across enabled servers (no namespacing); the winner serves this run.
+                var routed = await McpBridge.ListToolsRoutedAsync(ct);
+                tools = routed != null && routed.Tools != null ? routed.Tools : new JArray();
+                winnerName = routed != null ? routed.Winner : null;
                 if (tools == null || tools.Count == 0) throw new McpBridge.McpException("tool list came back empty.");
             }
             catch (OperationCanceledException) { outcome.Error = "INTERRUPTED"; return outcome; }
@@ -855,7 +1086,7 @@ namespace Forge.SolidWorks
                 n_++;
                 await emit("Builder", "step " + n_ + "/" + steps.Count + ": " + tool, "run", null);
                 McpBridge.ToolResult r;
-                var gate = await GateToolAsync(tool, args, emit, ct, cardSender);
+                var gate = await GateToolAsync(tool, args, emit, ct, cardSender, isCurrent);
                 if (gate != null)
                 {
                     // Surface the gate's own text: a deny-list refusal reads differently
@@ -867,7 +1098,8 @@ namespace Forge.SolidWorks
                 {
                     // Cancellable mid-flight: stop throws out of the server call itself instead of
                     // abandoning the wait on its (minutes-long) timeout — no orphaned unobserved task.
-                    r = await McpBridge.CallToolAsync(tool, args, 300000, ct);
+                    // Pinned to the routed winner so every step in this run hits the same server.
+                    r = await McpBridge.CallToolAsync(tool, args, 300000, ct, winnerName);
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
@@ -884,7 +1116,7 @@ namespace Forge.SolidWorks
                 }
             }
 
-            string measured = await BestEffortVerify(ct);
+            string measured = await BestEffortVerify(ct, winnerName);
             outcome.Summary = "Built via the MCP server in " + steps.Count + " steps (" +
                 string.Join("; ", log.ToArray()).Substring(0, Math.Min(400, string.Join("; ", log.ToArray()).Length)) +
                 ")" + (string.IsNullOrEmpty(measured) ? "." : " Measured: " + measured);
@@ -900,7 +1132,7 @@ namespace Forge.SolidWorks
         /// to the JSON-plan path rather than pretending a text reply built anything.
         /// </summary>
         public static async Task<McpBuildOutcome> RunAgent(
-            string intent, Func<string, string, string, string, Task> emit, System.Threading.CancellationToken ct, Action<string, string> onThink, string sid, Action<JObject> cardSender = null)
+            string intent, Func<string, string, string, string, Task> emit, System.Threading.CancellationToken ct, Action<string, string> onThink, string sid, Action<JObject> cardSender = null, Func<bool> isCurrent = null)
         {
             var outcome = new McpBuildOutcome();
             if (!IsMcpCreate(intent)) return outcome;
@@ -916,14 +1148,17 @@ namespace Forge.SolidWorks
             }
             catch { return outcome; }
             if (client.Id != "openai-compatible")
-                return await Run(intent, emit, ct, onThink, cardSender); // no function calling here: single-shot path
+                return await Run(intent, emit, ct, onThink, cardSender, isCurrent); // no function calling here: single-shot path
 
             outcome.Attempted = true;
             JArray tools;
+            string winnerName = null; // routed winner, pinned for every CallToolAsync in this run
             try
             {
-                await McpBridge.EnsureStartedAsync(0, ct);
-                tools = await McpBridge.ListToolsAsync(ct);
+                // Ordered failover across enabled servers (no namespacing); the winner serves this run.
+                var routed = await McpBridge.ListToolsRoutedAsync(ct);
+                tools = routed != null && routed.Tools != null ? routed.Tools : new JArray();
+                winnerName = routed != null ? routed.Winner : null;
                 if (tools == null || tools.Count == 0) throw new McpBridge.McpException("tool list came back empty.");
             }
             catch (OperationCanceledException) { outcome.Error = "INTERRUPTED"; return outcome; }
@@ -1096,13 +1331,14 @@ namespace Forge.SolidWorks
                         try { await emit("Builder", "step " + executed + ": " + c.Name, "run", null); }
                         catch { /* dead panel: keep executing, the user just sees nothing */ }
                         McpBridge.ToolResult r;
-                        var gate = await GateToolAsync(c.Name, args, emit, ct, cardSender);
+                        var gate = await GateToolAsync(c.Name, args, emit, ct, cardSender, isCurrent);
                         if (gate != null) r = gate;
                         else
                         {
                             // Cancellable mid-flight inside the bridge call: no orphaned server wait is
                             // abandoned (and none applied twice) — stop throws before any history append.
-                            try { r = await McpBridge.CallToolAsync(c.Name, args, 300000, ct); }
+                            // Pinned to the routed winner so every step in this run hits the same server.
+                            try { r = await McpBridge.CallToolAsync(c.Name, args, 300000, ct, winnerName); }
                             catch (OperationCanceledException) { throw; }
                     catch (Exception ex) { r = new McpBridge.ToolResult { Ok = false, Text = "transport failed (" + CleanDetail(ex.Message, 300) + ")" }; }
                         }
@@ -1136,7 +1372,8 @@ namespace Forge.SolidWorks
                                 verdict = await AskApproval(c.Name ?? "(repeat loop)",
                                     new JObject { ["repeated_call"] = c.Name ?? "?", ["times"] = 3, ["note"] = "The model repeated the same call 3 times, so it looks stuck — approve to let it continue, reject to stop and rephrase." },
                                     emit, ct, cardSender,
-                                    "Stuck in a loop on " + (c.Name ?? "a tool") + " — approval needed to continue");
+                                    "Stuck in a loop on " + (c.Name ?? "a tool") + " — approval needed to continue",
+                                    isCurrent);
                             }
                             catch (OperationCanceledException) { throw; }
                             if (verdict == "panel-gone")
@@ -1227,7 +1464,7 @@ namespace Forge.SolidWorks
             "verify with get_mass_properties or get_bounding_box when done; keep calling tools until the request is fully built; " +
             "then reply with a short summary including measured dims. No filler steps.";
 
-        private static async Task<string> BestEffortVerify(System.Threading.CancellationToken ct)
+        private static async Task<string> BestEffortVerify(System.Threading.CancellationToken ct, string serverName = null)
         {
             foreach (string probe in new[] { "get_mass_properties", "get_bounding_box" })
             {
@@ -1235,7 +1472,7 @@ namespace Forge.SolidWorks
                 try
                 {
                     // ct-bound: stop during the verify probes interrupts instead of hanging up to 120s each.
-                    var r = await McpBridge.CallToolAsync(probe, new JObject(), 120000, ct);
+                    var r = await McpBridge.CallToolAsync(probe, new JObject(), 120000, ct, serverName);
                     if (r.Ok && !string.IsNullOrWhiteSpace(r.Text))
                     {
                         string t = r.Text;

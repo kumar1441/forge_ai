@@ -32,6 +32,7 @@ namespace Forge.SolidWorks
         private string _attachedFile;  // a file the user handed Forge via the attach button (e.g. the 2nd version for Compare)
         private readonly System.Collections.Generic.List<string> _mentionedFiles = new System.Collections.Generic.List<string>();  // @-mentioned paths for the current prompt
         private Timer _bifrost;        // polls the cross-tool feed for changes from other tools
+        private NotifyIcon _notify;      // OS taskbar icon for approval/done/teammate toasts (WinForms, no new packages)
         private string _bifrostSince;  // poll cursor (newest event seen)
         private readonly System.Collections.Generic.HashSet<string> _bifrostSeen = new System.Collections.Generic.HashSet<string>();
         private string _lastBoardChange; // most recent cross-tool board change (for impact follow-ups)
@@ -78,6 +79,11 @@ namespace Forge.SolidWorks
             _harness = new Timer { Interval = 2000 };
             _harness.Tick += HarnessTick;
             _harness.Start();
+
+            // OS desktop toasts (approval arrival, run completion, teammate updates). Best-effort:
+            // a missing icon or torn-down handle must never break the panel.
+            InitNotify();
+            try { McpBuild.NotifyHook = (tool, args) => { try { NotifyToast("Forge approval needed", tool); } catch { } }; } catch { }
         }
 
         private Timer _harness;
@@ -185,12 +191,14 @@ namespace Forge.SolidWorks
                         {
                             _pendingIncoming = changes;
                             Send(new { type = "incoming", summary = ev.Summary, diff });
+                            try { NotifyToast("Teammate shared an update", ev.Summary); } catch { }
                         }
                     }
                     else
                     {
                         _lastBoardChange = ev.Summary; // board change â€” remember for "what does it impact?"
                         Send(new { type = "bifrost", source = ev.Source, summary = ev.Summary });
+                        try { NotifyToast("Board change from " + ev.Source, ev.Summary); } catch { }
                     }
                 }
             }
@@ -344,6 +352,29 @@ namespace Forge.SolidWorks
                     }
                     catch { }
                 }
+                else if (action == "toolPolicyGet")   // per-tool Ask dropdowns: union of live tools + seen tools + explicit policy
+                {
+                    try { SendToolPolicy(); } catch { }
+                }
+                else if (action == "toolPolicySet")   // {tool, mode: allow|ask|deny|clear} -> persist + refresh rules+toolPolicy
+                {
+                    try
+                    {
+                        string t = null, mode = null;
+                        try { t = (string)msg.tool; } catch { }
+                        try { mode = (string)msg.mode; } catch { }
+                        if (!string.IsNullOrWhiteSpace(t))
+                        {
+                            string m = (mode ?? "").Trim().ToLowerInvariant();
+                            if (m == "clear" || m == "" || m == "null" || m == "default") McpBuild.SetToolPolicy(t.Trim(), null);
+                            else if (m == "allow" || m == "ask" || m == "deny") McpBuild.SetToolPolicy(t.Trim(), m);
+                            else { Send(new { type = "error", message = "Unknown tool policy mode '" + mode + "' — use allow, ask, deny, or clear." }); return; }
+                            Send(new { type = "rules", allow = McpBuild.AlwaysList(), deny = McpBuild.DenyList() });
+                            try { SendToolPolicy(); } catch { }
+                        }
+                    }
+                    catch { }
+                }
                 else if (action == "attach") DoAttach();
                 else if (action == "clearAttach") { _attachedFile = null; lock (_mentionedFiles) { _mentionedFiles.Clear(); } Send(new { type = "attachCleared" }); }
                 else if (action == "revokeShare")   // no server revoke route exists in this client: be honest, links auto-expire
@@ -478,11 +509,35 @@ namespace Forge.SolidWorks
                 {
                     try
                     {
-                        string cmd, args; bool enabled; int tmo;
-                        McpBridge.DescribeFull(out cmd, out args, out enabled, out tmo);
-                        bool running = false;
-                        try { running = McpBridge.IsRunning; } catch { }
-                        Send(new { type = "answer", answer = "MCP server: " + (running ? "running" : (enabled ? "not running (starts on first multi-part build)" : "disabled in Settings")) + " — `" + (cmd + " " + args).Trim() + "` (" + (tmo / 1000) + "s timeout). Toggle + timeout live under Settings → MCP server." });
+                        Newtonsoft.Json.Linq.JArray servers = new Newtonsoft.Json.Linq.JArray();
+                        try { servers = McpBridge.DescribeAll(); } catch { }
+                        var lines = new System.Collections.Generic.List<string>();
+                        try
+                        {
+                            foreach (var t in servers)
+                            {
+                                try
+                                {
+                                    var o = t as Newtonsoft.Json.Linq.JObject;
+                                    if (o == null) continue;
+                                    string nm = (string)o["name"] ?? "default";
+                                    bool en = false; try { en = (bool)o["enabled"]; } catch { en = true; }
+                                    bool rn = false; try { rn = (bool)o["running"]; } catch { }
+                                    string cc = (string)o["command"] ?? "uvx";
+                                    string aa = (string)o["args"] ?? "";
+                                    int tm = 300000; try { tm = (int)o["timeoutMs"]; } catch { }
+                                    if (tm < 30000) tm = 300000;
+                                    string state = rn ? "running" : (en ? "not running (starts on next build)" : "disabled in Settings");
+                                    lines.Add(nm + ": " + state + " — `" + (cc + " " + aa).Trim() + "` (" + (tm / 1000) + "s timeout)");
+                                }
+                                catch { }
+                            }
+                        }
+                        catch { }
+                        string answer = lines.Count > 0
+                            ? "MCP servers (" + lines.Count + "):\n" + string.Join("\n", lines.ToArray()) + "\nToggle + timeout live under Settings → MCP server."
+                            : "No MCP servers are configured — add one under Settings → MCP server first.";
+                        Send(new { type = "answer", answer = answer, servers = servers });
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't read MCP status (" + BoundDetail(ex.Message, 200) + ") — check Settings → MCP server, then try again." }); }
                 }
@@ -494,7 +549,7 @@ namespace Forge.SolidWorks
                         McpBridge.DescribeFull(out cmd, out args, out enabled, out tmo);
                         bool running = false;
                         try { running = McpBridge.IsRunning; } catch { }
-                        Send(new { type = "mcpConfig", enabled = enabled, timeoutMs = tmo, command = cmd, args = args, running = running });
+                        Send(new { type = "mcpConfig", enabled = enabled, timeoutMs = tmo, command = cmd, args = args, running = running, servers = McpBridge.DescribeAll() });
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't read MCP config (" + BoundDetail(ex.Message, 200) + ") — check Settings → MCP server, then try again." }); }
                 }
@@ -504,15 +559,138 @@ namespace Forge.SolidWorks
                     {
                         bool enabled = true; bool hasEnabled = false;
                         try { object eo = msg.enabled; if (eo != null) { enabled = Convert.ToBoolean(eo); hasEnabled = true; } } catch { }
-                        int tmo = 0;
-                        try { tmo = Convert.ToInt32(msg.timeoutMs); } catch { }
-                        McpBridge.SaveConfig(hasEnabled ? (bool?)enabled : (bool?)null, tmo);
-                        string cmd, args; bool en2; int t2;
-                        McpBridge.DescribeFull(out cmd, out args, out en2, out t2);
-                        Send(new { type = "mcpConfig", enabled = en2, timeoutMs = t2, command = cmd, args = args, running = McpBridge.IsRunning });
-                        Send(new { type = "answer", answer = "MCP server " + (en2 ? "enabled" : "disabled") + " (" + (t2 / 1000) + "s timeout). Change takes effect on the next build." });
+                        int tmo = 0; bool hasTmo = false;
+                        try { object to = msg.timeoutMs; if (to != null) { tmo = Convert.ToInt32(to); hasTmo = true; } } catch { }
+                        if (hasTmo && tmo < 30000)
+                        { Send(new { type = "error", message = "Timeout must be \u226530 seconds — e.g. /mcps timeout <name> 300." }); }
+                        else
+                        {
+                            string setName = null;
+                            try { setName = (string)msg.name; } catch { }
+                            string resolved, rerr;
+                            if (!TryResolveServerName(setName, out resolved, out rerr))
+                            { Send(new { type = "error", message = rerr + " Change takes effect on the next build." }); }
+                            else
+                            {
+                                McpBridge.SaveServer(resolved, hasEnabled ? (bool?)enabled : (bool?)null, hasTmo && tmo >= 30000 ? (int?)tmo : (int?)null, null, null);
+                                SendMcpConfig();
+                                bool en2 = enabled; int t2 = tmo;
+                                try
+                                {
+                                    foreach (var s in McpBridge.LoadServers())
+                                        if (s != null && string.Equals(s.Name, resolved, System.StringComparison.OrdinalIgnoreCase)) { en2 = s.Enabled; t2 = s.TimeoutMs; break; }
+                                }
+                                catch { }
+                                Send(new { type = "answer", answer = "MCP server '" + resolved + "' " + (hasEnabled ? (en2 ? "enabled" : "disabled") + " " : "updated ") + "(" + (t2 / 1000) + "s timeout). Change takes effect on the next build." });
+                            }
+                        }
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't save MCP settings (" + BoundDetail(ex.Message, 200) + ") — check Settings → MCP server, then try again." }); }
+                }
+                else if (action == "mcpAdd")
+                {
+                    try
+                    {
+                        string addName = null, addCmd = null;
+                        try { addName = (string)msg.name; } catch { }
+                        try { addCmd = (string)msg.command; } catch { }
+                        string[] addArgs = ParseMcpArgs(msg);
+                        bool addEnabled = true;
+                        try { object eo = msg.enabled; if (eo != null) addEnabled = Convert.ToBoolean(eo); } catch { }
+                        int addTmo = 0;
+                        try { addTmo = Convert.ToInt32(msg.timeoutMs); } catch { }
+                        if (string.IsNullOrWhiteSpace(addName))
+                        { Send(new { type = "error", message = "Couldn't add the MCP server — give it a name first." }); }
+                        else
+                        {
+                            McpBridge.SaveServer(addName.Trim(), addEnabled, addTmo >= 30000 ? (int?)addTmo : (int?)null,
+                                string.IsNullOrWhiteSpace(addCmd) ? null : addCmd.Trim(), addArgs);
+                            SendMcpConfig();
+                            Send(new { type = "answer", answer = "MCP server '" + addName.Trim() + "' added — it joins the failover order for the next build." });
+                        }
+                    }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't add the MCP server (" + BoundDetail(ex.Message, 200) + ") — check Settings → MCP server, then try again." }); }
+                }
+                else if (action == "mcpUpdate")
+                {
+                    try
+                    {
+                        string updName = null, updCmd = null;
+                        try { updName = (string)msg.name; } catch { }
+                        try { updCmd = (string)msg.command; } catch { }
+                        string[] updArgs = ParseMcpArgs(msg);
+                        bool updEnabled = true; bool updHasEnabled = false;
+                        try { object eo = msg.enabled; if (eo != null) { updEnabled = Convert.ToBoolean(eo); updHasEnabled = true; } } catch { }
+                        int updTmo = 0;
+                        try { updTmo = Convert.ToInt32(msg.timeoutMs); } catch { }
+                        int updStart = 0; bool updHasStart = false;
+                        try { object so = msg.startTimeoutMs; if (so != null) { updStart = Convert.ToInt32(so); updHasStart = true; } } catch { }
+                        if (string.IsNullOrWhiteSpace(updName))
+                        { Send(new { type = "error", message = "Couldn't update the MCP server — no name was sent." }); }
+                        else
+                        {
+                            McpBridge.SaveServer(updName.Trim(), updHasEnabled ? (bool?)updEnabled : (bool?)null,
+                                updTmo >= 30000 ? (int?)updTmo : (int?)null,
+                                string.IsNullOrWhiteSpace(updCmd) ? null : updCmd.Trim(), updArgs,
+                                updHasStart ? (int?)(updStart >= 30000 ? updStart : 0) : (int?)null);
+                            SendMcpConfig();
+                        }
+                    }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't update the MCP server (" + BoundDetail(ex.Message, 200) + ") — check Settings → MCP server, then try again." }); }
+                }
+                else if (action == "mcpRemove")
+                {
+                    try
+                    {
+                        string rmName = null;
+                        try { rmName = (string)msg.name; } catch { }
+                        if (string.IsNullOrWhiteSpace(rmName))
+                        { Send(new { type = "error", message = "Couldn't remove the MCP server — no name was sent." }); }
+                        else
+                        {
+                            McpBridge.RemoveServer(rmName.Trim());
+                            SendMcpConfig();
+                            Send(new { type = "answer", answer = "MCP server '" + rmName.Trim() + "' removed." });
+                        }
+                    }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't remove the MCP server (" + BoundDetail(ex.Message, 200) + ") — check Settings → MCP server, then try again." }); }
+                }
+                else if (action == "mcpStart")
+                {
+                    try
+                    {
+                        string stName = null;
+                        try { stName = (string)msg.name; } catch { }
+                        string resolved, rerr;
+                        if (!TryResolveServerName(stName, out resolved, out rerr))
+                        { Send(new { type = "error", message = rerr }); }
+                        else
+                        {
+                            await McpBridge.EnsureStartedAsync(resolved, 0, System.Threading.CancellationToken.None);
+                            SendMcpConfig();
+                            Send(new { type = "answer", answer = "MCP server '" + resolved + "' started." });
+                        }
+                    }
+                    catch (OperationCanceledException) { Send(new { type = "error", message = "MCP start stopped — resend to try again." }); }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't start the MCP server (" + BoundDetail(ex.Message, 200) + ") — check Settings → MCP server, then try again." }); }
+                }
+                else if (action == "mcpStop")
+                {
+                    try
+                    {
+                        string spName = null;
+                        try { spName = (string)msg.name; } catch { }
+                        string resolved, rerr;
+                        if (!TryResolveServerName(spName, out resolved, out rerr))
+                        { Send(new { type = "error", message = rerr }); }
+                        else
+                        {
+                            McpBridge.Stop(resolved);
+                            SendMcpConfig();
+                            Send(new { type = "answer", answer = "MCP server '" + resolved + "' stopped." });
+                        }
+                    }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't stop the MCP server (" + BoundDetail(ex.Message, 200) + ") — it may already be stopped." }); }
                 }
                 else if (action == "reset")   // rehearsal/recording: wipe the panel + every pending thread for a clean take
                 {
@@ -580,7 +758,7 @@ namespace Forge.SolidWorks
                             var scfg = ReadForgeConfig();
                             string sp2 = (string)scfg["provider"], sbu2 = (string)scfg["baseUrl"];
                             string sslug2 = PresetSlugFor(sp2, sbu2);
-                            Send(new { type = "provider", slug = sslug2, provider = sp2, baseUrl = sbu2, model = (string)scfg["model"], dynamic = IsDynamicProvider(sp2), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(sslug2, sp2)) });
+                            Send(new { type = "provider", slug = sslug2, provider = sp2, baseUrl = sbu2, model = (string)scfg["model"], dynamic = IsDynamicProvider(sp2), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(sslug2, sp2)), customModels = GetCustomModels(sslug2) });
                         }
                         catch { }
                     }
@@ -621,7 +799,7 @@ namespace Forge.SolidWorks
                         string p = (string)cfg["provider"];
                         string bu = (string)cfg["baseUrl"];
                         string gslug = PresetSlugFor(p, bu);
-                        Send(new { type = "provider", slug = gslug, provider = p, baseUrl = bu, model = (string)cfg["model"], dynamic = IsDynamicProvider(p), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(gslug, p)) });
+                        Send(new { type = "provider", slug = gslug, provider = p, baseUrl = bu, model = (string)cfg["model"], dynamic = IsDynamicProvider(p), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(gslug, p)), customModels = GetCustomModels(gslug) });
                         Send(new { type = "rules", allow = McpBuild.AlwaysList(), deny = McpBuild.DenyList() });
                     }
                     catch (Exception ex) { Send(new { type = "provider", error = "Couldn't load provider settings (" + BoundDetail(ex.Message, 200) + ") — try again." }); }
@@ -657,7 +835,7 @@ namespace Forge.SolidWorks
                         string p = preset.Provider;
                         string keptModel = null;
                         try { keptModel = (string)cfg["model"]; } catch { }
-                        Send(new { type = "provider", slug = slug, provider = p, baseUrl = preset.BaseUrl, model = keptModel ?? preset.Model, dynamic = IsDynamicProvider(p), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(slug, p)) });
+                        Send(new { type = "provider", slug = slug, provider = p, baseUrl = preset.BaseUrl, model = keptModel ?? preset.Model, dynamic = IsDynamicProvider(p), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(slug, p)), customModels = GetCustomModels(slug) });
                         Send(new { type = "answer", answer = "Provider switched to " + slug + " (" + (keptModel ?? preset.Model) + ") — pick another model from the pill if you like." });
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't switch provider (" + BoundDetail(ex.Message, 200) + ") — check the selection/key and try again." }); }
@@ -700,10 +878,55 @@ namespace Forge.SolidWorks
                         WriteForgeConfig(cfg);
                         string sp = (string)cfg["provider"], sbu = (string)cfg["baseUrl"];
                         string smslug = PresetSlugFor(sp, sbu);
-                        Send(new { type = "provider", slug = smslug, provider = sp, baseUrl = sbu, model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(smslug, sp)) });
+                        Send(new { type = "provider", slug = smslug, provider = sp, baseUrl = sbu, model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(smslug, sp)), customModels = GetCustomModels(smslug) });
                         Send(new { type = "answer", answer = "Model switched to " + model.Trim() + " — it applies to the next run." });
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't switch model (" + BoundDetail(ex.Message, 200) + ") — check the selection/key and try again." }); }
+                }
+
+                // Custom model registration: per-slug ids the user registers by hand
+                // (config.json customModels.<slug> = [{id, label?}]). The slug is always
+                // derived host-side from the current provider/baseUrl — the panel never
+                // sends it, so a stale dropdown can't file a model under the wrong key.
+                // Custom ids are never probed via /models; they merge, never delete.
+                else if (action == "customModelAdd")
+                {
+                    string cid = null, clabel = null;
+                    try { cid = (string)msg.id; } catch { }
+                    try { clabel = (string)msg.label; } catch { }
+                    if (string.IsNullOrWhiteSpace(cid))
+                    { Send(new { type = "error", message = "No model id entered — type the exact model id, then Add." }); return; }
+                    try
+                    {
+                        var cfg = ReadForgeConfig();
+                        string cslug = PresetSlugFor((string)cfg["provider"], (string)cfg["baseUrl"]);
+                        var arr = AddCustomModel(cslug, cid, clabel);
+                        cfg = ReadForgeConfig();
+                        string sp = (string)cfg["provider"], sbu = (string)cfg["baseUrl"];
+                        string sslug = PresetSlugFor(sp, sbu);
+                        Send(new { type = "provider", slug = sslug, provider = sp, baseUrl = sbu, model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(sslug, sp)), customModels = arr });
+                        Send(new { type = "answer", answer = "Custom model '" + cid.Trim() + "' added for " + (cslug ?? sslug) + " — pick it from the pill or Settings." });
+                    }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't add the custom model (" + BoundDetail(ex.Message, 200) + ") — check the id and try again." }); }
+                }
+                else if (action == "customModelRemove")
+                {
+                    string cid = null;
+                    try { cid = (string)msg.id; } catch { }
+                    if (string.IsNullOrWhiteSpace(cid))
+                    { Send(new { type = "error", message = "No model id given — nothing to remove." }); return; }
+                    try
+                    {
+                        var cfg = ReadForgeConfig();
+                        string cslug = PresetSlugFor((string)cfg["provider"], (string)cfg["baseUrl"]);
+                        var arr = RemoveCustomModel(cslug, cid);
+                        cfg = ReadForgeConfig();
+                        string sp = (string)cfg["provider"], sbu = (string)cfg["baseUrl"];
+                        string sslug = PresetSlugFor(sp, sbu);
+                        Send(new { type = "provider", slug = sslug, provider = sp, baseUrl = sbu, model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(sslug, sp)), customModels = arr });
+                        Send(new { type = "answer", answer = "Custom model '" + cid.Trim() + "' removed — the live list is unchanged." });
+                    }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't remove the custom model (" + BoundDetail(ex.Message, 200) + ") — try again." }); }
                 }
 
                 // Settings usage-data toggle (trap.md item 2: off switch easy to find). Host = source of truth:
@@ -715,6 +938,22 @@ namespace Forge.SolidWorks
                     Telemetry.Enabled = on;
                     Send(new { type = "answer", answer = "Anonymous usage sharing is now " + (on ? "ON" : "OFF") + "." });
                 }
+
+                // Settings notifications toggle (OS toasts: approval + done + teammate). Host = source of
+                // truth: persists the choice in %APPDATA%\Forge\config.json ("notify", default ON when absent).
+                else if (action == "notifyGet")
+                {
+                    bool on = true;
+                    try { on = NotifyEnabled(); } catch { on = true; }
+                    Send(new { type = "notifyConfig", on });
+                }
+                else if (action == "notifySet")
+                {
+                    bool on = true;
+                    try { on = (bool)msg.on; } catch { }
+                    try { SetNotify(on); } catch { }
+                    Send(new { type = "notifyConfig", on });
+                }
             }
             catch (Exception ex)
             {
@@ -722,6 +961,122 @@ namespace Forge.SolidWorks
                 Telemetry.Log("crash", success: false, errorCode: ex.GetType().Name, swVersion: SwVer());
                 Send(new { type = "error", message = "Couldn't finish that run (" + BoundDetail(ex.Message, 300) + ") — check the model for partial changes, then retry or say what you expected." });
             }
+        }
+
+        /// <summary>Push the full MCP server list to the panel (legacy fields kept for back-compat).</summary>
+        private void SendMcpConfig()
+        {
+            string cmd, args; bool enabled; int tmo;
+            McpBridge.DescribeFull(out cmd, out args, out enabled, out tmo);
+            bool running = false;
+            try { running = McpBridge.IsRunning; } catch { }
+            Newtonsoft.Json.Linq.JArray servers = new Newtonsoft.Json.Linq.JArray();
+            try { servers = McpBridge.DescribeAll(); } catch { }
+            Send(new { type = "mcpConfig", enabled = enabled, timeoutMs = tmo, command = cmd, args = args, running = running, servers = servers });
+        }
+
+        /// <summary>Send the per-tool policy snapshot: union of live tools + seen tools, plus explicit policy. Never throws.</summary>
+        private void SendToolPolicy()
+        {
+            try
+            {
+                var names = new System.Collections.Generic.List<string>();
+                var seen = new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+                try
+                {
+                    System.Collections.Generic.List<string> seenTools = null;
+                    try { lock (McpBuild.SeenTools) { seenTools = new System.Collections.Generic.List<string>(McpBuild.SeenTools); } } catch { }
+                    if (seenTools != null) foreach (var s in seenTools) { try { if (!string.IsNullOrWhiteSpace(s) && seen.Add(s.Trim())) names.Add(s.Trim()); } catch { } }
+                }
+                catch { }
+                try
+                {
+                    Newtonsoft.Json.Linq.JArray live = null;
+                    try { live = McpBridge.ListAllToolsAsync(System.Threading.CancellationToken.None).GetAwaiter().GetResult(); } catch { live = null; }
+                    if (live != null) foreach (var t in live)
+                    {
+                        try
+                        {
+                            var o = t as Newtonsoft.Json.Linq.JObject;
+                            string n = o != null ? (string)o["name"] : (string)t;
+                            if (string.IsNullOrWhiteSpace(n)) continue;
+                            n = n.Trim();
+                            if (seen.Add(n)) names.Add(n);
+                        }
+                        catch { }
+                    }
+                }
+                catch { }
+                try { names.Sort(System.StringComparer.OrdinalIgnoreCase); } catch { }
+                Newtonsoft.Json.Linq.JObject pol = new Newtonsoft.Json.Linq.JObject();
+                try
+                {
+                    var dict = McpBuild.GetToolPolicies();
+                    if (dict != null) foreach (var kv in dict) { try { pol[kv.Key] = kv.Value; } catch { } }
+                }
+                catch { }
+                Send(new { type = "toolPolicy", tools = new Newtonsoft.Json.Linq.JArray(names.ToArray()), policy = pol });
+            }
+            catch { }
+        }
+
+        /// <summary>Read msg.args as string[]: accepts a JArray or a quote-aware space-joined string.</summary>
+        private static string[] ParseMcpArgs(dynamic msg)
+        {
+            try
+            {
+                var tok = msg.args as Newtonsoft.Json.Linq.JToken;
+                if (tok is Newtonsoft.Json.Linq.JArray)
+                {
+                    var list = new System.Collections.Generic.List<string>();
+                    foreach (var t in (Newtonsoft.Json.Linq.JArray)tok)
+                    {
+                        string s = null;
+                        try { s = (string)t; } catch { }
+                        if (!string.IsNullOrWhiteSpace(s)) list.Add(s);
+                    }
+                    return list.ToArray();
+                }
+                string sarg = null;
+                try { sarg = (string)msg.args; } catch { }
+                if (string.IsNullOrWhiteSpace(sarg)) return null;
+                var parts = new System.Collections.Generic.List<string>();
+                var cur = new System.Text.StringBuilder();
+                bool inQ = false;
+                foreach (char c in sarg)
+                {
+                    if (c == '"') { inQ = !inQ; continue; }
+                    if (!inQ && char.IsWhiteSpace(c)) { if (cur.Length > 0) { parts.Add(cur.ToString()); cur.Length = 0; } continue; }
+                    cur.Append(c);
+                }
+                if (cur.Length > 0) parts.Add(cur.ToString());
+                return parts.ToArray();
+            }
+            catch { return null; }
+        }
+
+        /// <summary>Resolve msg.name to a canonical server name (trim, case-insensitive). Null/empty → servers[0] iff exactly one; else error listing names. Never throws.</summary>
+        private static bool TryResolveServerName(string raw, out string name, out string error)
+        {
+            name = null; error = null;
+            try
+            {
+                var servers = McpBridge.LoadServers();
+                var names = new System.Collections.Generic.List<string>();
+                if (servers != null) foreach (var s in servers) if (s != null && !string.IsNullOrWhiteSpace(s.Name)) names.Add(s.Name.Trim());
+                string t = (raw ?? "").Trim();
+                if (t.Length == 0)
+                {
+                    if (names.Count == 1) { name = names[0]; return true; }
+                    error = names.Count == 0 ? "No MCP servers are configured — add one under Settings → MCP server first."
+                        : "Specify a server: " + string.Join(", ", names.ToArray()) + " — e.g. /mcps start " + names[0] + ".";
+                    return false;
+                }
+                foreach (var n in names) if (string.Equals(n, t, System.StringComparison.OrdinalIgnoreCase)) { name = n; return true; }
+                error = "Unknown MCP server '" + t + "'. Known: " + (names.Count > 0 ? string.Join(", ", names.ToArray()) : "(none)") + ".";
+                return false;
+            }
+            catch { error = "Couldn't resolve the MCP server name — try again."; return false; }
         }
 
         private static int CadScore(string path)
@@ -890,6 +1245,8 @@ namespace Forge.SolidWorks
             cfg["baseUrl"] = preset.BaseUrl;
             cfg["model"] = string.IsNullOrWhiteSpace(model) ? preset.Model : model.Trim();
             cfg["model_" + slug] = (string)cfg["model"];
+            // Regression guard: customModels.<slug> lives alongside these keys and is
+            // never cleared here — saving a key or switching providers keeps customs.
             // Atomic config write (temp + replace): a crash mid-save must never leave a
             // half-written config.json that ReadForgeConfig then reads as "no provider".
             string cfgTmp = cfgPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
@@ -928,6 +1285,173 @@ namespace Forge.SolidWorks
             string dir = Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData), "Forge");
             Directory.CreateDirectory(dir);
             File.WriteAllText(Path.Combine(dir, "config.json"), cfg.ToString());
+        }
+
+        // OS desktop toasts master switch (%APPDATA%\Forge\config.json "notify"). Missing or
+        // corrupt config reads as ON; these never throw — a toast must never fail a run.
+        private static bool NotifyEnabled()
+        {
+            try
+            {
+                JObject cfg = ReadForgeConfig();
+                JToken v = cfg["notify"];
+                if (v == null) return true;
+                if (v.Type == JTokenType.Boolean) return (bool)v;
+                string s = ((string)v ?? "").Trim().ToLowerInvariant();
+                if (s == "1" || s == "true" || s == "on" || s == "yes") return true;
+                if (s == "0" || s == "false" || s == "off" || s == "no") return false;
+                return true;
+            }
+            catch { return true; }
+        }
+
+        private static void SetNotify(bool on)
+        {
+            try
+            {
+                JObject cfg = ReadForgeConfig();
+                cfg["notify"] = on;
+                WriteForgeConfig(cfg);
+            }
+            catch { }
+        }
+
+        // ---- Custom model registration (per-slug map in config.json) ----
+        // Shape: {"customModels":{"deepseek":[{"id":"deepseek-reasoner","label":"Reasoner (custom)"}],"openrouter":[]}}
+        // Keys are onboarding slugs (KnownSlugs) plus the "openai-compatible" fallback
+        // for custom endpoints. Values are [{id, label?}]. Never probed via /models:
+        // live refresh merges, never deletes, custom entries. Tolerates a missing or
+        // corrupt config/file (returns empty, never throws to SW). DPAPI untouched.
+        private static string NormCustomSlug(string slug)
+        {
+            try { return (slug ?? "").Trim().ToLowerInvariant(); } catch { return ""; }
+        }
+
+        private static JArray GetCustomModels(string slug)
+        {
+            try
+            {
+                string s = NormCustomSlug(slug);
+                if (string.IsNullOrWhiteSpace(s)) return new JArray();
+                var cfg = ReadForgeConfig();
+                var cm = cfg["customModels"] as JObject;
+                if (cm == null) return new JArray();
+                var arr = cm[s] as JArray;
+                if (arr == null) return new JArray();
+                var clean = new JArray();
+                foreach (var e in arr)
+                {
+                    try
+                    {
+                        string id = e is JObject ? (string)((JObject)e)["id"] : (string)e;
+                        if (string.IsNullOrWhiteSpace(id)) continue;
+                        var o = new JObject { ["id"] = id.Trim() };
+                        string lab = e is JObject ? (string)((JObject)e)["label"] : null;
+                        if (!string.IsNullOrWhiteSpace(lab)) o["label"] = lab.Trim();
+                        clean.Add(o);
+                    }
+                    catch { }
+                }
+                return clean;
+            }
+            catch { return new JArray(); }
+        }
+
+        private static void WriteForgeConfigAtomic(JObject cfg)
+        {
+            string dir = Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData), "Forge");
+            Directory.CreateDirectory(dir);
+            string cfgPath = Path.Combine(dir, "config.json");
+            string cfgTmp = cfgPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                File.WriteAllText(cfgTmp, cfg.ToString());
+                if (File.Exists(cfgPath)) File.Replace(cfgTmp, cfgPath, null);
+                else File.Move(cfgTmp, cfgPath);
+            }
+            catch
+            {
+                try { File.Delete(cfgTmp); } catch { }
+                throw;
+            }
+        }
+
+        private static JArray AddCustomModel(string slug, string id, string label)
+        {
+            string s = NormCustomSlug(slug);
+            string nid = (id ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(s)) throw new Exception("No provider configured yet.");
+            if (string.IsNullOrWhiteSpace(nid)) throw new Exception("Empty model id.");
+            string nlab = string.IsNullOrWhiteSpace(label) ? null : label.Trim();
+            JObject cfg;
+            try { cfg = ReadForgeConfig(); } catch { cfg = new JObject(); }
+            if (cfg == null) cfg = new JObject();
+            var cm = cfg["customModels"] as JObject;
+            if (cm == null) { cm = new JObject(); cfg["customModels"] = cm; }
+            var arr = cm[s] as JArray;
+            if (arr == null) { arr = new JArray(); cm[s] = arr; }
+            bool found = false;
+            foreach (var e in arr)
+            {
+                try
+                {
+                    var o = e as JObject;
+                    string eid = o != null ? (string)o["id"] : (string)e;
+                    if (string.Equals((eid ?? "").Trim(), nid, StringComparison.OrdinalIgnoreCase))
+                    {
+                        found = true;
+                        if (o != null)
+                        {
+                            if (nlab != null) o["label"] = nlab;
+                            else o.Remove("label");
+                        }
+                        break;
+                    }
+                }
+                catch { }
+            }
+            if (!found)
+            {
+                if (arr.Count >= 50) throw new Exception("Custom model cap reached for " + s + " (50) — remove one first.");
+                var o = new JObject { ["id"] = nid };
+                if (nlab != null) o["label"] = nlab;
+                arr.Add(o);
+            }
+            WriteForgeConfigAtomic(cfg);
+            return GetCustomModels(s);
+        }
+
+        private static JArray RemoveCustomModel(string slug, string id)
+        {
+            string s = NormCustomSlug(slug);
+            string nid = (id ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(s)) throw new Exception("No provider configured yet.");
+            if (string.IsNullOrWhiteSpace(nid)) throw new Exception("Empty model id.");
+            JObject cfg;
+            try { cfg = ReadForgeConfig(); } catch { cfg = new JObject(); }
+            if (cfg == null) cfg = new JObject();
+            try
+            {
+                var cm = cfg["customModels"] as JObject;
+                var arr = cm != null ? cm[s] as JArray : null;
+                if (arr != null)
+                {
+                    JToken drop = null;
+                    foreach (var e in arr)
+                    {
+                        try
+                        {
+                            var o = e as JObject;
+                            string eid = o != null ? (string)o["id"] : (string)e;
+                            if (string.Equals((eid ?? "").Trim(), nid, StringComparison.OrdinalIgnoreCase)) { drop = e; break; }
+                        }
+                        catch { }
+                    }
+                    if (drop != null) { arr.Remove(drop); WriteForgeConfigAtomic(cfg); }
+                }
+            }
+            catch { }
+            return GetCustomModels(s);
         }
 
         private static bool IsDynamicProvider(string provider)
@@ -1936,6 +2460,62 @@ namespace Forge.SolidWorks
                 if (any) model.ViewZoomToSelection();
             }
             catch { /* best-effort */ }
+        }
+
+        // OS taskbar icon for approval/done/teammate toasts. Reuses forge.bmp (shipped next to
+        // the DLL) converted to an Icon once, SystemIcons.Information when the bitmap is missing.
+        // Never throws: toasts are best-effort and must never break the panel or a run.
+        private void InitNotify()
+        {
+            try
+            {
+                var n = new NotifyIcon();
+                try
+                {
+                    string dir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+                    string bmpPath = Path.Combine(dir ?? "", "forge.bmp");
+                    if (File.Exists(bmpPath))
+                    {
+                        using (var bmp = new System.Drawing.Bitmap(bmpPath))
+                            n.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon());
+                    }
+                }
+                catch { }
+                if (n.Icon == null) { try { n.Icon = System.Drawing.SystemIcons.Information; } catch { } }
+                try { n.Text = "Forge"; } catch { }
+                n.Visible = true;
+                try { n.BalloonTipClicked += (s, e) => { try { _web.Focus(); } catch { } }; } catch { }
+                _notify = n;
+                try { Disposed += (s, e) => { try { var old = _notify; _notify = null; if (old != null) { old.Visible = false; old.Dispose(); } } catch { } }; } catch { }
+            }
+            catch { }
+        }
+
+        // OS desktop toast: approval arrival, run completion, teammate updates. Guards the
+        // config switch, clamps to tray limits (titles <= 63 chars, text <= 255 chars, no
+        // newlines), marshals to the UI thread, 10s timeout. Never throws.
+        private void NotifyToast(string title, string text)
+        {
+            try
+            {
+                if (!NotifyEnabled()) return;
+                var n = _notify;
+                if (n == null) return;
+                string t = (title ?? "Forge").Replace("\r", " ").Replace("\n", " ");
+                string b = (text ?? "").Replace("\r", " ").Replace("\n", " ");
+                if (t.Length > 63) t = t.Substring(0, 63);
+                if (b.Length > 255) b = b.Substring(0, 255);
+                if (string.IsNullOrWhiteSpace(b)) return;
+                try
+                {
+                    if (InvokeRequired)
+                        BeginInvoke(new Action(() => { try { n.ShowBalloonTip(10000, t, b, ToolTipIcon.Info); } catch { } }));
+                    else
+                        n.ShowBalloonTip(10000, t, b, ToolTipIcon.Info);
+                }
+                catch { /* control torn down mid-toast */ }
+            }
+            catch { }
         }
 
         private void Send(object payload)

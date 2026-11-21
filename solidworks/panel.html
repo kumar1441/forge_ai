@@ -344,6 +344,20 @@
   .settings .skeywrap button:hover { border-color:var(--accent); color:var(--ink); }
   .settings .ssub { font-size:10.5px; color:var(--faint); padding:0 6px 2px; word-break:break-all; }
   .settings .ssep { border-top:1px solid var(--line); margin:4px 0; }
+  .settings .crow { display:flex; align-items:center; gap:6px; padding:3px 6px; font-size:11.5px; color:var(--ink); }
+  .settings .crow .cid { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    font-family:ui-monospace,"Cascadia Code",Consolas,monospace; }
+  .settings .crow .clab { color:var(--faint); font-size:10.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:90px; }
+  .settings .crow button { background:none; border:none; color:var(--faint); cursor:pointer; font-size:12px; padding:0 2px; flex:none; }
+  .settings .crow button:hover { color:var(--red); }
+  .settings .cempty { font-size:10.5px; color:var(--faint); padding:2px 6px; }
+  .settings .cadd { display:flex; gap:4px; padding:3px 6px 2px; }
+  .settings .cadd input { flex:1; min-width:0; background:var(--bg); border:1px solid var(--line);
+    border-radius:8px; color:var(--ink); font:inherit; font-size:11px; padding:4px 6px; outline:none; }
+  .settings .cadd input:focus { border-color:var(--accent); }
+  .settings .cadd button { background:none; border:1px solid var(--line); border-radius:7px; color:var(--soft);
+    font:inherit; font-size:11px; padding:3px 8px; cursor:pointer; flex:none; }
+  .settings .cadd button:hover { border-color:var(--accent); color:var(--ink); }
   .toggle { position:relative; width:38px; height:22px; flex:none; cursor:pointer; }
   .toggle input { opacity:0; width:0; height:0; }
   .toggle .tk { position:absolute; inset:0; background:var(--raised); border:1px solid var(--line); border-radius:999px; transition:background .18s; }
@@ -444,6 +458,9 @@
         <span class="skeywrap"><input type="password" id="setkey" placeholder="paste key" autocomplete="off" /><button id="setkeysave" title="Save key (DPAPI-encrypted)">Save</button></span>
       </div>
       <div class="ssub" id="setsub"></div>
+      <div class="srow"><label>Custom models</label></div>
+      <div id="customlist"></div>
+      <div class="cadd"><input id="customid" placeholder="model id" autocomplete="off" /><input id="customlabel" placeholder="label (optional)" autocomplete="off" /><button id="customadd" title="Register this model id for the current provider">Add</button></div>
       <div class="ssep"></div>
       <div class="srow"><label>Auto-compact</label>
         <span class="toggle"><input type="checkbox" id="compacttgl" checked /><span class="tk"></span></span>
@@ -467,14 +484,35 @@
       <div class="ssub">auto-approve: read + build run free, destructive asks first</div>
       <div class="rules"><span class="rlab">Always allowed</span><span class="rlist" id="allowlist"><span class="rempty">none</span></span></div>
       <div class="rules"><span class="rlab">Denied</span><span class="rlist" id="denylist"><span class="rempty">none</span></span></div>
+      <div class="rules"><span class="rlab">Per-tool policy</span><span class="rlist" id="toolpolicylist"><span class="rempty">none — tools appear after a build</span></span></div>
       <div class="ssep"></div>
-      <div class="srow"><label>MCP server</label>
-        <span class="toggle"><input type="checkbox" id="mcptgl" checked title="Enable the SolidWorks-MCP helper server" /><span class="tk"></span></span>
+      <div class="srow"><label>MCP servers</label>
+        <span class="skeywrap"><button id="mcpaddshow" title="Add another MCP server">+ Add</button></span>
       </div>
-      <div class="srow" id="mcptmorow"><label>Timeout</label>
-        <span class="skeywrap"><input type="number" id="mcptimeout" min="30" step="30" value="300" title="Per-tool-call timeout in seconds" /><span style="font-size:11px;color:var(--faint)">sec</span></span>
+      <div id="mcplist"></div>
+      <div id="mcpadd" style="display:none">
+        <div class="srow"><label>Name</label>
+          <span class="skeywrap"><input type="text" id="mcpname" placeholder="default" autocomplete="off" /></span>
+        </div>
+        <div class="srow"><label>Command</label>
+          <span class="skeywrap"><input type="text" id="mcpcmd" placeholder="uvx" autocomplete="off" /></span>
+        </div>
+        <div class="srow"><label>Args</label>
+          <span class="skeywrap"><input type="text" id="mcpargs" placeholder="solidworks-mcp" autocomplete="off" /></span>
+        </div>
+        <div class="srow"><label>Timeout</label>
+          <span class="skeywrap"><input type="number" id="mcpaddtimeout" min="30" step="30" value="300" title="Per-tool-call timeout in seconds" /><span style="font-size:11px;color:var(--faint)">sec</span></span>
+        </div>
+        <div class="srow"><label></label>
+          <span class="skeywrap"><button id="mcpaddgo" title="Save the new server">Add server</button><button id="mcpaddcancel" title="Close without adding">Cancel</button></span>
+        </div>
       </div>
       <div class="ssub" id="mcpsub">multi-part builds use the local MCP server</div>
+      <div class="ssep"></div>
+      <div class="srow"><label>Notifications</label>
+        <span class="toggle"><input type="checkbox" id="notifytgl" checked title="Show OS notifications for approvals, run completion and teammate updates" /><span class="tk"></span></span>
+      </div>
+      <div class="ssub">approval + done + teammate toasts</div>
       <div class="ssep"></div>
       <div class="srow"><label>Usage data</label>
         <span class="toggle"><input type="checkbox" id="telmtgl" /><span class="tk"></span></span>
@@ -633,6 +671,41 @@
     safeSet(denyKey, JSON.stringify(l.slice(-30))); renderRules();
     if (denied) expireApprovalsFor(t, "△ Refused — deny added while waiting");
   }
+  // Per-tool policy (exact names win over globs): rows of tool + allow|ask|deny select + clear.
+  // Select value "clear" (shown as "glob") means no explicit entry -> glob chain applies.
+  // Reuses the renderRules row pattern; deny via this dropdown also expires pending cards.
+  let toolPolicyTools = [], toolPolicyMap = {};
+  function renderToolPolicy(tools, policy) {
+    try {
+      if (Array.isArray(tools)) toolPolicyTools = tools.filter(x => typeof x === "string");
+      if (policy && typeof policy === "object") toolPolicyMap = policy;
+      const box = $("toolpolicylist"); if (!box) return; box.innerHTML = "";
+      const list = toolPolicyTools.slice(0, 100);
+      if (!list.length) { const s = document.createElement("span"); s.className = "rempty"; s.textContent = "none — tools appear after a build"; box.appendChild(s); return; }
+      list.forEach(t => {
+        const it = document.createElement("span"); it.className = "ritem"; it.textContent = t;
+        const sel = document.createElement("select"); sel.title = "Per-tool policy for " + t;
+        sel.style.cssText = "background:var(--bg);border:1px solid var(--line);border-radius:6px;color:var(--ink);font:inherit;font-size:11px;padding:1px 4px;outline:none;margin-left:6px;";
+        [["clear", "glob"], ["allow", "allow"], ["ask", "ask"], ["deny", "deny"]].forEach(([v, lab]) => {
+          const op = document.createElement("option"); op.value = v; op.textContent = lab; sel.appendChild(op);
+        });
+        const cur = (toolPolicyMap && typeof toolPolicyMap[t] === "string") ? toolPolicyMap[t].toLowerCase()
+          : (toolPolicyMap && typeof toolPolicyMap[t.toLowerCase()] === "string") ? toolPolicyMap[t.toLowerCase()].toLowerCase() : "clear";
+        sel.value = (cur === "allow" || cur === "ask" || cur === "deny") ? cur : "clear";
+        sel.addEventListener("change", (e) => {
+          e.stopPropagation();
+          const mode = sel.value;
+          toolPolicyMap[t] = mode === "clear" ? undefined : mode;
+          if (mode === "deny") expireApprovalsFor(t, "△ Refused — per-tool deny added");
+          post({ action: "toolPolicySet", tool: t, mode: mode });
+        });
+        it.appendChild(sel);
+        const x = document.createElement("button"); x.textContent = "✕"; x.title = "Clear per-tool policy (restore glob)";
+        x.addEventListener("click", (e) => { e.stopPropagation(); try { delete toolPolicyMap[t]; } catch (err) {} renderToolPolicy(); post({ action: "toolPolicySet", tool: t, mode: "clear" }); });
+        it.appendChild(x); box.appendChild(it);
+      });
+    } catch (e) {}
+  }
   // Live always→deny flip: a deny landing while a card is pending wins over a later approve click.
   function expireApprovalsFor(tool, label) {
     try {
@@ -672,26 +745,112 @@
   ["apprtgl", "apprread", "apprbuild", "apprdest"].forEach(id => $(id).addEventListener("change", pushApprCfg));
   loadApprCfg();
   renderRules();
+  try { post({ action: "toolPolicyGet" }); } catch (etp0) {}
 
-  // ---- MCP server (enable/disable + per-call timeout; host persists to mcp.json) ----
-  function syncMcpRow() {
-    const on = $("mcptgl") ? $("mcptgl").checked : true;
-    const r = $("mcptmorow"); if (r) r.style.opacity = on ? "" : ".4";
+  // ---- MCP servers (ordered failover list; host persists to mcp.json) ----
+  let mcpServers = [];
+  function renderMcpServers() {
+    const box = $("mcplist"); if (!box) return;
+    box.innerHTML = "";
+    (mcpServers || []).forEach((s) => {
+      const name = (s && s.name) || "default";
+      const row = document.createElement("div"); row.className = "srow";
+      const lab = document.createElement("label"); lab.textContent = name;
+      lab.title = ((s && s.command) || "uvx") + " " + ((s && s.args) || "solidworks-mcp");
+      row.appendChild(lab);
+      const wrap = document.createElement("span"); wrap.className = "skeywrap";
+      const tgl = document.createElement("input"); tgl.type = "checkbox"; tgl.checked = !!(s && s.enabled); tgl.title = "Enable " + name;
+      tgl.style.width = "auto";
+      tgl.addEventListener("change", () => { post({ action: "mcpSet", name: name, enabled: tgl.checked }); });
+      wrap.appendChild(tgl);
+      const tmo = document.createElement("input"); tmo.type = "number"; tmo.min = "30"; tmo.step = "30";
+      tmo.value = Math.max(30, Math.round(((s && s.timeoutMs) || 300000) / 1000));
+      tmo.title = "Per-tool-call timeout in seconds";
+      tmo.addEventListener("change", () => {
+        let secs = parseInt(tmo.value, 10); if (isNaN(secs) || secs < 30) secs = 30; tmo.value = secs;
+        post({ action: "mcpSet", name: name, timeoutMs: secs * 1000 });
+      });
+      wrap.appendChild(tmo);
+      const unit = document.createElement("span"); unit.style.fontSize = "11px"; unit.style.color = "var(--faint)"; unit.textContent = "sec";
+      wrap.appendChild(unit);
+      const rs = document.createElement("button"); rs.textContent = "restart"; rs.title = "Restart " + name;
+      rs.addEventListener("click", () => { post({ action: "mcpStop", name: name }); post({ action: "mcpStart", name: name }); });
+      wrap.appendChild(rs);
+      const ed = document.createElement("button"); ed.textContent = "✎"; ed.title = "Edit " + name;
+      ed.addEventListener("click", () => { const f = box.querySelector('[data-mcpedit="' + name.replace(/"/g, "") + '"]'); if (f) f.style.display = f.style.display === "none" ? "" : "none"; });
+      wrap.appendChild(ed);
+      const del = document.createElement("button"); del.textContent = "delete"; del.title = "Remove " + name;
+      del.addEventListener("click", () => { post({ action: "mcpRemove", name: name }); });
+      wrap.appendChild(del);
+      row.appendChild(wrap);
+      box.appendChild(row);
+      const eform = document.createElement("div"); eform.style.display = "none"; eform.setAttribute("data-mcpedit", name);
+      const erow1 = document.createElement("div"); erow1.className = "srow";
+      const elab1 = document.createElement("label"); elab1.textContent = "Command";
+      const ewrap1 = document.createElement("span"); ewrap1.className = "skeywrap";
+      const ecmd = document.createElement("input"); ecmd.type = "text"; ecmd.value = (s && s.command) || "uvx"; ecmd.title = "Command for " + name; ecmd.setAttribute("autocomplete", "off");
+      ewrap1.appendChild(ecmd); erow1.appendChild(elab1); erow1.appendChild(ewrap1); eform.appendChild(erow1);
+      const erow2 = document.createElement("div"); erow2.className = "srow";
+      const elab2 = document.createElement("label"); elab2.textContent = "Args";
+      const ewrap2 = document.createElement("span"); ewrap2.className = "skeywrap";
+      const eargs = document.createElement("input"); eargs.type = "text";
+      eargs.value = Array.isArray(s && s.args) ? s.args.join(" ") : ((s && s.args) || "");
+      eargs.title = "Args for " + name; eargs.setAttribute("autocomplete", "off");
+      ewrap2.appendChild(eargs); erow2.appendChild(elab2); erow2.appendChild(ewrap2); eform.appendChild(erow2);
+      const erow3 = document.createElement("div"); erow3.className = "srow";
+      const elab3 = document.createElement("label"); elab3.textContent = "Timeout";
+      const ewrap3 = document.createElement("span"); ewrap3.className = "skeywrap";
+      const etmo = document.createElement("input"); etmo.type = "number"; etmo.min = "30"; etmo.step = "30";
+      etmo.value = Math.max(30, Math.round(((s && s.timeoutMs) || 300000) / 1000));
+      etmo.title = "Per-tool-call timeout in seconds";
+      ewrap3.appendChild(etmo);
+      const eunit = document.createElement("span"); eunit.style.fontSize = "11px"; eunit.style.color = "var(--faint)"; eunit.textContent = "sec";
+      ewrap3.appendChild(eunit); erow3.appendChild(elab3); erow3.appendChild(ewrap3); eform.appendChild(erow3);
+      const erow4 = document.createElement("div"); erow4.className = "srow";
+      const elab4 = document.createElement("label"); elab4.textContent = "";
+      const ewrap4 = document.createElement("span"); ewrap4.className = "skeywrap";
+      const esave = document.createElement("button"); esave.textContent = "Save"; esave.title = "Save changes to " + name;
+      esave.addEventListener("click", () => {
+        let secs = parseInt(etmo.value, 10); if (isNaN(secs) || secs < 30) secs = 30; etmo.value = secs;
+        post({ action: "mcpUpdate", name: name, command: ecmd.value.trim(), args: eargs.value.trim(), timeoutMs: secs * 1000 });
+        eform.style.display = "none";
+      });
+      const ecancel = document.createElement("button"); ecancel.textContent = "Cancel"; ecancel.title = "Close without saving";
+      ecancel.addEventListener("click", () => { eform.style.display = "none"; });
+      ewrap4.appendChild(esave); ewrap4.appendChild(ecancel); erow4.appendChild(elab4); erow4.appendChild(ewrap4); eform.appendChild(erow4);
+      box.appendChild(eform);
+    });
+    const sub = $("mcpsub");
+    if (sub) {
+      const n = (mcpServers || []).length;
+      let k = 0; try { (mcpServers || []).forEach((s) => { if (s && s.running) k++; }); } catch (e) {}
+      sub.textContent = n + (n === 1 ? " server" : " servers") + " · " + k + " running";
+    }
   }
-  function pushMcpCfg() {
-    const on = $("mcptgl") ? $("mcptgl").checked : true;
-    let secs = $("mcptimeout") ? parseInt($("mcptimeout").value, 10) : 300;
+  if ($("mcpaddshow")) $("mcpaddshow").addEventListener("click", () => { const f = $("mcpadd"); if (f) f.style.display = ""; });
+  if ($("mcpaddcancel")) $("mcpaddcancel").addEventListener("click", () => { const f = $("mcpadd"); if (f) f.style.display = "none"; });
+  if ($("mcpaddgo")) $("mcpaddgo").addEventListener("click", () => {
+    const name = $("mcpname") ? $("mcpname").value.trim() : "";
+    const command = $("mcpcmd") ? $("mcpcmd").value.trim() : "";
+    const args = $("mcpargs") ? $("mcpargs").value.trim() : "";
+    let secs = $("mcpaddtimeout") ? parseInt($("mcpaddtimeout").value, 10) : 300;
     if (isNaN(secs) || secs < 30) secs = 30;
-    if ($("mcptimeout")) $("mcptimeout").value = secs;
-    syncMcpRow();
-    post({ action: "mcpSet", enabled: on, timeoutMs: secs * 1000 });
+    if (!name) return;
+    post({ action: "mcpAdd", name: name, command: command || "uvx", args: args, timeoutMs: secs * 1000 });
+    if ($("mcpname")) $("mcpname").value = "";
+    const f = $("mcpadd"); if (f) f.style.display = "none";
+  });
+  function pushNotifyCfg() {
+    const on = $("notifytgl") ? $("notifytgl").checked : true;
+    try { safeSet("forge_notify", on ? "1" : "0"); } catch (en) {}
+    post({ action: "notifySet", on });
   }
-  if ($("mcptgl")) $("mcptgl").addEventListener("change", pushMcpCfg);
-  if ($("mcptimeout")) $("mcptimeout").addEventListener("change", pushMcpCfg);
-  syncMcpRow();
+  if ($("notifytgl")) $("notifytgl").addEventListener("change", pushNotifyCfg);
 
   function refresh() {
     post({ action: "readModel" }); post({ action: "getProvider" }); try { post({ action: "mcpConfig" }); } catch (emc) {}
+    try { post({ action: "toolPolicyGet" }); } catch (etp) {}
+    try { post({ action: "notifyGet" }); } catch (en) {}
     try {
       post({
         action: "setAutoApprove",
@@ -879,7 +1038,7 @@
   document.addEventListener("click", (e) => { if (!e.target.closest("#history") && !e.target.closest("#histbtn")) { const h = $("history"); if (h && !popHidden(h)) { focusIfHidden(h); h.style.display = "none"; setExpanded("histbtn", false); } } });
 
   // ---- settings: gear open/close + theme toggle (persists; default = follow OS) ----
-  const settingsEl = $("settings"), themeTgl = $("themetgl"), telmTgl = $("telmtgl");
+  const settingsEl = $("settings"), themeTgl = $("themetgl"), telmTgl = $("telmtgl"), notifyTgl = $("notifytgl");
   // ---- settings provider picker (Kilo-style): dropdown + key field when the pick has no key ----
   let curSlug = null;
   function renderSettings(m) {
@@ -894,7 +1053,45 @@
     const needKeyRow = !isOllama && !m.hasKey;
     if (row) row.style.display = needKeyRow ? "" : "none";
     if (sub) sub.textContent = (m.baseUrl || "") + (m.model ? " · " + m.model : "") + (isOllama ? " · local, no key needed" : (m.hasKey ? " · key saved ✓" : " · no key"));
+    // Custom models ride the provider payload (like renderSettings): store + paint the list.
+    try { if (m.customModels !== undefined) customModels = normCustom(m.customModels); } catch (ecm) {}
+    renderCustomList();
   }
+  function renderCustomList() {
+    const box = $("customlist");
+    if (!box) return;
+    box.innerHTML = "";
+    if (!customModels.length) {
+      const em = document.createElement("div"); em.className = "cempty";
+      em.textContent = "None yet — add an id below.";
+      box.appendChild(em);
+      return;
+    }
+    customModels.forEach(c => {
+      const row = document.createElement("div"); row.className = "crow";
+      const id = document.createElement("span"); id.className = "cid"; id.textContent = c.id; id.title = c.id;
+      row.appendChild(id);
+      if (c.label) { const lb = document.createElement("span"); lb.className = "clab"; lb.textContent = c.label; row.appendChild(lb); }
+      const x = document.createElement("button"); x.textContent = "✕"; x.title = "Remove " + c.id;
+      x.setAttribute("aria-label", "Remove " + c.id);
+      x.addEventListener("click", () => {
+        if (!hasBridge) { systemCard(needBridgeMsg("Removing a custom model")); return; }
+        post({ action: "customModelRemove", id: c.id });
+      });
+      row.appendChild(x);
+      box.appendChild(row);
+    });
+  }
+  $("customadd").addEventListener("click", () => {
+    const idEl = $("customid"), lbEl = $("customlabel");
+    const id = idEl ? idEl.value.trim() : "";
+    if (!id) { systemCard("Type the exact model id first, then Add."); return; }
+    if (!hasBridge) { systemCard(needBridgeMsg("Adding a custom model")); return; }
+    post({ action: "customModelAdd", id: id, label: lbEl ? lbEl.value.trim() : "" });
+    if (lbEl) lbEl.value = "";
+    if (idEl) { idEl.value = ""; idEl.focus(); }
+  });
+  [$("customid"), $("customlabel")].forEach(el => { if (el) el.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); $("customadd").click(); } e.stopPropagation(); }); });
   $("setprov").addEventListener("change", () => {
     $("setkey").value = "";
     try { safeSet("forge_provider", $("setprov").value); } catch (ep) {}
@@ -975,7 +1172,7 @@
   $("gearbtn").addEventListener("click", (e) => {
     e.stopPropagation();
     const open = settingsEl.style.display === "none";
-    if (open) { showPop("settings"); try { post({ action: "mcpConfig" }); } catch (em) {} }
+    if (open) { showPop("settings"); try { post({ action: "mcpConfig" }); } catch (em) {} try { post({ action: "toolPolicyGet" }); } catch (etp) {} }
     else { focusIfHidden(settingsEl); settingsEl.style.display = "none"; }
     setExpanded("gearbtn", open);
     if (open) $("setprov").focus(); else intent.focus();
@@ -1001,6 +1198,7 @@
   themeTgl.addEventListener("change", () => { safeSet("forge_theme", themeTgl.checked ? "dark" : "light"); applyTheme(); });
   try { telmTgl.checked = safeGet("forge_telm") === "1"; } catch (e) {}
   telmTgl.addEventListener("change", () => { safeSet("forge_telm", telmTgl.checked ? "1" : "0"); post({ action: "telemetry", on: telmTgl.checked }); });
+  try { if (notifyTgl) notifyTgl.checked = safeGet("forge_notify") !== "0"; } catch (e) {}
   applyTheme();
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 
@@ -1353,7 +1551,7 @@
   }
 
   // ---- slash commands (Kilo-style: local, instant, no LLM round-trip) ----
-  const SLASH_HELP = "/compact — summarize older turns into an expandable block (aliases: /summarize, /smol, /condense)\n/settings — open Settings\n/clear, /new — start a fresh chat\n/regen, /regenerate — re-run the last prompt\n/model, /models — open the model picker\n/provider [slug] — switch provider (deepseek|openrouter|nvidia|openai|anthropic|ollama) or open settings\n/connect — open provider settings (Kilo-style connect)\n/allow <tool> — always allow one tool going forward\n/deny <tool> — block one tool outright · /undeny <tool> — unblock it\n/auto-approve [on|off] — master switch for unattended tool runs (aliases: /autoapprove /approve-all /approveall)\n/mcps — show the MCP server status\n/history, /sessions — open chat history · /resume, /continue — same list\n/rename <title> — rename the current chat\n/status — show usage details\n/undo — revert the last turn · /redo — restore it · /copy — copy last answer · /copy-session — copy whole chat · /export — save transcript as markdown (rendered turns only) · /about — panel/provider info (no diagnostics copy) · /review — design review of the active model (ignores extra args) · /thinking, /toggle-thinking — toggle thinking blocks\n/help — this list\n/unrevert — restore the last reverted turns";
+  const SLASH_HELP = "/compact — summarize older turns into an expandable block (aliases: /summarize, /smol, /condense)\n/settings — open Settings\n/clear, /new — start a fresh chat\n/regen, /regenerate — re-run the last prompt\n/model, /models — open the model picker\n/provider [slug] — switch provider (deepseek|openrouter|nvidia|openai|anthropic|ollama) or open settings\n/connect — open provider settings (Kilo-style connect)\n/allow <tool> — always allow one tool going forward\n/deny <tool> — block one tool outright · /undeny <tool> — unblock it\n/auto-approve [on|off] — master switch for unattended tool runs (aliases: /autoapprove /approve-all /approveall)\n/mcps — list servers · /mcps enable|disable|start|stop <name> · /mcps timeout <name> <secs>\n/history, /sessions — open chat history · /resume, /continue — same list\n/rename <title> — rename the current chat\n/status — show usage details\n/undo — revert the last turn · /redo — restore it · /copy — copy last answer · /copy-session — copy whole chat · /export — save transcript as markdown (rendered turns only) · /about — panel/provider info (no diagnostics copy) · /review — design review of the active model (ignores extra args) · /thinking, /toggle-thinking — toggle thinking blocks\n/help — this list\n/unrevert — restore the last reverted turns\nNotifications — Settings toggle for approval + done + teammate OS toasts";
   function fallbackCopy(text) {
     try {
       const ta = document.createElement("textarea");
@@ -1418,10 +1616,57 @@
         }
         break;
       case "history": case "sessions": case "resume": case "continue": showPop("history"); renderHistoryList(); setExpanded("histbtn", true); setTimeout(() => $("hsearch").focus(), 0); break;
-      case "mcps":
+      case "mcps": {
         if (!hasBridge) { systemCard(needBridgeMsg("MCP server status")); break; }
-        post({ action: "mcpStatus" });
+        (function () {
+          var sub = (args[0] || "").toLowerCase();
+          if (!sub) { post({ action: "mcpStatus" }); return; }
+          if (sub === "list") { post({ action: "mcpStatus" }); return; }
+          var names = [];
+          try { names = (mcpServers || []).map(function (s) { return (s && s.name) || "default"; }); } catch (e) { names = []; }
+          function esc(s) { return String(s == null ? "" : s).replace(/</g, "&lt;"); }
+          function usage(msg) {
+            var list = names.length ? "<br>Servers: <b>" + names.map(esc).join(", ") + "</b>" : "";
+            systemCard((msg ? esc(msg) + "<br>" : "") + "Usage: <b>/mcps</b> · <b>/mcps enable|disable|start|stop &lt;name&gt;</b> · <b>/mcps timeout &lt;name&gt; &lt;secs&gt;</b> (≥30s)" + list);
+          }
+          function resolve(raw) {
+            var t = (raw || "").trim();
+            if (!t) {
+              if (names.length === 1) return names[0];
+              usage(names.length > 1 ? "Specify a server." : "No server name given.");
+              return null;
+            }
+            var hit = null;
+            try { (mcpServers || []).forEach(function (s) { var n = (s && s.name) || "default"; if (String(n).toLowerCase() === t.toLowerCase()) hit = n; }); } catch (e2) {}
+            if (hit) return hit;
+            if (!names.length) return t;
+            usage("Unknown MCP server '" + t + "'.");
+            return null;
+          }
+          if (sub === "enable" || sub === "disable") {
+            var nm = resolve(args[1]);
+            if (!nm) return;
+            post({ action: "mcpSet", name: nm, enabled: sub === "enable" });
+            return;
+          }
+          if (sub === "start" || sub === "stop") {
+            var sn = resolve(args[1]);
+            if (!sn) return;
+            post({ action: sub === "start" ? "mcpStart" : "mcpStop", name: sn });
+            return;
+          }
+          if (sub === "timeout") {
+            var tn = resolve(args[1]);
+            if (!tn) return;
+            var secs = parseInt(args[2], 10);
+            if (isNaN(secs) || secs < 30) { usage("Timeout must be \u226530 seconds."); return; }
+            post({ action: "mcpSet", name: tn, timeoutMs: secs * 1000 });
+            return;
+          }
+          usage("Unknown /mcps subcommand '" + (args[0] || "") + "'.");
+        })();
         break;
+      }
       case "rename": {
         const title = args.join(" ").trim().slice(0, 60);
         if (!title) { systemCard("Usage: <b>/rename &lt;title&gt;</b> — names the current chat in history."); break; }
@@ -1845,6 +2090,9 @@
       if (Array.isArray(m.deny)) { try { safeSet(denyKey, JSON.stringify(m.deny.slice(0, 30))); } catch (e) {} }
       renderRules(Array.isArray(m.allow) ? m.allow : null, Array.isArray(m.deny) ? m.deny : null);
     }
+    else if (m.type === "toolPolicy") {
+      renderToolPolicy(Array.isArray(m.tools) ? m.tools : null, (m.policy && typeof m.policy === "object") ? m.policy : null);
+    }
 
     else if (m.type === "compacted") {
       if (pendingCompact) { pendingCompact.sum.textContent = m.summary || ""; pendingCompact = null; }
@@ -1869,7 +2117,16 @@
     }
 
     else if (m.type === "models") {
-      chatModels = (m.models || []).slice();
+      // Live ∪ fav/recent ∪ custom: custom ids are never probed via /models, so the
+      // live reply unions them (plus slug-local favs/recents) — an empty live list
+      // no longer hides customs. Dedupe is case-insensitive, customs pin first.
+      try {
+        const live = (m.models || []).slice();
+        let extra = [];
+        try { extra = extra.concat(getFavs().filter(f => !f.p || !curSlug || f.p === curSlug).map(f => f.m)); } catch (ef) {}
+        try { extra = extra.concat(getRecents().filter(r => !r.p || !curSlug || r.p === curSlug).map(r => r.m)); } catch (er) {}
+        chatModels = unionCustomFirst(live.concat(extra));
+      } catch (eu) { chatModels = (m.models || []).slice(); }
       if (m.error === "nokey") lastHasKey = false;
       renderModelList($("msearch") ? $("msearch").value : "");
       if (m.error === "nokey") {
@@ -1905,10 +2162,14 @@
     }
 
     else if (m.type === "mcpConfig") {
-      if ($("mcptgl")) $("mcptgl").checked = !!m.enabled;
-      if ($("mcptimeout") && m.timeoutMs != null) $("mcptimeout").value = Math.max(30, Math.round(m.timeoutMs / 1000));
-      if ($("mcpsub")) $("mcpsub").textContent = (!m.enabled ? "disabled" : (m.running ? "running" : "not running")) + " · " + (m.command || "uvx") + " " + (m.args || "solidworks-mcp");
-      syncMcpRow();
+      if (Array.isArray(m.servers)) mcpServers = m.servers;
+      else if (m.command != null || m.args != null) mcpServers = [{ name: "default", command: m.command || "uvx", args: m.args || "solidworks-mcp", enabled: !!m.enabled, timeoutMs: m.timeoutMs || 300000, running: !!m.running }];
+      renderMcpServers();
+    }
+
+    else if (m.type === "notifyConfig") {
+      if ($("notifytgl")) $("notifytgl").checked = !!m.on;
+      try { safeSet("forge_notify", ($("notifytgl") && $("notifytgl").checked) ? "1" : "0"); } catch (en2) {}
     }
 
     else if (m.type === "provider") {
@@ -1925,6 +2186,9 @@
         } else if (!curDynamic) { chatModels = []; renderModelList($("msearch") ? $("msearch").value : ""); }
         renderPill();
         renderSettings(m);
+        // renderSettings stored m.customModels — pin customs to the front of chatModels
+        // (dedupe) so a provider switch, a clear, or an empty live list never drops them.
+        try { chatModels = unionCustomFirst(chatModels); renderModelList($("msearch") ? $("msearch").value : ""); } catch (ecm2) {}
         renderCtx();
         $("mrefresh").style.display = curDynamic ? "" : "none";
         if (!m.hasKey && m.slug && m.slug !== "ollama" && lastNoKeyPrompt !== m.slug && !document.getElementById("onboard")) { lastNoKeyPrompt = m.slug; systemCard(`No key saved for <b>${m.slug}</b> — paste it in Settings → API key, hit Save, then pick a model.`); }
@@ -1932,7 +2196,7 @@
         // Late provider reply for a configured host while untouched onboarding shows: dismiss it —
         // firstrun can win the race, but a stored provider means this user is configured, never fresh.
         if (m.slug && document.getElementById("onboard")) { const ob = document.getElementById("onboard"); const okf = ob.querySelector("#obkey"); if (!ob.dataset.saved && !ob.dataset.prov && (!okf || !okf.value.trim())) { try { safeSet("forge_onboarded", "1"); } catch (eob2) {} ob.remove(); refresh(); try { intent.focus(); } catch (eob3) {} } }
-        if (curDynamic && !chatModels.length) post({ action: "refreshModels" });
+        if (curDynamic && !chatModels.some(id => !isCustom(id))) post({ action: "refreshModels" });
       } else if (m.error === "nokey") {
         lastHasKey = false;
         chatModels = []; renderModelList($("msearch") ? $("msearch").value : "");
@@ -2413,6 +2677,23 @@
 
   // ---- model picker (Kilo-style popover next to Attach) ----
   let curModel = null, curDynamic = false, chatModels = [];
+  // Custom models registered by hand for the current slug (host customModels.<slug> =
+  // [{id, label?}]). Kept separate from the live list: live refresh merges, never deletes.
+  let customModels = [];
+  const normCustom = (a) => (Array.isArray(a) ? a : []).map(x => typeof x === "string" ? { id: x } : x).filter(x => x && String(x.id || "").trim()).map(x => ({ id: String(x.id).trim(), label: String(x.label || "").trim() || null }));
+  const customIds = () => customModels.map(c => c.id);
+  const isCustom = (id) => customModels.some(c => String(c.id).toLowerCase() === String(id || "").toLowerCase());
+  const customLabelFor = (id) => { const c = customModels.find(x => String(x.id).toLowerCase() === String(id || "").toLowerCase()); return c ? c.label : null; };
+  // Union helper: custom ids pinned first, deduped case-insensitively, order otherwise kept.
+  const unionCustomFirst = (base) => {
+    const seen = new Set(), out = [];
+    customIds().concat(base || []).forEach(id => {
+      const k = String(id || "").toLowerCase();
+      if (!id || seen.has(k)) return;
+      seen.add(k); out.push(id);
+    });
+    return out;
+  };
   const favKey = "forge_fav_models", recKey = "forge_recent_models";
   // Favorites/recents are {provider, model} so identical ids on different providers don't collide.
   // Legacy plain-string entries migrate on read (match any provider).
@@ -2442,7 +2723,7 @@
   function openModels() {
     if (!hasBridge) { systemCard(needBridgeMsg("The model picker")); return; }
     if (needsKey()) { if (lastNoKeyPrompt !== curSlug) { lastNoKeyPrompt = curSlug; systemCard(`No key saved for <b>${curSlug || "this provider"}</b> — paste it in Settings → API key, hit Save, then Refresh.`); } showPop("settings"); return; }
-    if (!chatModels.length && curDynamic) { if ($("mcount")) $("mcount").textContent = "Loading…"; post({ action: "refreshModels" }); }
+    if (curDynamic && !chatModels.some(id => !isCustom(id))) { if ($("mcount")) $("mcount").textContent = "Loading…"; post({ action: "refreshModels" }); }
     closeOthers("modelpop");
     $("modelpop").style.display = "flex"; setExpanded("modelpick", true);
     $("msearch").value = "";
@@ -2461,19 +2742,28 @@
   function renderModelList(q) {
     const list = $("mlist"); list.innerHTML = "";
     const query = String(q || "").toLowerCase();
-    const match = (id) => !query || shortName(id).toLowerCase().includes(query) || String(id).toLowerCase().includes(query);
+    const match = (id) => !query || shortName(id).toLowerCase().includes(query) || String(id).toLowerCase().includes(query) || String(customLabelFor(id) || "").toLowerCase().includes(query);
     const MODEL_MAX = 200; // render perf: cap rows, note the rest
     const items = chatModels.filter(match);
     // Empty live list + stored selection: keep the current pick visible so the pill and list agree.
     const curMissing = curModel && !items.includes(curModel) && match(curModel);
+    // Same pattern for customs: a models reply that raced ahead of its provider reply
+    // must not hide registered ids — show stand-alone customs that match the filter.
+    const customMissing = customIds().filter(id => !items.includes(id) && match(id));
+    const customRows = items.filter(isCustom).concat(customMissing);
     const recents = getRecents().map(r => r.m).filter(id => items.includes(id));
-    const showFavs = !query && items.some(isFav);
+    const favRows = items.filter(id => isFav(id) && !isCustom(id));
+    const showFavs = !query && favRows.length > 0;
     const showRecents = !query && recents.length > 0;
     const groups = [];
     if (curMissing) groups.push({ label: "Current", rows: [curModel] });
-    if (showFavs) groups.push({ label: "★ Favorites", rows: items.filter(isFav) });
+    if (customRows.length) groups.push({ label: "Custom", rows: customRows });
+    if (showFavs) groups.push({ label: "★ Favorites", rows: favRows });
     if (showRecents) groups.push({ label: "🕘 Recent", rows: recents, clearable: true });
-    const rest = query ? items : items.filter(id => !isFav(id));
+    // Customs live under "Custom" (pinned first) in every mode, so rest always skips
+    // them — no duplicate rows with or without a search filter. Favs skip rest only
+    // when unfiltered (their group hides under a query, same as before).
+    const rest = items.filter(id => !isCustom(id) && (query || !isFav(id)));
     // Kilo parity: group the live list by vendor when several vendors are present.
     // Prefer the model id prefix ("vendor/name"); fall back to the stored provider slug.
     const vendorFor = (id) => {
@@ -2511,8 +2801,10 @@
         row.className = "mrow" + (id === curModel ? " active" : "");
         row.setAttribute("data-id", id);
         const starred = isFav(id);
+        const clab = customLabelFor(id);
+        const sub = String(id).replace(/</g, "&lt;") + (clab ? " · " + String(clab).replace(/</g, "&lt;") : "");
         row.innerHTML = `<span class="mcheck">${id === curModel ? "✓" : ""}</span>` +
-          `<span class="mname">${shortName(id).replace(/</g,"&lt;")}<small>${String(id).replace(/</g,"&lt;")}</small></span>` +
+          `<span class="mname">${shortName(id).replace(/</g, "&lt;")}<small>${sub}</small></span>` +
           `<button class="mstar${starred ? " on" : ""}" aria-label="${starred ? "Unfavorite" : "Favorite"} ${shortName(id).replace(/"/g,"")}" title="${starred ? "Unfavorite" : "Favorite"}">${starred ? "★" : "☆"}</button>`;
         row.addEventListener("click", (e) => {
           const st = e.target.closest(".mstar");
@@ -2544,7 +2836,8 @@
       }
       list.appendChild(em);
     }
-    $("mcount").textContent = chatModels.length ? chatModels.length + " models" + (capped ? ` — showing first ${MODEL_MAX}, refine the search` : "") : (curMissing ? "1 model (current)" : (!hasBridge ? "Preview mode — model list needs SolidWorks." : needsKey() ? "Needs a key — see Settings." : curDynamic ? "No models loaded yet — hit Refresh." : "One fixed model on this provider — nothing to load."));
+    const totalCount = chatModels.length + customMissing.length; // raced customs count even before their provider reply lands
+    $("mcount").textContent = totalCount ? totalCount + " models" + (capped ? ` — showing first ${MODEL_MAX}, refine the search` : "") : (curMissing ? "1 model (current)" : (!hasBridge ? "Preview mode — model list needs SolidWorks." : needsKey() ? "Needs a key — see Settings." : curDynamic ? "No models loaded yet — hit Refresh." : "One fixed model on this provider — nothing to load."));
   }
   $("modelpick").addEventListener("click", (e) => {
     e.stopPropagation();

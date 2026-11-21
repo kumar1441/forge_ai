@@ -2909,6 +2909,7 @@ namespace Forge.SolidWorks
             if (HonestLimits.IsPressureRatingQuestion(intent))
             {
                 Send(new { type = "answer", answer = HonestLimits.PressureRatingLimitMessage });
+                try { NotifyToast("Forge done", HonestLimits.PressureRatingLimitMessage); } catch { }
                 return true;
             }
 
@@ -2916,6 +2917,7 @@ namespace Forge.SolidWorks
             if (HonestLimits.IsLeakDiagnosisQuestion(intent))
             {
                 Send(new { type = "answer", answer = HonestLimits.LeakDiagnosisLimitMessage });
+                try { NotifyToast("Forge done", HonestLimits.LeakDiagnosisLimitMessage); } catch { }
                 return true;
             }
 
@@ -2926,6 +2928,7 @@ namespace Forge.SolidWorks
             if (HonestLimits.IsWeldRequest(intent))
             {
                 Send(new { type = "answer", answer = HonestLimits.WeldLimitMessage });
+                try { NotifyToast("Forge done", HonestLimits.WeldLimitMessage); } catch { }
                 return true;
             }
 
@@ -2935,6 +2938,7 @@ namespace Forge.SolidWorks
             if (HonestLimits.IsGenerativeSynthesisRequest(intent))
             {
                 Send(new { type = "answer", answer = HonestLimits.GenerativeSynthesisLimitMessage });
+                try { NotifyToast("Forge done", HonestLimits.GenerativeSynthesisLimitMessage); } catch { }
                 return true;
             }
 
@@ -2944,6 +2948,7 @@ namespace Forge.SolidWorks
             if (HonestLimits.IsVagueAestheticRequest(intent))
             {
                 Send(new { type = "answer", answer = HonestLimits.VagueAestheticClarifyMessage });
+                try { NotifyToast("Forge done", HonestLimits.VagueAestheticClarifyMessage); } catch { }
                 return true;
             }
 
@@ -2984,9 +2989,10 @@ namespace Forge.SolidWorks
                 { Send(new { type = "step", agent, gloss, state, result }); await Task.Delay(60); };
                 var fr = await GetFaces.Run(App, doc, intent, emitF);
                 if (fr.Error != null)
-                { LogRun("get_faces", intent, doc, "error", false, 0, errorCode: "get_faces"); Send(new { type = "error", message = fr.Error }); return true; }
+                { LogRun("get_faces", intent, doc, "error", false, 0, errorCode: "get_faces"); Send(new { type = "error", message = fr.Error }); try { NotifyToast("Forge failed", fr.Error); } catch { } return true; }
                 LogRun("get_faces", intent, doc, "executed", true, fr.Total);
                 Send(new { type = "answer", answer = fr.Info, runId = _currentRunId, handler = "get_faces" });
+                try { NotifyToast("Forge done", fr.Info); } catch { }
                 return true;
             }
 
@@ -5738,33 +5744,46 @@ namespace Forge.SolidWorks
             // a superseded run's late card can't hijack the new run's approval flow.
             var mySender = new Action<JObject>(card => { if (myId == _currentRunId) Send(card); });
             McpBuild.CardSender = mySender;
-            try { mc = await McpBuild.RunAgent(intent, emitM, ct, relay.OnDelta, sid, mySender); relay.End(false); }
+            try { mc = await McpBuild.RunAgent(intent, emitM, ct, relay.OnDelta, sid, mySender, () => myId == _currentRunId); relay.End(false); }
             catch (OperationCanceledException)
             {
                 relay.End(true);
                 if (myId == _currentRunId)
+                {
                     Send(new { type = "answer", answer = "Interrupted — partial thinking is kept above. ↩ revert a turn, or edit and resend.", runId = _currentRunId, handler = "mcp_build" });
+                    try { NotifyToast("Forge done", "Run interrupted — partial thinking is kept above."); } catch { }
+                }
                 return true;
             }
-            catch (Exception ex)
-            {
-                try { relay.End(true); } catch { }
-                if (myId == _currentRunId)
-                    Send(new { type = "answer", answer = "Build failed (" + BoundDetail(ex.Message, 300) + ") — what built so far stays open; edit and resend.", runId = _currentRunId, handler = "mcp_build" });
-                return true;
-            }
+                catch (Exception ex)
+                {
+                    try { relay.End(true); } catch { }
+                    if (myId == _currentRunId)
+                    {
+                        Send(new { type = "answer", answer = "Build failed (" + BoundDetail(ex.Message, 300) + ") — what built so far stays open; edit and resend.", runId = _currentRunId, handler = "mcp_build" });
+                        try { NotifyToast("Forge failed", "Build failed (" + BoundDetail(ex.Message, 300) + ")"); } catch { }
+                    }
+                    return true;
+                }
             finally { if (McpBuild.CardSender == mySender) McpBuild.CardSender = null; }
             if (myId != _currentRunId) return true; // superseded: don't attribute our answer to the new run
             if (mc == null || !mc.Attempted) return false; // no provider: existing paths keep behaviour
             if (!string.IsNullOrEmpty(mc.Error))
             {
                 if (mc.Error == "INTERRUPTED")
+                {
                     Send(new { type = "answer", answer = "Interrupted — partial thinking is kept above. ↩ revert a turn, or edit and resend.", runId = _currentRunId, handler = "mcp_build" });
+                    try { NotifyToast("Forge done", "Run interrupted — partial thinking is kept above."); } catch { }
+                }
                 else
+                {
                     Send(new { type = "answer", answer = mc.Error, runId = _currentRunId, handler = "mcp_build" });
+                    try { NotifyToast("Forge failed", mc.Error); } catch { }
+                }
                 return true;
             }
             Send(new { type = "answer", answer = mc.Summary, runId = _currentRunId, handler = "mcp_build" });
+            try { NotifyToast("Forge done", mc.Summary); } catch { }
             return true;
         }
 
