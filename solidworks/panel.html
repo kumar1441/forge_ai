@@ -40,13 +40,13 @@
     display:flex; flex-direction:column; height:100vh; overflow:hidden;
   }
 
-  /* header */
-  .head { padding:14px 18px 10px; border-bottom:1px solid var(--line); }
-  .headtop { display:flex; align-items:center; justify-content:space-between; }
-  .clearbtn { background:var(--raised); border:1px solid var(--line); border-radius:8px; color:var(--faint);
+  /* header — top bar: single-row flex, pill absorbs narrowing, icons never shrink */
+  .head { padding:14px 18px 10px; border-bottom:1px solid var(--line); position:relative; min-width:0; }
+  .headtop { display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:nowrap; overflow:hidden; min-width:0; }
+  .clearbtn { flex:0 0 auto; white-space:nowrap; background:var(--raised); border:1px solid var(--line); border-radius:8px; color:var(--faint);
     font:inherit; font-size:11px; padding:2px 9px; cursor:pointer; }
   .clearbtn:hover { border-color:var(--accent); color:var(--ink); }
-  .brand { font-size:13px; letter-spacing:.3px; color:var(--faint); }
+  .brand { flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; letter-spacing:.3px; color:var(--faint); }
   .brand b { color:var(--ink); font-weight:600; }
   .brand b span { color:var(--accent); }
   .know { margin-top:5px; font-size:12px; color:var(--soft); min-height:16px; }
@@ -226,8 +226,9 @@
   .attachrow { position:relative; }
   .modelpick .chev { color:var(--faint); font-size:10px; margin-right:2px; }
   .modelpop { position:absolute; bottom:calc(100% + 8px); left:0; z-index:70; width:300px; max-width:92vw;
+    max-height:min(70vh, calc(100vh - 120px)); overflow-y:auto;
     background:var(--raised); border:1px solid var(--line); border-radius:12px;
-    display:flex; flex-direction:column; overflow:hidden; box-shadow:0 12px 40px rgba(0,0,0,.5); }
+    display:flex; flex-direction:column; overflow-x:hidden; overflow-y:auto; box-shadow:0 12px 40px rgba(0,0,0,.5); }
   .modelpop .msearch { margin:8px; background:var(--bg); border:1px solid var(--line); border-radius:9px;
     padding:8px 10px; font:inherit; font-size:12.5px; color:var(--ink); outline:none; }
   .modelpop .msearch:focus { border-color:var(--accent); }
@@ -251,8 +252,9 @@
   .modelpop .mrefresh:hover { border-color:var(--accent); color:var(--ink); }
   /* @-mention file picker (Kilo-style) + mention chips */
   .attachrow .menpop { position:absolute; bottom:calc(100% + 8px); left:0; z-index:70; width:300px; max-width:92vw;
+    max-height:min(70vh, calc(100vh - 120px));
     background:var(--raised); border:1px solid var(--line); border-radius:12px;
-    display:flex; flex-direction:column; overflow:hidden; box-shadow:0 12px 40px rgba(0,0,0,.5); }
+    display:flex; flex-direction:column; overflow-x:hidden; overflow-y:auto; box-shadow:0 12px 40px rgba(0,0,0,.5); }
   .menpop .mlist { overflow-y:auto; max-height:260px; padding:4px; }
   .menpop .mrow { display:flex; align-items:center; gap:8px; padding:7px 10px; border-radius:8px;
     cursor:pointer; font-size:13px; color:var(--ink); }
@@ -320,14 +322,17 @@
     padding:5px 8px; font:inherit; font-size:11.5px; color:var(--ink); outline:none; }
   .fbthx { color:var(--mint); font-weight:600; }
 
-  /* header right cluster: settings + clear */
-  .headacts { display:flex; align-items:center; gap:8px; }
-  .gear { background:var(--raised); border:1px solid var(--line); border-radius:8px; color:var(--soft);
-    font:inherit; font-size:14px; padding:1px 9px; cursor:pointer; line-height:1.4; }
+  /* header right cluster: settings + clear — fixed squares, pill flexes */
+  .headacts { display:flex; align-items:center; gap:6px; flex-wrap:nowrap; overflow:hidden; min-width:0; flex:1 1 auto; justify-content:flex-end; margin:0; }
+  .gear { flex:0 0 auto; width:28px; height:28px; display:inline-flex; align-items:center; justify-content:center;
+    background:var(--raised); border:1px solid var(--line); border-radius:8px; color:var(--soft);
+    font:inherit; font-size:14px; padding:0; cursor:pointer; line-height:1; }
   .gear:hover { border-color:var(--accent); color:var(--ink); }
 
-  /* settings popover */
-  .settings { position:absolute; top:52px; right:14px; z-index:60; width:230px;
+  /* settings popover — anchored under the top bar, internally scrolled so it
+     never runs past the visible pane (short viewports / long option list) */
+  .settings { position:absolute; top:52px; right:14px; z-index:60; width:230px; max-width:calc(100vw - 16px);
+    max-height:min(70vh, calc(100vh - 64px)); overflow-y:auto; overscroll-behavior:contain;
     background:var(--raised); border:1px solid var(--line); border-radius:12px;
     padding:10px; display:flex; flex-direction:column; gap:4px; }
   .settings .srow { display:flex; align-items:center; justify-content:space-between; gap:10px;
@@ -377,12 +382,14 @@
   .settings .rules .ritem button:hover { color:var(--red); }
   .settings .rules .rempty { font-size:10.5px; color:var(--faint); }
 
-  /* top-bar context pill + usage dropdown (Kilo-style) */
-  .ctxpill { background:var(--raised); border:1px solid var(--line); border-right:none; border-radius:8px 0 0 8px;
-    color:var(--soft); font:inherit; font-size:11.5px; padding:1px 4px 1px 9px; cursor:pointer; line-height:1.4; }
+  /* top-bar context pill + usage dropdown (Kilo-style) — pill absorbs narrowing, arrow stays square */
+  .ctxpill { flex:1 1 auto; min-width:0; max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    background:var(--raised); border:1px solid var(--line); border-right:none; border-radius:8px 0 0 8px;
+    color:var(--soft); font:inherit; font-size:11.5px; padding:0 4px 0 9px; height:28px; line-height:28px; cursor:pointer; }
   .ctxpill:hover { color:var(--ink); }
-  .ctxarrow { border-radius:0 8px 8px 0 !important; font-size:10px !important; padding:1px 8px 1px 4px !important; }
-  .ctxpop { position:absolute; top:52px; right:14px; z-index:60; width:270px;
+  .ctxarrow { flex:0 0 auto; width:28px; height:28px; border-radius:0 8px 8px 0 !important; font-size:10px !important; padding:0 !important; }
+  .ctxpop { position:absolute; top:52px; right:14px; z-index:60; width:270px; max-width:calc(100vw - 16px);
+    max-height:min(70vh, calc(100vh - 64px)); overflow-y:auto;
     background:var(--raised); border:1px solid var(--line); border-radius:12px; padding:12px;
     display:flex; flex-direction:column; gap:8px; box-shadow:0 12px 40px rgba(0,0,0,.5); }
   .ctxpop .crow { display:flex; justify-content:space-between; font-size:12px; color:var(--soft); }
@@ -404,6 +411,7 @@
 
   /* chat history popover (Kilo-style: search + session list + restore/delete) */
   .history { position:absolute; top:52px; right:14px; z-index:60; width:300px; max-width:92vw;
+    max-height:min(70vh, calc(100vh - 64px)); overflow-y:auto;
     background:var(--raised); border:1px solid var(--line); border-radius:12px; padding:10px;
     display:flex; flex-direction:column; gap:6px; box-shadow:0 12px 40px rgba(0,0,0,.5); }
   .history .hsearch { background:var(--bg); border:1px solid var(--line); border-radius:9px;
@@ -422,6 +430,23 @@
   .history .hnew { background:none; border:1px solid var(--line); border-radius:9px; color:var(--soft);
     font:inherit; font-size:12.5px; padding:7px; cursor:pointer; }
   .history .hnew:hover { border-color:var(--accent); color:var(--ink); }
+
+  /* narrow panes: tighten chrome first (keeps Clear text + brand) */
+  @media (max-width:340px) {
+    .head { padding:12px 12px 8px; }
+    .headtop, .headacts { gap:4px; }
+    .ctxpill { max-width:90px; }
+  }
+  /* very narrow panes: brand yields, Clear becomes icon-only (title/aria kept) */
+  @media (max-width:260px) {
+    .head { padding:10px 8px 8px; }
+    .brand { display:none; }
+    .gear, .ctxarrow { width:26px; height:26px; }
+    .ctxpill { height:26px; line-height:26px; max-width:none; flex:1 1 0; }
+    .clearbtn { width:26px; height:26px; padding:0; font-size:0; line-height:26px; text-align:center; }
+    .clearbtn::after { content:"✕"; font-size:13px; color:var(--soft); }
+    .clearbtn:hover::after { color:var(--ink); }
+  }
 </style>
 </head>
 <body>
@@ -429,12 +454,12 @@
     <div class="headtop" id="headtop">
       <div class="brand"><b><span>◆</span> Forge</b></div>
       <div class="headacts">
-        <button class="ctxpill" id="ctxpill" title="Local storage used — click for exact usage" aria-expanded="false" aria-controls="ctxpop">0%</button><button class="gear ctxarrow" id="ctxarrow" title="Usage details" aria-expanded="false" aria-controls="ctxpop">▾</button>
+        <button class="ctxpill" id="ctxpill" title="Context used — click for exact usage" aria-expanded="false" aria-controls="ctxpop">0%</button><button class="gear ctxarrow" id="ctxarrow" title="Usage details" aria-expanded="false" aria-controls="ctxpop">▾</button>
         <button class="gear" id="searchbtn" title="Search this chat" aria-expanded="false" aria-controls="findbar">🔍</button>
         <button class="gear" id="compactbtn" title="Compact older turns">🗜</button>
         <button class="gear" id="histbtn" title="Chat history" aria-expanded="false" aria-controls="history">🕘</button>
         <button class="gear" id="gearbtn" title="Settings" aria-expanded="false" aria-controls="settings">⚙</button>
-        <button class="clearbtn" id="clearbtn" title="Clear the panel for a fresh recording take">Clear</button>
+        <button class="clearbtn" id="clearbtn" title="Clear the panel for a fresh recording take" aria-label="Clear">Clear</button>
       </div>
     </div>
     <div class="know" id="know">Looking for your part…</div>
@@ -458,6 +483,10 @@
         <span class="skeywrap"><input type="password" id="setkey" placeholder="paste key" autocomplete="off" /><button id="setkeysave" title="Save key (DPAPI-encrypted)">Save</button></span>
       </div>
       <div class="ssub" id="setsub"></div>
+      <div class="srow"><label>Custom providers</label></div>
+      <div id="provlist"></div>
+      <div class="cadd"><input id="provslug" placeholder="slug (e.g. corp-gw)" autocomplete="off" /><input id="provlabel" placeholder="label (optional)" autocomplete="off" /><select id="provkind" title="Wire protocol for this endpoint"><option value="openai-compatible">openai-compatible</option><option value="anthropic">anthropic</option></select></div>
+      <div class="cadd"><input id="provurl" placeholder="base URL https://…" autocomplete="off" /><button id="provadd" title="Add this custom provider">Add</button></div>
       <div class="srow"><label>Custom models</label></div>
       <div id="customlist"></div>
       <div class="cadd"><input id="customid" placeholder="model id" autocomplete="off" /><input id="customlabel" placeholder="label (optional)" autocomplete="off" /><button id="customadd" title="Register this model id for the current provider">Add</button></div>
@@ -466,8 +495,9 @@
         <span class="toggle"><input type="checkbox" id="compacttgl" checked /><span class="tk"></span></span>
       </div>
       <div class="srow" id="compactatrow"><label>Compact at</label>
-        <span class="skeywrap"><input type="number" id="compactat" min="10" step="10" value="60" title="Agent messages kept before summarizing" /><span style="font-size:11px;color:var(--faint)">msgs</span></span>
+        <span class="skeywrap"><input type="number" id="compactat" min="10" max="95" step="5" value="60" title="Context % used before older turns are summarized" /><span style="font-size:11px;color:var(--faint)">%</span></span>
       </div>
+      <div class="ssub">Auto-compact summarizes older turns once context used passes N% of the model's window. "Context used %" shows live usage.</div>
       <div class="ssep"></div>
       <div class="srow"><label>Auto-approve</label>
         <span class="toggle"><input type="checkbox" id="apprtgl" checked /><span class="tk"></span></span>
@@ -525,12 +555,12 @@
       <button class="hnew" id="hnew">+ New chat</button>
     </div>
     <div class="ctxpop" id="ctxpop" style="display:none" role="dialog" aria-label="Usage details" tabindex="-1">
-      <div class="crow"><span>Storage used</span><b id="ctxpct">–</b></div>
+      <div class="crow"><span>Context used</span><b id="ctxpct">–</b></div>
       <div class="cbar"><i id="ctxbar" style="width:0%"></i></div>
-      <div class="crow"><span>Local storage</span><b id="ctxstore">–</b></div>
+      <div class="crow"><span>Window size</span><b id="ctxstore">–</b></div>
       <div class="crow"><span>Turns (live / stored)</span><b id="ctxturns">–</b></div>
       <div class="crow"><span>Provider · model</span><b id="ctxprov">–</b></div>
-      <div class="crow"><span>Model tokens today (agent/enhance)</span><b id="ctxtok">–</b></div>
+      <div class="crow"><span>Completion tokens (session)</span><b id="ctxtok">–</b></div>
       <div class="crow"><span>Agent history (this session)</span><b id="ctxagent">–</b></div>
     </div>
   </div>
@@ -641,7 +671,7 @@
     if (except !== "menpop") menOpen = false;
     if (except !== "ctxpop") { setExpanded("ctxarrow", false); }
   }
-  function showPop(id) { closeOthers(id); const el = $(id); if (el) el.style.display = "flex"; if (id === "settings") { setExpanded("gearbtn", true); setTimeout(() => { try { $("setprov").focus(); } catch (e) {} }, 0); } if (id === "history") setExpanded("histbtn", true); if (id === "ctxpop") { setExpanded("ctxpill", true); setExpanded("ctxarrow", true); } if (id === "modelpop") setExpanded("modelpick", true); }
+  function showPop(id) { closeOthers(id); const el = $(id); if (el) { el.style.display = "flex"; el.style.maxHeight = ""; try { const r = el.getBoundingClientRect(); const avail = window.innerHeight - r.top - 12; if (r.bottom > window.innerHeight - 12 && avail > 120) el.style.maxHeight = avail + "px"; } catch (e) {} } if (id === "settings") { setExpanded("gearbtn", true); setTimeout(() => { try { $("setprov").focus(); } catch (e) {} }, 0); } if (id === "history") setExpanded("histbtn", true); if (id === "ctxpop") { setExpanded("ctxpill", true); setExpanded("ctxarrow", true); } if (id === "modelpop") setExpanded("modelpick", true); }
   // Always-allow / deny lists (Kilo parity: surfaced in settings with remove buttons).
   const allowKey = "forge_allow_list", denyKey = "forge_deny_list";
   const loadList = (k) => { try { const v = JSON.parse(safeGet(k)); return Array.isArray(v) ? v.filter(x => typeof x === "string") : []; } catch (e) { return []; } };
@@ -863,7 +893,7 @@
     try {
       const on = safeGet("forge_compact_on");
       const at = safeGet("forge_compact_at");
-      let atn = at === null ? 60 : parseInt(at, 10); if (isNaN(atn) || atn < 10) atn = 60;
+      let atn = at === null ? 60 : parseInt(at, 10); if (isNaN(atn) || atn < 10 || atn > 95) atn = 60;
       post({ action: "setCompact", on: on === null ? true : on === "1", at: atn });
     } catch (e2) {}
     try { post({ action: "telemetry", on: safeGet("forge_telm") === "1" }); } catch (e3) {}
@@ -877,6 +907,7 @@
     stopWords(); clearThinkTimeout();
     working = false; turn = null; thinkEl = null; sessionId = null; lastPrompt = "";
     usage.agentMsgs = 0; usage.agentTokens = 0;
+    ctx = { used: 0, window: 0, out: 0, turns: 0, approx: true }; // fresh chat: context resets with the session
     pendingCompact = null; lastReverted = null; lastNoKeyPrompt = null; // new chat = new no-key episode
     try { post({ action: "reset" }); } catch (e) {} // fresh agent conversation host-side too
     clearFind(); closePops();
@@ -903,39 +934,33 @@
   });
   // ---- top bar: context pill + usage dropdown (Kilo-style) + transcript search ----
   let usage = { in: 0, out: 0 };
-  function storageBytes() {
-    let n = 0;
-    try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); const v = localStorage.getItem(k); n += (k.length + (v ? v.length : 0)) * 2; } } catch (e) {}
-    return n;
-  }
-  const fmtKB = (b) => b < 1024 ? b + " B" : b < 1048576 ? (b / 1024).toFixed(1) + " KB" : (b / 1048576).toFixed(2) + " MB";
+  let ctx = { used: 0, window: 0, out: 0, turns: 0, approx: true }; // live session context (host is source of truth)
+  const fmtTok = (n) => Number(n || 0).toLocaleString();
   function renderCtx() {
-    const cap = 5 * 1024 * 1024, used = storageBytes();
-    const dpct = Math.min(99, Math.floor(used / cap * 100));
-    let compactOn = true, compactAt = 60;
-    try {
-      compactOn = safeGet("forge_compact_on") !== "0";
-      const a = parseInt(safeGet("forge_compact_at"), 10);
-      if (!isNaN(a) && a >= 10) compactAt = a;
-    } catch (e) {}
-    const amsgs = Number(usage.agentMsgs || 0);
-    const apct = (compactOn && amsgs > 0) ? Math.min(99, Math.floor(amsgs / compactAt * 100)) : null;
-    $("ctxpill").textContent = (apct !== null ? `hist ${apct}% · ` : "") + `disk ${dpct}%`;
-    $("ctxpill").title = (apct !== null ? `History ${amsgs} of ${compactAt} entries before auto-compact · ` : "") + `Local storage ${dpct}% of ~5 MB — click for exact usage`;
+    const used = Math.max(0, Number(ctx.used || 0));
+    const win = Number(ctx.window || 0);
+    const approx = !win || !!ctx.approx;
+    const wlabel = win > 0 ? win : 128000; // default window when unknown (labeled approx)
+    const pct = wlabel > 0 ? Math.min(99, Math.floor(used / wlabel * 100)) : 0;
+    const modelName = shortModel(curModel) || ctx.model || "–";
+    $("ctxpill").textContent = pct + "%";
+    $("ctxpill").title = `Context ${fmtTok(used)} / ${fmtTok(wlabel)} tokens (~${pct}%)${approx ? " · window approx" : ""} · ${modelName} — click for details`;
     let live = 0; try { live = transcript.querySelectorAll(":scope > .turn").length; } catch (e) {}
     let stored = 0; try { stored = loadSessions().reduce((a, s) => a + s.turns.length, 0); } catch (e2) {}
-    $("ctxpct").textContent = dpct + "%";
-    $("ctxbar").style.width = dpct + "%";
-    $("ctxstore").textContent = fmtKB(used) + " / ~5 MB" + (quotaFull ? " · full, session-only" : "");
+    $("ctxpct").textContent = pct + "%";
+    $("ctxbar").style.width = pct + "%";
+    $("ctxstore").textContent = `${fmtTok(used)} / ${fmtTok(wlabel)} tok${approx ? " (~window)" : ""}`;
     $("ctxturns").textContent = live + " / " + stored;
-    $("ctxprov").textContent = `${curSlug || "?"} · ${shortModel(curModel) || "–"}`;
-    $("ctxtok").textContent = `${Number(usage.in || 0).toLocaleString()} / ${Number(usage.out || 0).toLocaleString()}`;
-    $("ctxagent").textContent = `${amsgs} msgs · ${Number(usage.agentTokens || 0).toLocaleString()} tok` + (apct !== null ? ` · ${apct}% of ${compactAt}` : "");
+    $("ctxprov").textContent = `${curSlug || "?"} · ${modelName}`;
+    $("ctxtok").textContent = fmtTok(ctx.out);
+    const turns = Number(ctx.turns || 0);
+    const amsgs = Number(usage.agentMsgs || 0);
+    $("ctxagent").textContent = `${turns} turns · ${amsgs} msgs`;
   }
   function toggleCtx(force) {
     const p = $("ctxpop");
     const show = force !== undefined ? force : p.style.display === "none";
-    if (show) { closeOthers("ctxpop"); p.style.display = "flex"; }
+    if (show) { closeOthers("ctxpop"); p.style.display = "flex"; p.style.maxHeight = ""; try { const r = p.getBoundingClientRect(); const avail = window.innerHeight - r.top - 12; if (r.bottom > window.innerHeight - 12 && avail > 120) p.style.maxHeight = avail + "px"; } catch (e) {} }
     else { focusIfHidden(p); p.style.display = "none"; intent.focus(); }
     setExpanded("ctxpill", show); setExpanded("ctxarrow", show);
     if (show) { post({ action: "usage" }); renderCtx(); try { p.focus(); } catch (e) {} }
@@ -1041,10 +1066,67 @@
   const settingsEl = $("settings"), themeTgl = $("themetgl"), telmTgl = $("telmtgl"), notifyTgl = $("notifytgl");
   // ---- settings provider picker (Kilo-style): dropdown + key field when the pick has no key ----
   let curSlug = null;
+  // ---- user-defined custom providers (host customProviders=[{slug,label,kind,baseUrl}]) ----
+  // Customs ride the provider payload like customModels: stored, dropdown-synced, listed w/ delete.
+  let customProviders = [];
+  let customKinds = {};
+  const normCustomProv = (a) => (Array.isArray(a) ? a : []).filter(x => x && String(x.slug || "").trim() && String(x.baseUrl || "").trim())
+    .map(x => ({ slug: String(x.slug).trim().toLowerCase(), label: String(x.label || "").trim() || null, kind: String(x.kind || "").trim().toLowerCase(), baseUrl: String(x.baseUrl).trim() }));
+  const isListableProv = (slug) => ["deepseek", "openrouter", "nvidia", "openai"].indexOf(slug) >= 0 || customKinds[slug] === "openai-compatible";
+  // Rebuild the custom <option>s in the Settings dropdown (built-ins are static markup).
+  // Selection is preserved; options carry the label + kind so customs read like built-ins.
+  function syncCustomProvOptions() {
+    const sel = $("setprov");
+    if (!sel) return;
+    const keep = sel.value;
+    sel.querySelectorAll('option[data-custom="1"]').forEach(o => o.remove());
+    customProviders.forEach(c => {
+      if (sel.querySelector(`option[value="${c.slug}"]`)) return;
+      const o = document.createElement("option");
+      o.value = c.slug; o.dataset.custom = "1";
+      o.textContent = (c.label || c.slug) + " — custom (" + c.kind + ")";
+      sel.appendChild(o);
+    });
+    if (keep && sel.querySelector(`option[value="${keep}"]`)) sel.value = keep;
+  }
+  function renderProvList() {
+    const box = $("provlist");
+    if (!box) return;
+    box.innerHTML = "";
+    if (!customProviders.length) {
+      const em = document.createElement("div"); em.className = "cempty";
+      em.textContent = "None yet — add a slug + base URL below.";
+      box.appendChild(em);
+      return;
+    }
+    customProviders.forEach(c => {
+      const row = document.createElement("div"); row.className = "crow";
+      const id = document.createElement("span"); id.className = "cid"; id.textContent = (c.label || c.slug) + " · " + c.slug; id.title = c.baseUrl + " (" + c.kind + ")";
+      row.appendChild(id);
+      const lb = document.createElement("span"); lb.className = "clab"; lb.textContent = c.kind; row.appendChild(lb);
+      const x = document.createElement("button"); x.textContent = "✕"; x.title = "Remove " + c.slug;
+      x.setAttribute("aria-label", "Remove " + c.slug);
+      x.addEventListener("click", () => {
+        if (!hasBridge) { systemCard(needBridgeMsg("Removing a custom provider")); return; }
+        post({ action: "customProviderRemove", slug: c.slug });
+      });
+      row.appendChild(x);
+      box.appendChild(row);
+    });
+  }
   function renderSettings(m) {
     const sel = $("setprov"), row = $("setkeyrow"), sub = $("setsub");
     if (!sel) return;
     if (m.baseUrl !== undefined) lastBaseUrl = m.baseUrl || "";
+    // Custom providers ride the payload: store + sync dropdown options before the known check.
+    try {
+      if (m.customProviders !== undefined) {
+        customProviders = normCustomProv(m.customProviders);
+        customKinds = {}; customProviders.forEach(c => { customKinds[c.slug] = c.kind; });
+        syncCustomProvOptions();
+      }
+    } catch (ecp) {}
+    renderProvList();
     const known = m.slug && sel.querySelector(`option[value="${m.slug}"]`) ? m.slug : null;
     if (known) sel.value = known;
     curSlug = known || m.slug || sel.value; // keep custom slugs: no dropdown option, but pill/ctx/key-state must stay on the host's provider
@@ -1092,6 +1174,18 @@
     if (idEl) { idEl.value = ""; idEl.focus(); }
   });
   [$("customid"), $("customlabel")].forEach(el => { if (el) el.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); $("customadd").click(); } e.stopPropagation(); }); });
+  $("provadd").addEventListener("click", () => {
+    const sgEl = $("provslug"), lbEl = $("provlabel"), kdEl = $("provkind"), urEl = $("provurl");
+    const slug = sgEl ? sgEl.value.trim().toLowerCase() : "", url = urEl ? urEl.value.trim() : "";
+    if (!slug || !url) { systemCard("Type a slug and a base URL first, then Add."); return; }
+    if (!hasBridge) { systemCard(needBridgeMsg("Adding a custom provider")); return; }
+    post({ action: "customProviderAdd", slug: slug, label: lbEl ? lbEl.value.trim() : "", kind: kdEl ? kdEl.value : "openai-compatible", baseUrl: url });
+    if (lbEl) lbEl.value = "";
+    if (sgEl) sgEl.value = "";
+    if (urEl) { urEl.value = ""; }
+    if (sgEl) sgEl.focus();
+  });
+  [$("provslug"), $("provlabel"), $("provurl")].forEach(el => { if (el) el.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); $("provadd").click(); } e.stopPropagation(); }); });
   $("setprov").addEventListener("change", () => {
     $("setkey").value = "";
     try { safeSet("forge_provider", $("setprov").value); } catch (ep) {}
@@ -1127,22 +1221,22 @@
 
   // ---- auto-compaction controls (Kilo parity: threshold + off switch, persisted, pushed to host) ----
   const autoCompactOn = () => { try { return safeGet("forge_compact_on") !== "0"; } catch (e) { return true; } };
-  const effectiveCompactAt = (fb) => { try { const a = parseInt(safeGet("forge_compact_at"), 10); if (!isNaN(a) && a >= 10) return a; } catch (e) {} return fb || 60; };
+  const effectiveCompactAt = (fb) => { try { const a = parseInt(safeGet("forge_compact_at"), 10); if (!isNaN(a) && a >= 10 && a <= 95) return a; } catch (e) {} return fb || 60; };
   function loadCompactCfg() {
     try {
       const on = safeGet("forge_compact_on");
       const at = safeGet("forge_compact_at");
       $("compacttgl").checked = on === null ? true : on === "1";
       let n = at === null ? 60 : parseInt(at, 10);
-      if (isNaN(n) || n < 10) n = 60;
+      if (isNaN(n) || n < 10 || n > 95) n = 60;
       $("compactat").value = n;
     } catch (e) {}
     syncCompactRow();
   }
   function syncCompactRow() { const r = $("compactatrow"); if (r) r.style.opacity = $("compacttgl").checked ? "" : ".4"; }
   function pushCompactCfg() {
-    // The toggle alone enables/disables — the number is just the threshold (floored, never magic).
-    let at = parseInt($("compactat").value, 10); if (isNaN(at) || at < 10) at = 10;
+    // The toggle alone enables/disables — the number is the context-% threshold (clamped 10-95, never magic).
+    let at = parseInt($("compactat").value, 10); if (isNaN(at) || at < 10) at = 10; if (at > 95) at = 95;
     $("compactat").value = at;
     safeSet("forge_compact_on", $("compacttgl").checked ? "1" : "0");
     safeSet("forge_compact_at", String(at));
@@ -1911,7 +2005,14 @@
     try { if ($("findbar") && $("findbar").style.display !== "none" && $("findinput").value) runFind(); } catch (e) {}
     working = false; turn = null;
     scroll(); renderCtx();
-    if (autoCompactOn() && !pendingCompact && [...transcript.children].filter(x => x.classList && x.classList.contains("turn") && x.querySelector(":scope > .bubble.user")).length > effectiveCompactAt(60)) compactTranscript(true);
+    // Host gate is context-% (Kilo parity); the panel mirrors it — % when usage is known,
+    // legacy turn-count fallback before the first usage report lands. Mirrors the host gate.
+    try {
+      const at = effectiveCompactAt(60), w = Number(ctx.window || 0) || 128000;
+      const pct = Math.floor(Math.max(0, Number(ctx.used || 0)) / w * 100);
+      const nturns = [...transcript.children].filter(x => x.classList && x.classList.contains("turn") && x.querySelector(":scope > .bubble.user")).length;
+      if (autoCompactOn() && !pendingCompact && (Number(ctx.used || 0) > 0 ? pct >= at : nturns > Math.max(20, at))) compactTranscript(true);
+    } catch (eac) {}
   }
 
   function renderRedWave(m) {
@@ -1964,6 +2065,21 @@
   }
 
   function handle(m) {
+    // Live context stats ride on answer/step/status/enhanced/compacted/usage/historyLoaded:
+    // merge first so the pill reflects REAL session usage without polling.
+    if (m && (m.ctxUsed !== undefined || m.ctxWindow)) {
+      try {
+        ctx = {
+          used: Number(m.ctxUsed || 0),
+          window: Number(m.ctxWindow || 0),
+          out: Number(m.ctxOut || 0),
+          turns: Number(m.ctxTurns || 0),
+          approx: m.ctxApprox !== false, // absent (older host) = approximate window
+          model: m.ctxModel || ctx.model
+        };
+        renderCtx();
+      } catch (e) {}
+    }
     if (m.type === "model") {
       if (m.title) {
         const n = (m.dimensions || []).length;
@@ -2382,6 +2498,17 @@
         const pr0 = o.querySelector("#obprov");
         if (pr0 && page === 1 && (curSlug || $("setprov").value) && pr0.querySelector(`option[value="${curSlug || $("setprov").value}"]`)) pr0.value = curSlug || $("setprov").value;
       } catch (e0) {}
+      try {
+        // Customs ride along: provider payloads carry them, so the onboarding list matches
+        // Settings once the first host reply lands (fresh machines have none to show).
+        const ob = o.querySelector("#obprov");
+        if (ob && page === 1 && customProviders.length) customProviders.forEach(c => {
+          if (ob.querySelector(`option[value="${c.slug}"]`)) return;
+          const oo = document.createElement("option");
+          oo.value = c.slug; oo.textContent = (c.label || c.slug) + " — custom (" + c.kind + ")";
+          ob.appendChild(oo);
+        });
+      } catch (eobc) {}
       const doSave = () => {
         const k = o.querySelector("#obkey");
         const pr = o.querySelector("#obprov");
@@ -2390,7 +2517,8 @@
         if (slug) o.dataset.prov = slug;
         // Providers whose model list is a Bearer-token GET away (host fetchModels).
         // Anthropic uses a different auth header server-side; Ollama needs no key at all.
-        const listable = pr && ["deepseek", "openrouter", "nvidia", "openai"].indexOf(pr.value) >= 0;
+        // openai-compatible-kind customs list like the built-ins above.
+        const listable = pr && isListableProv(pr.value);
         if (k && k.value.trim()) {
           const msg = { action: "saveKey", provider: slug, key: k.value.trim() };
           if (listable && md && md.style.display !== "none" && md.value) msg.model = md.value;
@@ -2410,7 +2538,7 @@
       const tryFetch = () => {
         const pr = o.querySelector("#obprov"), kv = o.querySelector("#obkey"), st = o.querySelector("#obmstat");
         const md = o.querySelector("#obmodel");
-        if (!pr || ["deepseek", "openrouter", "nvidia", "openai"].indexOf(pr.value) < 0 || !kv) return;
+        if (!pr || !isListableProv(pr.value) || !kv) return;
         if (!kv.value.trim()) {
           if (st) st.textContent = "Paste a key to load live models, or Continue with the default.";
           return;
@@ -2429,7 +2557,7 @@
         const pr = o.querySelector("#obprov"), md = o.querySelector("#obmodel"),
               rl = o.querySelector("#obreload"), st = o.querySelector("#obmstat"),
               kv = o.querySelector("#obkey");
-        const canList = pr && ["deepseek", "openrouter", "nvidia", "openai"].indexOf(pr.value) >= 0;
+        const canList = pr && isListableProv(pr.value);
         const noKey = pr && pr.value === "ollama";
         if (kv) kv.style.display = noKey ? "none" : "";
         if (md) md.style.display = canList ? "" : "none";
@@ -2591,6 +2719,7 @@
     const flat = [...transcript.querySelectorAll(".turn")].filter(x => x.querySelector(":scope > .bubble.user"));
     const keep = Math.max(0, flat.indexOf(turnEl));
     post({ action: "revert", sid: sessionId, keep: keep });
+    try { post({ action: "usage" }); } catch (err2) {} // host recomputed ctx from kept history: refresh the pill
     let savedTurns = null, keepCount = null;
     if (sessionId) {
       const all = loadSessions();

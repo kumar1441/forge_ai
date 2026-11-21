@@ -275,6 +275,7 @@ namespace Forge.SolidWorks
                             new ProviderOptions { MaxTokens = 1000, Model = ProviderFactory.SmallModelForCurrentConfig() ?? compactModel },
                             System.Threading.CancellationToken.None);
                         string s = res != null ? res.Text : null;
+                        try { if (res != null) { IntentRate.Note(res.TokIn, res.TokOut); McpBuild.NoteCtxCurrent(res.TokIn, res.TokOut); } } catch { }
                         if (!string.IsNullOrWhiteSpace(s))
                         {
                             s = System.Text.RegularExpressions.Regex.Replace(s.Trim(), @"^```\w*\n?|```$", "").Trim();
@@ -287,20 +288,23 @@ namespace Forge.SolidWorks
                         Send(new { type = "error", message = "Compaction failed (" + BoundDetail(ex.Message, 200) + ") — keeping full history; try again.", localCompact = true });
                     }
                 }
-                else if (action == "usage")   // top-bar context dropdown: today's provider token totals + agent history
+                else if (action == "usage")   // top-bar context dropdown: session context stats + legacy daily totals
                 {
-                    try { Send(new { type = "usage", tokensIn = IntentRate.TokensInToday, tokensOut = IntentRate.TokensOutToday, agentMsgs = McpBuild.HistoryCount(), agentTokens = McpBuild.AgentTokCount }); }
-                    catch (Exception ex) { Send(new { type = "usage", error = "Couldn't load usage — try again. (detail: " + BoundDetail(ex.Message, 200) + ")" }); }
+                    SendUsage();
                 }
                 else if (action == "setCompact")   // Kilo-style auto-compaction controls from the settings cog
                 {
+                    // CompactAt is a PERCENT of the model's context window (10-95, default 60),
+                    // not a message count. The forge_compact_at storage key is unchanged, so an
+                    // existing value of 60 (old message-count semantics) carries over as 60%.
                     try
                     {
                         bool on = true; int at = 60;
                         try { on = (bool)msg.on; } catch { }
                         try { at = (int)msg.at; } catch { }
+                        if (at < 10) at = 10; if (at > 95) at = 95;
                         McpBuild.CompactOn = on;
-                        McpBuild.CompactAt = at <= 0 ? 0 : at;
+                        McpBuild.CompactAt = at;
                     }
                     catch { }
                 }
@@ -488,6 +492,7 @@ namespace Forge.SolidWorks
                         if (string.IsNullOrWhiteSpace(rsid)) McpBuild.ClearHistory();
                         else if (!haveKeep) Send(new { type = "error", message = "Couldn't rewind — I lost track of which turn to keep to, so history is untouched. Click a turn's ↩ revert button to rewind." });
                         else McpBuild.TruncateHistory(rsid, keep);
+                        try { SendUsage(); } catch { } // pill recomputes from kept history immediately
                     }
                     catch { }
                 }
@@ -758,7 +763,7 @@ namespace Forge.SolidWorks
                             var scfg = ReadForgeConfig();
                             string sp2 = (string)scfg["provider"], sbu2 = (string)scfg["baseUrl"];
                             string sslug2 = PresetSlugFor(sp2, sbu2);
-                            Send(new { type = "provider", slug = sslug2, provider = sp2, baseUrl = sbu2, model = (string)scfg["model"], dynamic = IsDynamicProvider(sp2), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(sslug2, sp2)), customModels = GetCustomModels(sslug2) });
+                            Send(new { type = "provider", slug = sslug2, provider = sp2, baseUrl = sbu2, model = (string)scfg["model"], dynamic = IsDynamicProvider(sp2), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(sslug2, sp2)), customModels = GetCustomModels(sslug2), customProviders = GetCustomProviders() });
                         }
                         catch { }
                     }
@@ -775,6 +780,10 @@ namespace Forge.SolidWorks
                     try { provider = (string)msg.provider; } catch { }
                     string fslug = (provider ?? "").Trim().ToLowerInvariant();
                     var preset = ProviderPresetFor(fslug);
+                    // Anthropic-wire endpoints (built-in or anthropic-kind custom) don't serve an
+                    // OpenAI-style Bearer /models list — fail fast with guidance instead of a raw HTTP error.
+                    if (string.Equals(preset.Provider, "anthropic", StringComparison.OrdinalIgnoreCase))
+                    { Send(new { type = "models", models = new string[0], error = "This endpoint has no OpenAI-style model list — add the model id under Custom models instead." }); return; }
                     // Ollama serves /models with no key (same exemption as refreshModels): only
                     // keyed providers fail closed here.
                     bool flocal = string.Equals(fslug, "ollama", StringComparison.OrdinalIgnoreCase);
@@ -799,7 +808,7 @@ namespace Forge.SolidWorks
                         string p = (string)cfg["provider"];
                         string bu = (string)cfg["baseUrl"];
                         string gslug = PresetSlugFor(p, bu);
-                        Send(new { type = "provider", slug = gslug, provider = p, baseUrl = bu, model = (string)cfg["model"], dynamic = IsDynamicProvider(p), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(gslug, p)), customModels = GetCustomModels(gslug) });
+                        Send(new { type = "provider", slug = gslug, provider = p, baseUrl = bu, model = (string)cfg["model"], dynamic = IsDynamicProvider(p), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(gslug, p)), customModels = GetCustomModels(gslug), customProviders = GetCustomProviders() });
                         Send(new { type = "rules", allow = McpBuild.AlwaysList(), deny = McpBuild.DenyList() });
                     }
                     catch (Exception ex) { Send(new { type = "provider", error = "Couldn't load provider settings (" + BoundDetail(ex.Message, 200) + ") — try again." }); }
@@ -811,7 +820,7 @@ namespace Forge.SolidWorks
                     try
                     {
                         string slug = (provider ?? "").Trim().ToLowerInvariant();
-                        if (slug != "deepseek" && slug != "openrouter" && slug != "openai" && slug != "anthropic" && slug != "ollama" && slug != "nvidia")
+                        if (Array.IndexOf(KnownSlugs, slug) < 0 && FindCustomProvider(slug) == null)
                             throw new Exception("Unknown provider '" + provider + "'.");
                         var preset = ProviderPresetFor(slug);
                         var cfg = ReadForgeConfig();
@@ -835,7 +844,7 @@ namespace Forge.SolidWorks
                         string p = preset.Provider;
                         string keptModel = null;
                         try { keptModel = (string)cfg["model"]; } catch { }
-                        Send(new { type = "provider", slug = slug, provider = p, baseUrl = preset.BaseUrl, model = keptModel ?? preset.Model, dynamic = IsDynamicProvider(p), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(slug, p)), customModels = GetCustomModels(slug) });
+                        Send(new { type = "provider", slug = slug, provider = p, baseUrl = preset.BaseUrl, model = keptModel ?? preset.Model, dynamic = IsDynamicProvider(p), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(slug, p)), customModels = GetCustomModels(slug), customProviders = GetCustomProviders() });
                         Send(new { type = "answer", answer = "Provider switched to " + slug + " (" + (keptModel ?? preset.Model) + ") — pick another model from the pill if you like." });
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't switch provider (" + BoundDetail(ex.Message, 200) + ") — check the selection/key and try again." }); }
@@ -878,7 +887,7 @@ namespace Forge.SolidWorks
                         WriteForgeConfig(cfg);
                         string sp = (string)cfg["provider"], sbu = (string)cfg["baseUrl"];
                         string smslug = PresetSlugFor(sp, sbu);
-                        Send(new { type = "provider", slug = smslug, provider = sp, baseUrl = sbu, model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(smslug, sp)), customModels = GetCustomModels(smslug) });
+                        Send(new { type = "provider", slug = smslug, provider = sp, baseUrl = sbu, model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(smslug, sp)), customModels = GetCustomModels(smslug), customProviders = GetCustomProviders() });
                         Send(new { type = "answer", answer = "Model switched to " + model.Trim() + " — it applies to the next run." });
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't switch model (" + BoundDetail(ex.Message, 200) + ") — check the selection/key and try again." }); }
@@ -904,7 +913,7 @@ namespace Forge.SolidWorks
                         cfg = ReadForgeConfig();
                         string sp = (string)cfg["provider"], sbu = (string)cfg["baseUrl"];
                         string sslug = PresetSlugFor(sp, sbu);
-                        Send(new { type = "provider", slug = sslug, provider = sp, baseUrl = sbu, model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(sslug, sp)), customModels = arr });
+                        Send(new { type = "provider", slug = sslug, provider = sp, baseUrl = sbu, model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(sslug, sp)), customModels = arr, customProviders = GetCustomProviders() });
                         Send(new { type = "answer", answer = "Custom model '" + cid.Trim() + "' added for " + (cslug ?? sslug) + " — pick it from the pill or Settings." });
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't add the custom model (" + BoundDetail(ex.Message, 200) + ") — check the id and try again." }); }
@@ -923,10 +932,55 @@ namespace Forge.SolidWorks
                         cfg = ReadForgeConfig();
                         string sp = (string)cfg["provider"], sbu = (string)cfg["baseUrl"];
                         string sslug = PresetSlugFor(sp, sbu);
-                        Send(new { type = "provider", slug = sslug, provider = sp, baseUrl = sbu, model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(sslug, sp)), customModels = arr });
+                        Send(new { type = "provider", slug = sslug, provider = sp, baseUrl = sbu, model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(sslug, sp)), customModels = arr, customProviders = GetCustomProviders() });
                         Send(new { type = "answer", answer = "Custom model '" + cid.Trim() + "' removed — the live list is unchanged." });
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't remove the custom model (" + BoundDetail(ex.Message, 200) + ") — try again." }); }
+                }
+
+                // User-defined custom providers (Settings → Custom providers): add/remove a
+                // {slug,label,kind,baseUrl} entry. Keys stay per-slug in KeyStore, models in
+                // customModels.<slug> — both work untouched once the slug is registered.
+                else if (action == "customProviderAdd")
+                {
+                    string pslug = null, plabel = null, pkind = null, purl = null;
+                    try { pslug = (string)msg.slug; } catch { }
+                    try { plabel = (string)msg.label; } catch { }
+                    try { pkind = (string)msg.kind; } catch { }
+                    try { purl = (string)msg.baseUrl; } catch { }
+                    try
+                    {
+                        var list = CustomProviderAdd(pslug, plabel, pkind, purl);
+                        var cfg = ReadForgeConfig();
+                        string sp = (string)cfg["provider"], sbu = (string)cfg["baseUrl"];
+                        string sslug = PresetSlugFor(sp, sbu);
+                        Send(new { type = "provider", slug = sslug, provider = sp, baseUrl = sbu, model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(sslug, sp)), customModels = GetCustomModels(sslug), customProviders = list });
+                        Send(new { type = "answer", answer = "Custom provider '" + SanitizeCustomSlug(pslug) + "' added — pick it in the provider dropdown, save its key, then add its model ids under Custom models." });
+                    }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't add the custom provider (" + BoundDetail(ex.Message, 200) + ")." }); }
+                }
+                else if (action == "customProviderRemove")
+                {
+                    string pslug = null;
+                    try { pslug = (string)msg.slug; } catch { }
+                    try
+                    {
+                        string gone = SanitizeCustomSlug(pslug);
+                        bool wasActive = false;
+                        try
+                        {
+                            var cfgBefore = ReadForgeConfig();
+                            wasActive = string.Equals(PresetSlugFor((string)cfgBefore["provider"], (string)cfgBefore["baseUrl"]), gone, StringComparison.OrdinalIgnoreCase);
+                        }
+                        catch { }
+                        var list = CustomProviderRemove(pslug);
+                        var cfg = ReadForgeConfig();
+                        string sp = (string)cfg["provider"], sbu = (string)cfg["baseUrl"];
+                        string sslug = PresetSlugFor(sp, sbu);
+                        Send(new { type = "provider", slug = sslug, provider = sp, baseUrl = sbu, model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(sslug, sp)), customModels = GetCustomModels(sslug), customProviders = list });
+                        Send(new { type = "answer", answer = "Custom provider '" + gone + "' removed — " + (wasActive ? "it was active, so the provider fell back to deepseek (its key and model ids are kept on disk)." : "its key and model ids are kept on disk in case you re-add it.") });
+                    }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't remove the custom provider (" + BoundDetail(ex.Message, 200) + ")." }); }
                 }
 
                 // Settings usage-data toggle (trap.md item 2: off switch easy to find). Host = source of truth:
@@ -1229,7 +1283,7 @@ namespace Forge.SolidWorks
         private static void SaveProviderKey(string provider, string key, string model = null)
         {
             string slug = (provider ?? "").Trim().ToLowerInvariant();
-            if (Array.IndexOf(KnownSlugs, slug) < 0)
+            if (Array.IndexOf(KnownSlugs, slug) < 0 && FindCustomProvider(slug) == null)
                 throw new Exception("Unknown provider '" + provider + "'.");
             var preset = ProviderPresetFor(slug);
             // Per-slug key file: every OpenAI-compatible preset used to share one
@@ -1454,6 +1508,257 @@ namespace Forge.SolidWorks
             return GetCustomModels(s);
         }
 
+        // ---- User-defined custom providers (config.json customProviders) ----
+        // Shape: {"customProviders":[{"slug":"corp-gw","label":"Corp gateway","kind":"openai-compatible","baseUrl":"https://..."}]}
+        // kind picks the wire client (OpenAiCompatibleClient incl. reasoning fallback, or
+        // AnthropicClient — retries/temperature/small-model follow the kind automatically);
+        // the slug keys KeyStore + customModels exactly like a built-in slug. Corrupt entries
+        // are ignored, never thrown. Deleting the active provider falls back to deepseek
+        // (the ProviderPresetFor default), matching existing fallback behavior. The reserved
+        // set also blocks "openai-compatible" so a custom slug can never collide with the
+        // client-id fallback in PresetSlugFor.
+        private static readonly string[] ReservedSlugs = { "deepseek", "openrouter", "nvidia", "openai", "anthropic", "ollama", "openai-compatible" };
+        private static readonly string[] CustomKinds = { "openai-compatible", "anthropic" };
+
+        private static string SanitizeCustomSlug(string slug)
+        {
+            try
+            {
+                string s = (slug ?? "").Trim().ToLowerInvariant().Replace('_', '-').Replace(' ', '-');
+                var sb = new System.Text.StringBuilder();
+                foreach (char c in s)
+                {
+                    if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') sb.Append(c);
+                }
+                string r = sb.ToString().Trim('-');
+                if (r.Length == 0) return null;
+                if (r.Length > 40) r = r.Substring(0, 40).Trim('-');
+                if (r.Length == 0) return null;
+                return r;
+            }
+            catch { return null; }
+        }
+
+        private static string NormCustomBaseUrl(string url)
+        {
+            try
+            {
+                string u = (url ?? "").Trim().TrimEnd('/');
+                if (string.IsNullOrWhiteSpace(u)) return null;
+                System.Uri uri;
+                if (!System.Uri.TryCreate(u, System.UriKind.Absolute, out uri)) return null;
+                if (!string.Equals(uri.Scheme, "http", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase)) return null;
+                return u;
+            }
+            catch { return null; }
+        }
+
+        private static JArray ReadCustomProvidersRaw()
+        {
+            try
+            {
+                var cfg = ReadForgeConfig();
+                var arr = cfg != null ? cfg["customProviders"] as JArray : null;
+                return arr ?? new JArray();
+            }
+            catch { return new JArray(); }
+        }
+
+        private static JArray GetCustomProviders()
+        {
+            var clean = new JArray();
+            try
+            {
+                foreach (var e in ReadCustomProvidersRaw())
+                {
+                    try
+                    {
+                        var o = e as JObject;
+                        if (o == null) continue;
+                        string s = SanitizeCustomSlug((string)o["slug"]);
+                        string kind = ((string)o["kind"] ?? "").Trim().ToLowerInvariant();
+                        string bu = NormCustomBaseUrl((string)o["baseUrl"]);
+                        // Ignore bad entries (empty slug/url, unknown kind, reserved slug, dupes):
+                        // a corrupt config must never break provider resolution.
+                        if (string.IsNullOrWhiteSpace(s) || string.IsNullOrWhiteSpace(bu)) continue;
+                        if (Array.IndexOf(CustomKinds, kind) < 0) continue;
+                        if (Array.IndexOf(ReservedSlugs, s) >= 0) continue;
+                        bool dupe = false;
+                        foreach (var c in clean)
+                        {
+                            try { if (string.Equals((string)((JObject)c)["slug"], s, StringComparison.OrdinalIgnoreCase)) { dupe = true; break; } }
+                            catch { }
+                        }
+                        if (dupe) continue;
+                        string lab = ((string)o["label"] ?? "").Trim();
+                        var n = new JObject { ["slug"] = s, ["kind"] = kind, ["baseUrl"] = bu };
+                        if (!string.IsNullOrWhiteSpace(lab)) n["label"] = lab.Length > 60 ? lab.Substring(0, 60) : lab;
+                        clean.Add(n);
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return clean;
+        }
+
+        private static JObject FindCustomProvider(string slug)
+        {
+            try
+            {
+                string s = SanitizeCustomSlug(slug);
+                if (string.IsNullOrWhiteSpace(s)) return null;
+                foreach (var e in GetCustomProviders())
+                {
+                    try
+                    {
+                        var o = e as JObject;
+                        if (o != null && string.Equals((string)o["slug"], s, StringComparison.OrdinalIgnoreCase)) return o;
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static JObject FindCustomProviderByBaseUrl(string baseUrl)
+        {
+            try
+            {
+                string bu = NormCustomBaseUrl(baseUrl);
+                if (string.IsNullOrWhiteSpace(bu)) return null;
+                foreach (var e in GetCustomProviders())
+                {
+                    try
+                    {
+                        var o = e as JObject;
+                        if (o != null && string.Equals((string)o["baseUrl"], bu, StringComparison.OrdinalIgnoreCase)) return o;
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static JArray CustomProviderAdd(string slug, string label, string kind, string baseUrl)
+        {
+            string s = SanitizeCustomSlug(slug);
+            if (string.IsNullOrWhiteSpace(s)) throw new Exception("Give the provider a slug (lowercase letters, digits, hyphens) — e.g. corp-gw.");
+            string k = ((kind ?? "").Trim().ToLowerInvariant());
+            if (Array.IndexOf(CustomKinds, k) < 0) throw new Exception("Pick a provider type: openai-compatible or anthropic.");
+            string bu = NormCustomBaseUrl(baseUrl);
+            if (string.IsNullOrWhiteSpace(bu)) throw new Exception("Base URL must be an http(s) address — e.g. https://gw.corp.example/v1.");
+            if (Array.IndexOf(ReservedSlugs, s) >= 0) throw new Exception("'" + s + "' is a built-in provider — pick a different slug.");
+            // Base-URL collision guard: PresetSlugFor and ProviderFactory.SlugFor match
+            // customs by baseUrl FIRST, so a second custom reusing an existing baseUrl
+            // (custom or built-in) would silently alias the first slug and strand keys/models.
+            try
+            {
+                foreach (var e in GetCustomProviders())
+                {
+                    string eb = null;
+                    try { var o = e as JObject; if (o == null) continue; eb = NormCustomBaseUrl((string)o["baseUrl"]); }
+                    catch { continue; }
+                    if (string.IsNullOrWhiteSpace(eb)) continue;
+                    if (string.Equals(eb, bu, StringComparison.OrdinalIgnoreCase)) throw new Exception("That base URL is already registered — pick the existing entry or use a different URL.");
+                }
+            }
+            catch (Exception ex)
+            {
+                if (ex.Message != null && ex.Message.StartsWith("That base URL")) throw;
+            }
+            try
+            {
+                foreach (var b in new string[] { "deepseek", "openrouter", "nvidia", "openai", "anthropic", "ollama" })
+                {
+                    string pb = null;
+                    try { var preset = ProviderPresetFor(b); if (preset != null) pb = NormCustomBaseUrl(preset.BaseUrl); }
+                    catch { continue; }
+                    if (string.IsNullOrWhiteSpace(pb)) continue;
+                    if (string.Equals(pb, bu, StringComparison.OrdinalIgnoreCase)) throw new Exception("That base URL is already registered — pick the existing entry or use a different URL.");
+                }
+            }
+            catch (Exception ex)
+            {
+                if (ex.Message != null && ex.Message.StartsWith("That base URL")) throw;
+            }
+            JObject cfg;
+            try { cfg = ReadForgeConfig(); } catch { cfg = new JObject(); }
+            if (cfg == null) cfg = new JObject();
+            var raw = cfg["customProviders"] as JArray;
+            if (raw == null) { raw = new JArray(); cfg["customProviders"] = raw; }
+            foreach (var e in raw)
+            {
+                bool dupeSlug = false;
+                try
+                {
+                    var o = e as JObject;
+                    dupeSlug = o != null && string.Equals(SanitizeCustomSlug((string)o["slug"]), s, StringComparison.OrdinalIgnoreCase);
+                }
+                catch { dupeSlug = false; }
+                if (dupeSlug) throw new Exception("A custom provider '" + s + "' already exists — delete it first to replace it.");
+            }
+            if (GetCustomProviders().Count >= 20) throw new Exception("Custom provider cap reached (20) — remove one first.");
+            var n = new JObject { ["slug"] = s, ["kind"] = k, ["baseUrl"] = bu };
+            string lab = (label ?? "").Trim();
+            if (!string.IsNullOrWhiteSpace(lab)) n["label"] = lab.Length > 60 ? lab.Substring(0, 60) : lab;
+            raw.Add(n);
+            WriteForgeConfigAtomic(cfg);
+            return GetCustomProviders();
+        }
+
+        private static JArray CustomProviderRemove(string slug)
+        {
+            string s = SanitizeCustomSlug(slug);
+            if (string.IsNullOrWhiteSpace(s)) throw new Exception("No provider slug given — nothing to remove.");
+            if (Array.IndexOf(ReservedSlugs, s) >= 0) throw new Exception("'" + s + "' is built-in and can't be removed.");
+            JObject cfg;
+            try { cfg = ReadForgeConfig(); } catch { cfg = new JObject(); }
+            if (cfg == null) cfg = new JObject();
+            bool dropped = false;
+            try
+            {
+                var raw = cfg["customProviders"] as JArray;
+                if (raw != null)
+                {
+                    JToken hit = null;
+                    foreach (var e in raw)
+                    {
+                        try
+                        {
+                            var o = e as JObject;
+                            if (o != null && string.Equals(SanitizeCustomSlug((string)o["slug"]), s, StringComparison.OrdinalIgnoreCase)) { hit = e; break; }
+                        }
+                        catch { }
+                    }
+                    if (hit != null) { raw.Remove(hit); dropped = true; }
+                }
+            }
+            catch { }
+            if (!dropped) throw new Exception("No custom provider '" + s + "' found — nothing to remove.");
+            // The removed provider's key file and customModels entries stay on disk: never
+            // silently lose secrets or model ids (re-adding the slug restores them).
+            // If it was active, fall back to deepseek (the ProviderPresetFor default).
+            try
+            {
+                if (string.Equals(PresetSlugFor((string)cfg["provider"], (string)cfg["baseUrl"]), s, StringComparison.OrdinalIgnoreCase))
+                {
+                    var fb = ProviderPresetFor("deepseek");
+                    cfg["provider"] = fb.Provider;
+                    cfg["baseUrl"] = fb.BaseUrl;
+                    string remembered = null;
+                    try { remembered = (string)cfg["model_deepseek"]; } catch { }
+                    cfg["model"] = !string.IsNullOrWhiteSpace(remembered) ? remembered.Trim() : fb.Model;
+                }
+            }
+            catch { }
+            WriteForgeConfigAtomic(cfg);
+            return GetCustomProviders();
+        }
+
         private static bool IsDynamicProvider(string provider)
         {
             return string.Equals((provider ?? "").Trim(), "openai-compatible", StringComparison.OrdinalIgnoreCase);
@@ -1465,6 +1770,26 @@ namespace Forge.SolidWorks
         {
             string p = (provider ?? "").Trim().ToLowerInvariant();
             string bu = (baseUrl ?? "").Trim().ToLowerInvariant();
+            // User-defined customs win over every built-in heuristic below: an anthropic-kind
+            // custom stores provider "anthropic", and a compatible custom may sit on a built-in
+            // host — either would otherwise collapse into the wrong slug and file keys/models
+            // under the wrong provider. Bad custom entries are ignored, never thrown.
+            try
+            {
+                var byUrl = FindCustomProviderByBaseUrl(baseUrl);
+                if (byUrl != null)
+                {
+                    string cs = (string)byUrl["slug"];
+                    if (!string.IsNullOrWhiteSpace(cs)) return cs.Trim().ToLowerInvariant();
+                }
+                var bySlug = FindCustomProvider(p);
+                if (bySlug != null)
+                {
+                    string cs2 = (string)bySlug["slug"];
+                    if (!string.IsNullOrWhiteSpace(cs2)) return cs2.Trim().ToLowerInvariant();
+                }
+            }
+            catch { }
             if (p == "anthropic") return "anthropic";
             if (p == "ollama") return "ollama";
             // Ollama presets store the client id "openai-compatible" with a localhost
@@ -1593,6 +1918,28 @@ namespace Forge.SolidWorks
 
         private static ProviderPreset ProviderPresetFor(string slug)
         {
+            // User-defined custom: kind is the stored client id (openai-compatible |
+            // anthropic) so Resolve routes to the right wire client with its retries,
+            // temperature gate, and reasoning fallback. Model starts as the remembered
+            // pick, else the first registered custom id, else empty (user adds one).
+            try
+            {
+                var custom = FindCustomProvider(slug);
+                if (custom != null)
+                {
+                    string kind = ((string)custom["kind"] ?? "openai-compatible").Trim();
+                    string curl = ((string)custom["baseUrl"] ?? "").Trim().TrimEnd('/');
+                    string cmodel = null;
+                    try
+                    {
+                        var ca = GetCustomModels(slug);
+                        if (ca != null && ca.Count > 0) cmodel = (string)((JObject)ca[0])["id"];
+                    }
+                    catch { }
+                    return new ProviderPreset(kind, curl, string.IsNullOrWhiteSpace(cmodel) ? "" : cmodel.Trim());
+                }
+            }
+            catch { }
             switch (slug)
             {
                 case "openrouter": return new ProviderPreset("openai-compatible", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini");
@@ -1700,6 +2047,7 @@ namespace Forge.SolidWorks
                 string clean = CleanEnhanced(res != null ? res.Text : null);
                 if (string.IsNullOrWhiteSpace(clean)) throw new Exception("empty enhancement");
                 try { if (res != null) IntentRate.Note(res.TokIn, res.TokOut); } catch { }
+                try { if (res != null) McpBuild.NoteCtxCurrent(res.TokIn, res.TokOut); } catch { } // enhance spends session context too
                 Send(new { type = "enhanced", text = clean });
             }
             catch (OperationCanceledException)
@@ -2529,7 +2877,9 @@ namespace Forge.SolidWorks
                 // Send as a STRING: the panel does JSON.parse(e.data). PostWebMessageAsJson would make
                 // e.data an already-parsed object, so JSON.parse throws and every message is dropped
                 // (that was the "stuck on On itâ€¦" bug â€” the panel never got the done/status messages).
-                string json = JsonConvert.SerializeObject(payload);
+                object wire = payload;
+                try { wire = WithCtx(payload); } catch { wire = payload; }
+                string json = JsonConvert.SerializeObject(wire);
                 var web = _web;
                 if (web == null || web.IsDisposed) return;
                 try
@@ -2542,6 +2892,47 @@ namespace Forge.SolidWorks
                 catch { /* control torn down mid-post */ }
             }
             catch { }
+        }
+
+        // Kilo parity: every answer/step-flavored message carries live context stats
+        // (ctxUsed/ctxWindow/ctxTurns/ctxOut/ctxApprox/ctxModel) so the pill reflects
+        // REAL session usage without an extra round-trip. One funnel, never throws.
+        private static object WithCtx(object payload)
+        {
+            Newtonsoft.Json.Linq.JObject jo = payload as Newtonsoft.Json.Linq.JObject;
+            if (jo == null) { try { jo = Newtonsoft.Json.Linq.JObject.FromObject(payload); } catch { return payload; } }
+            else { try { jo = (Newtonsoft.Json.Linq.JObject)jo.DeepClone(); } catch { return payload; } }
+            string t = null;
+            try { t = (string)jo["type"]; } catch { return payload; }
+            if (t != "answer" && t != "step" && t != "status" && t != "enhanced" && t != "compacted" && t != "historyLoaded") return payload;
+            try
+            {
+                long cu, co; int ctn;
+                McpBuild.CtxSnapshotCurrent(out cu, out co, out ctn);
+                string m = null;
+                try { m = Forge.Providers.ProviderFactory.CurrentModel(); } catch { m = null; }
+                var w = Forge.Providers.ProviderFactory.ContextWindowFor(m);
+                jo["ctxUsed"] = cu; jo["ctxOut"] = co; jo["ctxTurns"] = ctn;
+                jo["ctxWindow"] = w.Item1; jo["ctxApprox"] = !w.Item2;
+                if (!string.IsNullOrWhiteSpace(m)) jo["ctxModel"] = m;
+            }
+            catch { }
+            return jo;
+        }
+
+        // Top-bar context dropdown: per-session context stats (+ legacy daily totals).
+        private void SendUsage()
+        {
+            try
+            {
+                long cu, co; int ctn;
+                McpBuild.CtxSnapshotCurrent(out cu, out co, out ctn);
+                string m = null;
+                try { m = Forge.Providers.ProviderFactory.CurrentModel(); } catch { m = null; }
+                var w = Forge.Providers.ProviderFactory.ContextWindowFor(m);
+                Send(new { type = "usage", tokensIn = IntentRate.TokensInToday, tokensOut = IntentRate.TokensOutToday, agentMsgs = McpBuild.HistoryCount(), agentTokens = McpBuild.AgentTokCount, ctxUsed = cu, ctxOut = co, ctxTurns = ctn, ctxWindow = w.Item1, ctxApprox = !w.Item2, ctxModel = m });
+            }
+            catch (Exception ex) { Send(new { type = "usage", error = "Couldn't load usage — try again. (detail: " + BoundDetail(ex.Message, 200) + ")" }); }
         }
     }
 }

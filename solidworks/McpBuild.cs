@@ -34,6 +34,178 @@ namespace Forge.SolidWorks
         private static long _agentTokCount;
         public static long AgentTokCount { get { return System.Threading.Interlocked.Read(ref _agentTokCount); } private set { System.Threading.Interlocked.Exchange(ref _agentTokCount, value); } }
 
+        // Per-session context-window stats (Kilo parity): the panel pill shows real
+        // context usage, not disk bytes. curIn = latest prompt_tokens for this sid
+        // (the current context size — prompt tokens already include the full history);
+        // outSum = cumulative completion tokens; turns[] parallels TurnStarts (one
+        // entry per user turn: last prompt tokens + summed completions) so a revert
+        // can recompute from kept history. Persisted in agent\{sid}.ctx.json —
+        // history Msgs go RAW onto the provider wire, so stamps on messages would
+        // leak as unknown fields and 400 on strict gateways. Never throws.
+        private class CtxTurn { public long In; public long Out; }
+        private static readonly object CtxLock = new object();
+        private static readonly Dictionary<string, long> CtxCur = new Dictionary<string, long>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, long> CtxOutSum = new Dictionary<string, long>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, List<CtxTurn>> CtxTurns = new Dictionary<string, List<CtxTurn>>(StringComparer.Ordinal);
+
+        private static string CtxPath(string sid)
+        {
+            try { return Path.Combine(AgentDir(), SafeSid(sid) + ".ctx.json"); } catch { return null; }
+        }
+
+        private static void LoadCtx(string sid)
+        {
+            // Missing/corrupt sidecar degrades to zeros (pill shows 0% + "unknown").
+            try
+            {
+                long cur = 0, sum = 0;
+                List<CtxTurn> turns = new List<CtxTurn>();
+                string p = CtxPath(sid);
+                if (p != null && File.Exists(p))
+                {
+                    var o = JObject.Parse(File.ReadAllText(p));
+                    try { cur = (long?)o["cur"] ?? 0; } catch { cur = 0; }
+                    try { sum = (long?)o["out"] ?? 0; } catch { sum = 0; }
+                    try
+                    {
+                        var arr = o["turns"] as JArray;
+                        if (arr != null) foreach (var t in arr)
+                        {
+                            try { turns.Add(new CtxTurn { In = (long?)(t as JObject)["in"] ?? 0, Out = (long?)(t as JObject)["out"] ?? 0 }); } catch { }
+                            if (turns.Count >= 500) break;
+                        }
+                    }
+                    catch { }
+                    if (cur < 0) cur = 0; if (sum < 0) sum = 0;
+                }
+                lock (CtxLock)
+                {
+                    CtxCur[SafeSid(sid)] = cur;
+                    CtxOutSum[SafeSid(sid)] = sum;
+                    CtxTurns[SafeSid(sid)] = turns;
+                }
+            }
+            catch { }
+        }
+
+        private static void SaveCtx(string sid)
+        {
+            try
+            {
+                string p = CtxPath(sid);
+                if (p == null) return;
+                string key = SafeSid(sid);
+                long cur = 0, sum = 0;
+                List<CtxTurn> turns;
+                lock (CtxLock)
+                {
+                    try { cur = CtxCur.ContainsKey(key) ? CtxCur[key] : 0; } catch { cur = 0; }
+                    try { sum = CtxOutSum.ContainsKey(key) ? CtxOutSum[key] : 0; } catch { sum = 0; }
+                    try { turns = CtxTurns.ContainsKey(key) ? new List<CtxTurn>(CtxTurns[key]) : new List<CtxTurn>(); } catch { turns = new List<CtxTurn>(); }
+                }
+                var arr = new JArray();
+                foreach (var t in turns) { try { arr.Add(new JObject { ["in"] = t.In, ["out"] = t.Out }); } catch { } }
+                File.WriteAllText(p, new JObject { ["cur"] = cur, ["out"] = sum, ["turns"] = arr }.ToString(Newtonsoft.Json.Formatting.None));
+            }
+            catch { }
+        }
+
+        /// <summary>Attribute one provider call's tokens to a session's current user turn.</summary>
+        public static void NoteCtx(string sid, long tin, long tout)
+        {
+            try
+            {
+                if (tin < 0) tin = 0; if (tout < 0) tout = 0;
+                if (tin == 0 && tout == 0) return;
+                var s = EnsureSession(sid); // cached fast path when the session is live
+                string key = SafeSid(sid);
+                int turnIdx;
+                lock (s.Msgs) { turnIdx = s.TurnStarts.Count - 1; }
+                lock (CtxLock)
+                {
+                    if (!CtxTurns.ContainsKey(key)) CtxTurns[key] = new List<CtxTurn>();
+                    var list = CtxTurns[key];
+                    if (turnIdx < 0) turnIdx = 0;
+                    while (list.Count <= turnIdx && list.Count < 500) list.Add(new CtxTurn());
+                    if (turnIdx < list.Count)
+                    {
+                        list[turnIdx].In = tin; // latest prompt tokens = current context size
+                        list[turnIdx].Out += tout;
+                    }
+                    CtxCur[key] = tin;
+                    if (!CtxOutSum.ContainsKey(key)) CtxOutSum[key] = 0;
+                    CtxOutSum[key] += tout;
+                }
+                SaveCtx(sid);
+            }
+            catch { }
+        }
+
+        /// <summary>Attribute tokens to the currently active session (enhance/compact have no sid).</summary>
+        public static void NoteCtxCurrent(long tin, long tout)
+        {
+            try
+            {
+                string sid;
+                lock (Sessions) { sid = CurrentSid; }
+                if (string.IsNullOrEmpty(sid)) return;
+                NoteCtx(sid, tin, tout);
+            }
+            catch { }
+        }
+
+        /// <summary>Snapshot for the panel: current context tokens, session completion tokens, user turns.</summary>
+        public static void CtxSnapshot(string sid, out long curIn, out long outSum, out int turns)
+        {
+            curIn = 0; outSum = 0; turns = 0;
+            try
+            {
+                string key = SafeSid(sid);
+                lock (CtxLock)
+                {
+                    try { curIn = CtxCur.ContainsKey(key) ? CtxCur[key] : 0; } catch { curIn = 0; }
+                    try { outSum = CtxOutSum.ContainsKey(key) ? CtxOutSum[key] : 0; } catch { outSum = 0; }
+                }
+                lock (Sessions)
+                {
+                    AgentSession s;
+                    if (CurrentSid != null && Sessions.TryGetValue(CurrentSid, out s))
+                    { lock (s.Msgs) { try { turns = s.TurnStarts.Count; } catch { turns = 0; } } }
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>Snapshot for the currently active session.</summary>
+        public static void CtxSnapshotCurrent(out long curIn, out long outSum, out int turns)
+        {
+            string sid = null;
+            try { lock (Sessions) { sid = CurrentSid; } } catch { sid = null; }
+            CtxSnapshot(sid ?? "default", out curIn, out outSum, out turns);
+        }
+
+        // Drop the oldest per-turn entries (compaction summarized those turns away).
+        private static void DropCtxTurns(string sid, int n)
+        {
+            try
+            {
+                if (n <= 0) return;
+                string key = SafeSid(sid);
+                lock (CtxLock)
+                {
+                    if (!CtxTurns.ContainsKey(key)) return;
+                    var list = CtxTurns[key];
+                    if (n > list.Count) n = list.Count;
+                    list.RemoveRange(0, n);
+                    long sum = 0;
+                    foreach (var t in list) sum += t.Out;
+                    CtxOutSum[key] = sum; // cur (latest prompt) is untouched: next turn refreshes it
+                }
+                SaveCtx(sid);
+            }
+            catch { }
+        }
+
         // Auto-approval policy (Kilo parity): master switch + per-category toggles + an always-allow
         // list persisted to disk. Read-only tools never mutate the model, so they always run;
         // destructive tools always ask unless explicitly allowed.
@@ -642,8 +814,12 @@ namespace Forge.SolidWorks
             return verdict;
         }
 
-        // Auto-compaction controls (Kilo parity: user-set threshold, disableable). Panel settings
-        // cog owns the values; the host just honors them. at <= 0 or off = never compact.
+        // Auto-compaction controls (Kilo parity: user-set context-% threshold, disableable).
+        // Panel settings cog owns the values; the host just honors them. CompactAt is a
+        // PERCENT of the model's context window (10-95, default 60) — NOT a message count.
+        // NOTE: the forge_compact_at storage key is unchanged, so an existing value of 60
+        // (old message-count semantics) carries over as 60% — a sane migration.
+        // Off toggle = never compact.
         public static bool CompactOn = true;
         public static int CompactAt = 60;
 
@@ -738,6 +914,7 @@ namespace Forge.SolidWorks
                 }
             }
             lock (s.Msgs) { AgentMsgCount = s.Msgs.Count; }
+            LoadCtx(sid); // sidecar totals (missing file = zeros, never throws)
             return s;
         }
 
@@ -753,6 +930,7 @@ namespace Forge.SolidWorks
                 // concurrent append can't re-parent (or tear) mid-serialize.
                 lock (s.Msgs) { foreach (var m in s.Msgs) { try { arr.Add(m.DeepClone()); } catch { } } }
                 File.WriteAllText(Path.Combine(AgentDir(), safe + ".json"), arr.ToString(Newtonsoft.Json.Formatting.None));
+                try { SaveCtx(safe); } catch { } // per-session context totals ride alongside
                 // Prune old session files (keep newest 30).
                 try
                 {
@@ -768,6 +946,14 @@ namespace Forge.SolidWorks
         public static void ClearHistory()
         {
             lock (Sessions) { Sessions.Clear(); CurrentSid = null; AgentMsgCount = 0; }
+            // A full clear is a new conversation everywhere: drop context totals too.
+            try
+            {
+                lock (CtxLock) { CtxCur.Clear(); CtxOutSum.Clear(); CtxTurns.Clear(); }
+                foreach (var f in new DirectoryInfo(AgentDir()).GetFiles("*.ctx.json"))
+                    try { f.Delete(); } catch { }
+            }
+            catch { }
             // Fail pending approval gates instead of orphaning them: the panel is gone and no
             // verdict can ever arrive, so waiting runs would hang until their own cancel.
             // Snapshot + resolve OUTSIDE the lock: TrySetResult runs waiter continuations
@@ -821,19 +1007,81 @@ namespace Forge.SolidWorks
                 }
                 RepairTurns(s); // a cut landing on a compacted/shifted span never leaves a dangling index
                 AgentMsgCount = s.Msgs.Count;
+                // Revert recompute: kept history is the session now — trim per-turn token
+                // entries to the kept turns and re-derive totals (next turn refreshes cur).
+                try
+                {
+                    string key = SafeSid(sid);
+                    lock (CtxLock)
+                    {
+                        if (CtxTurns.ContainsKey(key))
+                        {
+                            var list = CtxTurns[key];
+                            int keep = keepTurns < 0 ? 0 : keepTurns;
+                            if (keep < list.Count) list.RemoveRange(keep, list.Count - keep);
+                            long sum = 0;
+                            foreach (var t in list) sum += t.Out;
+                            CtxOutSum[key] = sum;
+                            CtxCur[key] = list.Count > 0 ? list[list.Count - 1].In : 0;
+                        }
+                        else { CtxCur[key] = 0; CtxOutSum[key] = 0; }
+                    }
+                }
+                catch { }
             }
             SaveSession(sid);
         }
 
-        /// <summary>Summarize (never silently drop) the oldest half once history passes the threshold.</summary>
+        /// <summary>Context usage for the %-based auto-compact gate. Reuses the pill's
+        /// tracking: CtxCur(sid) = latest prompt_tokens = current context size, window from
+        /// the same ProviderFactory table as the pill. False = no usable data (missing /
+        /// corrupt sidecar, unknown model with zero recorded usage) — the caller falls back
+        /// to the legacy message-count gate. Never throws.</summary>
+        private static bool TryContextUsagePct(string sid, string model, out double pct, out long cur, out int window)
+        {
+            pct = 0; cur = 0; window = 0;
+            try
+            {
+                string key = SafeSid(sid);
+                lock (CtxLock)
+                {
+                    try { cur = CtxCur.ContainsKey(key) ? CtxCur[key] : 0; } catch { cur = 0; }
+                }
+                if (cur <= 0) return false; // no usage recorded yet for this sid
+                int w = 0;
+                try { var ww = ProviderFactory.ContextWindowFor(model); w = ww.Item1; } catch { w = 0; }
+                if (w <= 0) w = 128000; // approx default, same as the pill
+                window = w;
+                pct = cur * 100.0 / w;
+                return true;
+            }
+            catch { pct = 0; cur = 0; window = 0; return false; }
+        }
+
+        /// <summary>Summarize (never silently drop) the oldest half once session context
+        /// usage reaches the threshold % of the model's window. Falls back to the legacy
+        /// message-count gate when no ctx sidecar data exists — never silently disables.</summary>
         private static async Task CompactHistoryIfNeeded(IProviderClient client, string sid, string model, System.Threading.CancellationToken ct)
         {
             if (!CompactOn) return; // the settings toggle alone disables — no magic numbers
-            int at = CompactAt < 10 ? 10 : CompactAt; // panel clamps to min 10; host matches, never silent 60
+            int at = CompactAt; // percent of the model's context window (panel + host clamp 10-95)
+            if (at < 10) at = 10; if (at > 95) at = 95;
             AgentSession session = EnsureSession(sid);
             int count;
             lock (session.Msgs) { count = session.Msgs.Count; }
-            if (count <= at) return;
+            double pct = 0; long cur = 0; int window = 0;
+            bool havePct = false;
+            try { havePct = TryContextUsagePct(sid, model, out pct, out cur, out window); } catch { havePct = false; pct = 0; }
+            if (havePct)
+            {
+                if (pct < at) return; // below the threshold % — nothing to do
+            }
+            else
+            {
+                // LEGACY FALLBACK: no ctx data for this sid (old session, missing/corrupt
+                // sidecar) — keep the old message-count gate so compaction still fires.
+                if (count <= at) return;
+            }
             int cut = count - 30; // summarize everything except the newest 30
             List<JObject> old;
             lock (session.Msgs) { old = session.Msgs.GetRange(1, cut - 1); } // keep [0]=system
@@ -849,6 +1097,7 @@ namespace Forge.SolidWorks
                         new ProviderOptions { MaxTokens = 800, Model = ProviderFactory.SmallModelForCurrentConfig() ?? model },
                         ct);
                 summary = res != null ? res.Text : null;
+                try { if (res != null) { IntentRate.Note(res.TokIn, res.TokOut); NoteCtx(sid, res.TokIn, res.TokOut); } } catch { }
             }
             catch (OperationCanceledException) { return; } // stop wins: leave history untouched
             catch { summary = null; }
@@ -858,6 +1107,7 @@ namespace Forge.SolidWorks
                 // The history may have been truncated/reverted while the summary was authored;
                 // a stale cut would corrupt the messages. Skip this round instead.
                 if (session.Msgs.Count != count) return;
+                int turnsBefore = session.TurnStarts.Count;
                 int shift;
                 if (string.IsNullOrWhiteSpace(summary))
                 {
@@ -899,6 +1149,9 @@ namespace Forge.SolidWorks
                 session.TurnStarts.Clear();
                 session.TurnStarts.AddRange(kept);
                 RepairTurns(session); // belt-and-braces: the remap above must never desync the next truncate
+                // The summarized turns are gone: drop their per-turn token entries so a
+                // later revert recomputes from what is actually kept.
+                try { DropCtxTurns(sid, turnsBefore - session.TurnStarts.Count); } catch { }
             }
             SaveSession(sid);
         }
@@ -1252,6 +1505,7 @@ namespace Forge.SolidWorks
                     ct.ThrowIfCancellationRequested();
                     if (res == null) throw new Exception("empty provider response");
                     try { IntentRate.Note(res.TokIn, res.TokOut); } catch { }
+                    try { NoteCtx(sid, res.TokIn, res.TokOut); } catch { } // latest prompt = current context size
                     System.Threading.Interlocked.Add(ref _agentTokCount, res.TokIn + res.TokOut);
 
                     if (res.ToolCalls == null || res.ToolCalls.Count == 0)

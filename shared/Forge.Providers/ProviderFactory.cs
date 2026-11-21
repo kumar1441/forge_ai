@@ -107,6 +107,32 @@ namespace Forge.Providers
             return true;
         }
 
+        /// <summary>
+        /// Approximate context window (input tokens) for a model id. Returns
+        /// (window, exact): exact=false means the id was unknown and the 128k
+        /// default applies — the panel labels it "approx". Never throws, never
+        /// probes the network; unknown/custom ids fall through to the default.
+        /// </summary>
+        public static Tuple<int, bool> ContextWindowFor(string model)
+        {
+            try
+            {
+                string m = (model ?? "").Trim().ToLowerInvariant();
+                if (m.Length == 0) return Tuple.Create(128000, false);
+                if (m.Contains("claude")) return Tuple.Create(200000, true); // haiku-4-5/sonnet/opus incl. 4-5 family
+                if (m.Contains("gpt-5")) return Tuple.Create(400000, true);
+                if (m.Contains("gpt-3.5")) return Tuple.Create(16000, true);
+                if (m.Contains("gpt-6") || m.Contains("gpt-4") || System.Text.RegularExpressions.Regex.IsMatch(m, @"(^|[^a-z0-9])o[1-9]([^a-z0-9]|$)")) return Tuple.Create(128000, true); // gpt-6-luna preset, 4-class, o-series
+                if (m.Contains("deepseek-reasoner") || m.Contains("deepseek-r1")) return Tuple.Create(128000, true);
+                if (m.Contains("deepseek")) return Tuple.Create(64000, true); // deepseek-chat/flash family
+                if (m.Contains("llama") || m.Contains("qwen") || m.Contains("mistral") ||
+                    m.Contains("gemma") || m.Contains("phi") || m.Contains("nvidia") ||
+                    m.Contains("ollama")) return Tuple.Create(128000, false); // local/open weights vary by build
+                return Tuple.Create(128000, false);
+            }
+            catch { return Tuple.Create(128000, false); }
+        }
+
         /// <summary>Small model for the current config (rewrite chores), or null to keep current.</summary>
         public static string SmallModelForCurrentConfig()
         {
@@ -124,6 +150,29 @@ namespace Forge.Providers
             string slug = null;
             try { slug = SlugFor(provider, baseUrl); } catch { slug = null; }
             if (string.IsNullOrWhiteSpace(slug)) return "the provider";
+            // User-defined customs show their own label.
+            try
+            {
+                JObject cfg = ReadConfig();
+                var list = cfg != null ? cfg["customProviders"] as JArray : null;
+                if (list != null)
+                {
+                    foreach (var e in list)
+                    {
+                        try
+                        {
+                            var o = e as JObject;
+                            if (o != null && string.Equals(((string)o["slug"] ?? "").Trim(), slug.Trim(), StringComparison.OrdinalIgnoreCase))
+                            {
+                                string lab = ((string)o["label"] ?? "").Trim();
+                                return string.IsNullOrWhiteSpace(lab) ? slug.Trim() : lab;
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
             switch (slug.Trim().ToLowerInvariant())
             {
                 case "deepseek": return "DeepSeek";
@@ -204,11 +253,37 @@ namespace Forge.Providers
         }
 
         // Mirror of the panel's PresetSlugFor: map a stored provider/baseUrl back to the
-        // onboarding slug, since keys are filed per slug.
+        // onboarding slug, since keys are filed per slug. User-defined customs
+        // (config.json customProviders) resolve by exact baseUrl match — or by the slug
+        // itself for hand-edited configs — so a custom key is never filed under, or read
+        // from, a built-in slug. Bad entries are ignored, never thrown.
         private static string SlugFor(string provider, string baseUrl)
         {
             string p = (provider ?? "").Trim().ToLowerInvariant();
             string bu = (baseUrl ?? "").Trim().ToLowerInvariant();
+            try
+            {
+                JObject cfg = ReadConfig();
+                var list = cfg != null ? cfg["customProviders"] as JArray : null;
+                if (list != null)
+                {
+                    foreach (var e in list)
+                    {
+                        try
+                        {
+                            var o = e as JObject;
+                            if (o == null) continue;
+                            string cs = ((string)o["slug"] ?? "").Trim().ToLowerInvariant();
+                            string cb = ((string)o["baseUrl"] ?? "").Trim().TrimEnd('/').ToLowerInvariant();
+                            if (cs.Length == 0 || cb.Length == 0) continue;
+                            if (!string.IsNullOrWhiteSpace(bu) && bu.TrimEnd('/') == cb) return cs;
+                            if (!string.IsNullOrWhiteSpace(p) && p == cs) return cs;
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
             if (p == "anthropic") return "anthropic";
             if (p == "ollama") return "ollama";
             if (bu.Contains("integrate.api.nvidia.com")) return "nvidia";
