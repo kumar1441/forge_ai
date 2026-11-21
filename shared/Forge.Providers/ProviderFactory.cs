@@ -276,6 +276,11 @@ namespace Forge.Providers
                             string cs = ((string)o["slug"] ?? "").Trim().ToLowerInvariant();
                             string cb = ((string)o["baseUrl"] ?? "").Trim().TrimEnd('/').ToLowerInvariant();
                             if (cs.Length == 0 || cb.Length == 0) continue;
+                            // Panel parity (ForgePanel.GetCustomProviders CustomKinds): ignore
+                            // entries whose kind is not openai-compatible/anthropic, so a key
+                            // is never filed under, or resolved from, a non-conforming slug.
+                            string ck = ((string)o["kind"] ?? "").Trim().ToLowerInvariant();
+                            if (ck != "openai-compatible" && ck != "anthropic") continue;
                             if (!string.IsNullOrWhiteSpace(bu) && bu.TrimEnd('/') == cb) return cs;
                             if (!string.IsNullOrWhiteSpace(p) && p == cs) return cs;
                         }

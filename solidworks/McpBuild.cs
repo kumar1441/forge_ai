@@ -95,21 +95,37 @@ namespace Forge.SolidWorks
                 string p = CtxPath(sid);
                 if (p == null) return;
                 string key = SafeSid(sid);
-                long cur = 0, sum = 0;
-                List<CtxTurn> turns;
-                lock (CtxLock)
+                lock (CtxLock) // snapshot + write stay atomic: no torn reads, no torn file
                 {
+                    long cur = 0, sum = 0;
+                    List<CtxTurn> turns;
                     try { cur = CtxCur.ContainsKey(key) ? CtxCur[key] : 0; } catch { cur = 0; }
                     try { sum = CtxOutSum.ContainsKey(key) ? CtxOutSum[key] : 0; } catch { sum = 0; }
                     try { turns = CtxTurns.ContainsKey(key) ? new List<CtxTurn>(CtxTurns[key]) : new List<CtxTurn>(); } catch { turns = new List<CtxTurn>(); }
+                    var arr = new JArray();
+                    foreach (var t in turns) { try { arr.Add(new JObject { ["in"] = t.In, ["out"] = t.Out }); } catch { } }
+                    string payload = new JObject { ["cur"] = cur, ["out"] = sum, ["turns"] = arr }.ToString(Newtonsoft.Json.Formatting.None);
+                    try { string dir = Path.GetDirectoryName(p); if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir); } catch { }
+                    string tmp = p + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                    try
+                    {
+                        File.WriteAllText(tmp, payload);
+                        if (File.Exists(p)) File.Replace(tmp, p, null);
+                        else File.Move(tmp, p);
+                    }
+                    catch
+                    {
+                        try { File.Delete(tmp); } catch { }
+                        throw;
+                    }
                 }
-                var arr = new JArray();
-                foreach (var t in turns) { try { arr.Add(new JObject { ["in"] = t.In, ["out"] = t.Out }); } catch { } }
-                File.WriteAllText(p, new JObject { ["cur"] = cur, ["out"] = sum, ["turns"] = arr }.ToString(Newtonsoft.Json.Formatting.None));
             }
             catch { }
         }
 
+        // Global lock order: Sessions -> CtxLock -> Msgs. Locks are never nested in
+        // conflicting order: read what you need under one lock, release, then take
+        // the next. Nesting is only allowed in global order (Sessions->Msgs, never Msgs->CtxLock).
         /// <summary>Attribute one provider call's tokens to a session's current user turn.</summary>
         public static void NoteCtx(string sid, long tin, long tout)
         {
@@ -120,6 +136,7 @@ namespace Forge.SolidWorks
                 var s = EnsureSession(sid); // cached fast path when the session is live
                 string key = SafeSid(sid);
                 int turnIdx;
+                // Sequential, never nested: snapshot under Msgs, release, then take CtxLock.
                 lock (s.Msgs) { turnIdx = s.TurnStarts.Count - 1; }
                 lock (CtxLock)
                 {
@@ -161,17 +178,26 @@ namespace Forge.SolidWorks
             try
             {
                 string key = SafeSid(sid);
+                // Global order Sessions -> CtxLock -> Msgs, sequential (never nested):
+                // grab the session reference under Sessions, release, then CtxLock, then Msgs.
+                AgentSession snap = null;
+                string wantSid = sid;
+                lock (Sessions)
+                {
+                    try
+                    {
+                        string cur = CurrentSid ?? wantSid;
+                        if (cur != null) Sessions.TryGetValue(cur, out snap);
+                    }
+                    catch { snap = null; }
+                }
                 lock (CtxLock)
                 {
                     try { curIn = CtxCur.ContainsKey(key) ? CtxCur[key] : 0; } catch { curIn = 0; }
                     try { outSum = CtxOutSum.ContainsKey(key) ? CtxOutSum[key] : 0; } catch { outSum = 0; }
                 }
-                lock (Sessions)
-                {
-                    AgentSession s;
-                    if (CurrentSid != null && Sessions.TryGetValue(CurrentSid, out s))
-                    { lock (s.Msgs) { try { turns = s.TurnStarts.Count; } catch { turns = 0; } } }
-                }
+                if (snap != null)
+                { lock (snap.Msgs) { try { turns = snap.TurnStarts.Count; } catch { turns = 0; } } }
             }
             catch { }
         }
@@ -873,6 +899,7 @@ namespace Forge.SolidWorks
             sid = SafeSid(sid);
             AgentSession s;
             string pendingPath = null;
+            string dropCtx = null; // evicted sid whose ctx sidecar is cleaned AFTER the Sessions lock is released
             lock (Sessions)
             {
                 if (Sessions.TryGetValue(sid, out s)) { CurrentSid = sid; AgentMsgCount = s.Msgs.Count; return s; }
@@ -884,9 +911,26 @@ namespace Forge.SolidWorks
                 {
                     string drop = null;
                     foreach (var k in Sessions.Keys) { if (!string.Equals(k, sid, StringComparison.Ordinal)) { drop = k; break; } }
-                    if (drop != null) Sessions.Remove(drop);
+                    if (drop != null)
+                    {
+                        Sessions.Remove(drop);
+                        dropCtx = drop; // Global order: release Sessions first, then take CtxLock below
+                    }
                 }
                 try { pendingPath = Path.Combine(AgentDir(), sid + ".json"); } catch { pendingPath = null; }
+            }
+            if (dropCtx != null)
+            {
+                try
+                {
+                    lock (CtxLock)
+                    {
+                        CtxCur.Remove(dropCtx);
+                        CtxOutSum.Remove(dropCtx);
+                        CtxTurns.Remove(dropCtx);
+                    }
+                }
+                catch { }
             }
             // File IO stays OUTSIDE the Sessions lock: holding it across disk reads stalls
             // every other chat (and risks stalling the UI thread on a locked/quota file).
@@ -987,6 +1031,8 @@ namespace Forge.SolidWorks
             if (string.IsNullOrWhiteSpace(sid)) return;
             if (keepTurns < 0) return; // garbage keep must never wipe: only >= 0 is meaningful
             var s = EnsureSession(sid);
+            // Global order: Msgs mutation first (under Msgs), release, then CtxLock — never nested.
+            bool wipedToSystem = false;
             lock (s.Msgs)
             {
                 if (keepTurns <= 0)
@@ -996,6 +1042,7 @@ namespace Forge.SolidWorks
                     s.Msgs.Clear();
                     s.TurnStarts.Clear();
                     if (sys != null) s.Msgs.Add(sys);
+                    wipedToSystem = true;
                 }
                 else if (keepTurns < s.TurnStarts.Count)
                 {
@@ -1007,28 +1054,34 @@ namespace Forge.SolidWorks
                 }
                 RepairTurns(s); // a cut landing on a compacted/shifted span never leaves a dangling index
                 AgentMsgCount = s.Msgs.Count;
-                // Revert recompute: kept history is the session now — trim per-turn token
-                // entries to the kept turns and re-derive totals (next turn refreshes cur).
-                try
-                {
-                    string key = SafeSid(sid);
-                    lock (CtxLock)
-                    {
-                        if (CtxTurns.ContainsKey(key))
-                        {
-                            var list = CtxTurns[key];
-                            int keep = keepTurns < 0 ? 0 : keepTurns;
-                            if (keep < list.Count) list.RemoveRange(keep, list.Count - keep);
-                            long sum = 0;
-                            foreach (var t in list) sum += t.Out;
-                            CtxOutSum[key] = sum;
-                            CtxCur[key] = list.Count > 0 ? list[list.Count - 1].In : 0;
-                        }
-                        else { CtxCur[key] = 0; CtxOutSum[key] = 0; }
-                    }
-                }
-                catch { }
             }
+            // Revert recompute: kept history is the session now — trim per-turn token
+            // entries to the kept turns and re-derive totals (next turn refreshes cur).
+            try
+            {
+                string key = SafeSid(sid);
+                lock (CtxLock)
+                {
+                    if (wipedToSystem)
+                    {
+                        CtxTurns[key] = new List<CtxTurn>();
+                        CtxCur[key] = 0;
+                        CtxOutSum[key] = 0;
+                    }
+                    else if (CtxTurns.ContainsKey(key))
+                    {
+                        var list = CtxTurns[key];
+                        int keep = keepTurns < 0 ? 0 : keepTurns;
+                        if (keep < list.Count) list.RemoveRange(keep, list.Count - keep);
+                        long sum = 0;
+                        foreach (var t in list) sum += t.Out;
+                        CtxOutSum[key] = sum;
+                        CtxCur[key] = list.Count > 0 ? list[list.Count - 1].In : 0;
+                    }
+                    else { CtxCur[key] = 0; CtxOutSum[key] = 0; }
+                }
+            }
+            catch { }
             SaveSession(sid);
         }
 
@@ -1080,18 +1133,27 @@ namespace Forge.SolidWorks
             {
                 // LEGACY FALLBACK: no ctx data for this sid (old session, missing/corrupt
                 // sidecar) — keep the old message-count gate so compaction still fires.
-                if (count <= at) return;
+                // `at` is a context-window PERCENT (10-95), never a message count: the legacy
+                // gate uses a fixed message-count floor independent of `at`.
+                if (count <= 60) return;
             }
+            if (count <= 31) return; // too small to compact: GetRange(1, cut-1) would throw below
             int cut = count - 30; // summarize everything except the newest 30
             List<JObject> old;
             lock (session.Msgs) { old = session.Msgs.GetRange(1, cut - 1); } // keep [0]=system
             string summary = null;
             try
             {
+                // Bound the compact input like the manual path (panel.html digest.slice(0, 12000)):
+                // all-but-30 turns of raw history is otherwise unbounded on the wire.
+                string oldJson = null;
+                try { oldJson = new JArray(old.ToArray()).ToString(Newtonsoft.Json.Formatting.None); } catch { oldJson = null; }
+                if (string.IsNullOrEmpty(oldJson)) return;
+                if (oldJson.Length > 12000) oldJson = oldJson.Substring(0, 12000) + "…(truncated)";
                 var msgs = new List<ChatMessage>
                 {
                     new ChatMessage { Role = "system", Content = "Summarize this CAD agent history into durable facts: what was built, key dims/decisions, open issues. Plain text, under 200 words." },
-                    new ChatMessage { Role = "user", Content = new JArray(old.ToArray()).ToString(Newtonsoft.Json.Formatting.None) }
+                    new ChatMessage { Role = "user", Content = oldJson }
                 };
                     var res = await client.CompleteAsync(msgs,
                         new ProviderOptions { MaxTokens = 800, Model = ProviderFactory.SmallModelForCurrentConfig() ?? model },

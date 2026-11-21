@@ -74,6 +74,8 @@ namespace Forge.SolidWorks
                 Marshal.ReleaseComObject(_taskpaneView);
                 _taskpaneView = null;
             }
+            try { if (_panel != null) _panel.Shutdown(); } catch { } // hide + dispose tray icon, free owned HICON: no ghost icon after unload
+            try { if (_panel != null) _panel.Dispose(); } catch { } // fires Disposed (idempotent with Shutdown) + releases the WebView2 host
             _panel = null;
             SwApp = null;
             GC.Collect();

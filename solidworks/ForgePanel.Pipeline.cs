@@ -2900,6 +2900,7 @@ namespace Forge.SolidWorks
         private async Task<bool> RunViaPipeline(string intent, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken), string sid = null)
         {
             ct.ThrowIfCancellationRequested(); // stop/new-chat wins before any COM or cloud work
+            string myId = _currentRunId; // a newer Generate owns the panel: stay silent when stale
             var doc = App?.ActiveDoc as IModelDoc2;
             if (doc == null) return false;   // no doc: let the legacy path show its guidance
 
@@ -2908,6 +2909,7 @@ namespace Forge.SolidWorks
             // property/health check. Same guard as Harness.cs IntentDispatch, kept in sync.
             if (HonestLimits.IsPressureRatingQuestion(intent))
             {
+                if (myId != _currentRunId) return true; // superseded: don't attribute our answer to the new run
                 Send(new { type = "answer", answer = HonestLimits.PressureRatingLimitMessage });
                 try { NotifyToast("Forge done", HonestLimits.PressureRatingLimitMessage); } catch { }
                 return true;
@@ -2916,6 +2918,7 @@ namespace Forge.SolidWorks
             // test-loop wrong-route fix (flange-17-why-leaking): same guard as Harness.cs IntentDispatch, kept in sync.
             if (HonestLimits.IsLeakDiagnosisQuestion(intent))
             {
+                if (myId != _currentRunId) return true; // superseded: don't attribute our answer to the new run
                 Send(new { type = "answer", answer = HonestLimits.LeakDiagnosisLimitMessage });
                 try { NotifyToast("Forge done", HonestLimits.LeakDiagnosisLimitMessage); } catch { }
                 return true;
@@ -2927,6 +2930,7 @@ namespace Forge.SolidWorks
             // with Harness.cs IntentDispatch.
             if (HonestLimits.IsWeldRequest(intent))
             {
+                if (myId != _currentRunId) return true; // superseded: don't attribute our answer to the new run
                 Send(new { type = "answer", answer = HonestLimits.WeldLimitMessage });
                 try { NotifyToast("Forge done", HonestLimits.WeldLimitMessage); } catch { }
                 return true;
@@ -2937,6 +2941,7 @@ namespace Forge.SolidWorks
             // above, kept in sync with Harness.cs IntentDispatch.
             if (HonestLimits.IsGenerativeSynthesisRequest(intent))
             {
+                if (myId != _currentRunId) return true; // superseded: don't attribute our answer to the new run
                 Send(new { type = "answer", answer = HonestLimits.GenerativeSynthesisLimitMessage });
                 try { NotifyToast("Forge done", HonestLimits.GenerativeSynthesisLimitMessage); } catch { }
                 return true;
@@ -2947,6 +2952,7 @@ namespace Forge.SolidWorks
             // IntentDispatch. This scenario's own expected behavior IS to clarify, not act.
             if (HonestLimits.IsVagueAestheticRequest(intent))
             {
+                if (myId != _currentRunId) return true; // superseded: don't attribute our answer to the new run
                 Send(new { type = "answer", answer = HonestLimits.VagueAestheticClarifyMessage });
                 try { NotifyToast("Forge done", HonestLimits.VagueAestheticClarifyMessage); } catch { }
                 return true;
@@ -2983,11 +2989,13 @@ namespace Forge.SolidWorks
             // before the cloud parse, same shape as the HonestLimits guards above.
             if (GetFaces.IsIntent(intent))
             {
+                if (myId != _currentRunId) return true; // superseded before starting: the new run owns the panel
                 OpCounter.Increment();
                 ForgeData.RunBegin("get_faces", ForgeData.Mask(intent, IntentLayer.ComponentNames(doc)), 0);
                 Func<string, string, string, string, Task> emitF = async (agent, gloss, state, result) =>
-                { Send(new { type = "step", agent, gloss, state, result }); await Task.Delay(60); };
+                { if (myId != _currentRunId) return; Send(new { type = "step", agent, gloss, state, result }); await Task.Delay(60); };
                 var fr = await GetFaces.Run(App, doc, intent, emitF);
+                if (myId != _currentRunId) return true; // superseded: don't attribute our answer to the new run
                 if (fr.Error != null)
                 { LogRun("get_faces", intent, doc, "error", false, 0, errorCode: "get_faces"); Send(new { type = "error", message = fr.Error }); try { NotifyToast("Forge failed", fr.Error); } catch { } return true; }
                 LogRun("get_faces", intent, doc, "executed", true, fr.Total);
@@ -3001,11 +3009,13 @@ namespace Forge.SolidWorks
             // route both AUTHORITATIVELY before the cloud parse for the same reason.
             if (GetEdges.IsIntent(intent))
             {
+                if (myId != _currentRunId) return true; // superseded before starting: the new run owns the panel
                 OpCounter.Increment();
                 ForgeData.RunBegin("get_edge_length", ForgeData.Mask(intent, IntentLayer.ComponentNames(doc)), 0);
                 Func<string, string, string, string, Task> emitE = async (agent, gloss, state, result) =>
-                { Send(new { type = "step", agent, gloss, state, result }); await Task.Delay(60); };
+                { if (myId != _currentRunId) return; Send(new { type = "step", agent, gloss, state, result }); await Task.Delay(60); };
                 var er = await GetEdges.Run(App, doc, intent, emitE);
+                if (myId != _currentRunId) return true; // superseded: don't attribute our answer to the new run
                 if (er.Error != null)
                 { LogRun("get_edge_length", intent, doc, "error", false, 0, errorCode: "get_edge_length"); Send(new { type = "error", message = er.Error }); return true; }
                 LogRun("get_edge_length", intent, doc, "executed", true, er.EdgeCount);
@@ -3024,11 +3034,13 @@ namespace Forge.SolidWorks
             // own "diagnose"/"what's wrong"/"audit" wording.
             if (DetectFileHealth.IsIntent(intent))
             {
+                if (myId != _currentRunId) return true; // superseded before starting: the new run owns the panel
                 OpCounter.Increment();
                 ForgeData.RunBegin("detect_file_health", ForgeData.Mask(intent, IntentLayer.ComponentNames(doc)), 0);
                 Func<string, string, string, string, Task> emitFH = async (agent, gloss, state, result) =>
-                { Send(new { type = "step", agent, gloss, state, result }); await Task.Delay(60); };
+                { if (myId != _currentRunId) return; Send(new { type = "step", agent, gloss, state, result }); await Task.Delay(60); };
                 var fhr = await DetectFileHealth.Run(App, doc, intent, emitFH);
+                if (myId != _currentRunId) return true; // superseded: don't attribute our answer to the new run
                 if (fhr.Error != null)
                 { LogRun("detect_file_health", intent, doc, "error", false, 0, errorCode: "detect_file_health"); Send(new { type = "error", message = fhr.Error }); return true; }
                 LogRun("detect_file_health", intent, doc, "executed", true, fhr.RebuildProblems);

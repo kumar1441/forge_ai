@@ -2389,10 +2389,6 @@
     }
 
     // FDL 4.4/4.5/4.7 — the batch-5 components (a type without a renderer is a bug)
-    else if (m.type === "confirm") { finish(renderConfirm(m)); }
-    else if (m.type === "report") { finish(renderReport(m)); }
-    else if (m.type === "share") { finish(renderShare(m)); }
-    else if (m.type === "presence") { renderPresence(m); }
     else if (m.type === "firstrun") { if (!onboardHasConfig) showOnboard(); } // host sends firstrun every launch: only fresh (no stored provider yet) may see onboarding
     else if (m.type === "telemetryState") { if (telmTgl && typeof m.on === "boolean") { telmTgl.checked = m.on; try { safeSet("forge_telm", telmTgl.checked ? "1" : "0"); } catch (e) {} } }
 

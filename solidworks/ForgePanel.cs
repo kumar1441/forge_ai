@@ -33,6 +33,9 @@ namespace Forge.SolidWorks
         private readonly System.Collections.Generic.List<string> _mentionedFiles = new System.Collections.Generic.List<string>();  // @-mentioned paths for the current prompt
         private Timer _bifrost;        // polls the cross-tool feed for changes from other tools
         private NotifyIcon _notify;      // OS taskbar icon for approval/done/teammate toasts (WinForms, no new packages)
+        private IntPtr _notifyHicon = IntPtr.Zero; // owned HICON from Bitmap.GetHicon (Icon.FromHandle never owns it): freed in Shutdown
+        [DllImport("user32.dll")]
+        private static extern bool DestroyIcon(IntPtr hIcon);
         private string _bifrostSince;  // poll cursor (newest event seen)
         private readonly System.Collections.Generic.HashSet<string> _bifrostSeen = new System.Collections.Generic.HashSet<string>();
         private string _lastBoardChange; // most recent cross-tool board change (for impact follow-ups)
@@ -358,7 +361,7 @@ namespace Forge.SolidWorks
                 }
                 else if (action == "toolPolicyGet")   // per-tool Ask dropdowns: union of live tools + seen tools + explicit policy
                 {
-                    try { SendToolPolicy(); } catch { }
+                    try { await SendToolPolicyAsync(); } catch { }
                 }
                 else if (action == "toolPolicySet")   // {tool, mode: allow|ask|deny|clear} -> persist + refresh rules+toolPolicy
                 {
@@ -374,7 +377,7 @@ namespace Forge.SolidWorks
                             else if (m == "allow" || m == "ask" || m == "deny") McpBuild.SetToolPolicy(t.Trim(), m);
                             else { Send(new { type = "error", message = "Unknown tool policy mode '" + mode + "' — use allow, ask, deny, or clear." }); return; }
                             Send(new { type = "rules", allow = McpBuild.AlwaysList(), deny = McpBuild.DenyList() });
-                            try { SendToolPolicy(); } catch { }
+                            try { await SendToolPolicyAsync(); } catch { }
                         }
                     }
                     catch { }
@@ -710,8 +713,6 @@ namespace Forge.SolidWorks
                     try { McpBuild.CardSender = null; } catch { } // drop the dead run's card sender with its approvals
                     Send(new { type = "attachCleared" });
                 }
-                else if (action == "highlight") HighlightByName(msg);
-                else if (action == "clearHighlight") { var m = SwAddin.SwApp?.ActiveDoc as IModelDoc2; if (m != null) m.ClearSelection2(true); }
                 else if (action == "feedback")
                 {
                     int? s = null; string t = null;
@@ -778,7 +779,11 @@ namespace Forge.SolidWorks
                     string key = null, provider = null;
                     try { key = (string)msg.key; } catch { }
                     try { provider = (string)msg.provider; } catch { }
-                    string fslug = (provider ?? "").Trim().ToLowerInvariant();
+                    // Sanitize at entry (panel parity): key/config lookups below must use
+                    // the same slug PresetSlugFor returns, never the raw pasted text.
+                    string fslug = SanitizeCustomSlug(provider);
+                    if (string.IsNullOrWhiteSpace(fslug))
+                    { Send(new { type = "models", models = new string[0], error = "Unknown provider '" + provider + "' — pick a provider from the dropdown, then Refresh." }); return; }
                     var preset = ProviderPresetFor(fslug);
                     // Anthropic-wire endpoints (built-in or anthropic-kind custom) don't serve an
                     // OpenAI-style Bearer /models list — fail fast with guidance instead of a raw HTTP error.
@@ -819,7 +824,11 @@ namespace Forge.SolidWorks
                     try { provider = (string)msg.provider; } catch { }
                     try
                     {
-                        string slug = (provider ?? "").Trim().ToLowerInvariant();
+                        // Sanitize at entry (panel parity): KeyStore/config keys are read
+                        // back via PresetSlugFor (sanitized), so switch on the same slug.
+                        string slug = SanitizeCustomSlug(provider);
+                        if (string.IsNullOrWhiteSpace(slug))
+                            throw new Exception("Unknown provider '" + provider + "'.");
                         if (Array.IndexOf(KnownSlugs, slug) < 0 && FindCustomProvider(slug) == null)
                             throw new Exception("Unknown provider '" + provider + "'.");
                         var preset = ProviderPresetFor(slug);
@@ -841,6 +850,9 @@ namespace Forge.SolidWorks
                         try { remembered = (string)cfg["model_" + slug]; } catch { }
                         cfg["model"] = !string.IsNullOrWhiteSpace(remembered) ? remembered.Trim() : preset.Model;
                         WriteForgeConfig(cfg);
+                        // New window, new budget: drop the old provider's context totals so the
+                        // pill recomputes from zero instead of old-cur/new-window (spurious % + compact).
+                        try { ResetCtxForModelSwitch(); } catch { }
                         string p = preset.Provider;
                         string keptModel = null;
                         try { keptModel = (string)cfg["model"]; } catch { }
@@ -885,6 +897,9 @@ namespace Forge.SolidWorks
                         }
                         catch { }
                         WriteForgeConfig(cfg);
+                        // New window, new budget: drop the old model's context totals so the
+                        // pill recomputes from zero instead of old-cur/new-window (spurious % + compact).
+                        try { ResetCtxForModelSwitch(); } catch { }
                         string sp = (string)cfg["provider"], sbu = (string)cfg["baseUrl"];
                         string smslug = PresetSlugFor(sp, sbu);
                         Send(new { type = "provider", slug = smslug, provider = sp, baseUrl = sbu, model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(smslug, sp)), customModels = GetCustomModels(smslug), customProviders = GetCustomProviders() });
@@ -1029,8 +1044,8 @@ namespace Forge.SolidWorks
             Send(new { type = "mcpConfig", enabled = enabled, timeoutMs = tmo, command = cmd, args = args, running = running, servers = servers });
         }
 
-        /// <summary>Send the per-tool policy snapshot: union of live tools + seen tools, plus explicit policy. Never throws.</summary>
-        private void SendToolPolicy()
+        /// <summary>Send the per-tool policy snapshot: cached seen tools first, then a bounded live refresh. Never blocks the message thread on uvx download / RPC and never throws.</summary>
+        private async System.Threading.Tasks.Task SendToolPolicyAsync()
         {
             try
             {
@@ -1043,25 +1058,6 @@ namespace Forge.SolidWorks
                     if (seenTools != null) foreach (var s in seenTools) { try { if (!string.IsNullOrWhiteSpace(s) && seen.Add(s.Trim())) names.Add(s.Trim()); } catch { } }
                 }
                 catch { }
-                try
-                {
-                    Newtonsoft.Json.Linq.JArray live = null;
-                    try { live = McpBridge.ListAllToolsAsync(System.Threading.CancellationToken.None).GetAwaiter().GetResult(); } catch { live = null; }
-                    if (live != null) foreach (var t in live)
-                    {
-                        try
-                        {
-                            var o = t as Newtonsoft.Json.Linq.JObject;
-                            string n = o != null ? (string)o["name"] : (string)t;
-                            if (string.IsNullOrWhiteSpace(n)) continue;
-                            n = n.Trim();
-                            if (seen.Add(n)) names.Add(n);
-                        }
-                        catch { }
-                    }
-                }
-                catch { }
-                try { names.Sort(System.StringComparer.OrdinalIgnoreCase); } catch { }
                 Newtonsoft.Json.Linq.JObject pol = new Newtonsoft.Json.Linq.JObject();
                 try
                 {
@@ -1069,7 +1065,44 @@ namespace Forge.SolidWorks
                     if (dict != null) foreach (var kv in dict) { try { pol[kv.Key] = kv.Value; } catch { } }
                 }
                 catch { }
-                Send(new { type = "toolPolicy", tools = new Newtonsoft.Json.Linq.JArray(names.ToArray()), policy = pol });
+                // Serve the cache first: the panel renders instantly even when the MCP server is cold.
+                try
+                {
+                    var cached = new System.Collections.Generic.List<string>(names);
+                    try { cached.Sort(System.StringComparer.OrdinalIgnoreCase); } catch { }
+                    Send(new { type = "toolPolicy", tools = new Newtonsoft.Json.Linq.JArray(cached.ToArray()), policy = pol });
+                }
+                catch { }
+                // Bounded live refresh (fire-and-await with timeout, never an unbounded block):
+                // uvx download / 60s RPC must not stall the OnWebMessage thread.
+                try
+                {
+                    Newtonsoft.Json.Linq.JArray live = null;
+                    try
+                    {
+                        using (var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(5)))
+                        { try { live = await McpBridge.ListAllToolsAsync(cts.Token).ConfigureAwait(false); } catch { live = null; } }
+                    }
+                    catch { live = null; }
+                    if (live == null) return;
+                    bool grew = false;
+                    foreach (var t in live)
+                    {
+                        try
+                        {
+                            var o = t as Newtonsoft.Json.Linq.JObject;
+                            string n = o != null ? (string)o["name"] : (string)t;
+                            if (string.IsNullOrWhiteSpace(n)) continue;
+                            n = n.Trim();
+                            if (seen.Add(n)) { names.Add(n); grew = true; }
+                        }
+                        catch { }
+                    }
+                    if (!grew) return;
+                    try { names.Sort(System.StringComparer.OrdinalIgnoreCase); } catch { }
+                    Send(new { type = "toolPolicy", tools = new Newtonsoft.Json.Linq.JArray(names.ToArray()), policy = pol });
+                }
+                catch { }
             }
             catch { }
         }
@@ -1282,7 +1315,11 @@ namespace Forge.SolidWorks
 
         private static void SaveProviderKey(string provider, string key, string model = null)
         {
-            string slug = (provider ?? "").Trim().ToLowerInvariant();
+            // Sanitize at entry (panel parity): reads file keys via PresetSlugFor
+            // (sanitized), so writes must use the same slug or keys strand.
+            string slug = SanitizeCustomSlug(provider);
+            if (string.IsNullOrWhiteSpace(slug))
+                throw new Exception("Unknown provider '" + provider + "'.");
             if (Array.IndexOf(KnownSlugs, slug) < 0 && FindCustomProvider(slug) == null)
                 throw new Exception("Unknown provider '" + provider + "'.");
             var preset = ProviderPresetFor(slug);
@@ -1704,6 +1741,14 @@ namespace Forge.SolidWorks
             if (GetCustomProviders().Count >= 20) throw new Exception("Custom provider cap reached (20) — remove one first.");
             var n = new JObject { ["slug"] = s, ["kind"] = k, ["baseUrl"] = bu };
             string lab = (label ?? "").Trim();
+            // Label impersonation guard: a custom label matching a built-in provider display name
+            // (ProviderFactory.DisplayNameFor: DeepSeek/OpenRouter/NVIDIA/OpenAI/Anthropic/Ollama)
+            // would masquerade in the picker. Reject case-insensitively like the other validations.
+            if (!string.IsNullOrWhiteSpace(lab))
+            {
+                foreach (var b in new string[] { "DeepSeek", "OpenRouter", "NVIDIA", "OpenAI", "Anthropic", "Ollama" })
+                    if (string.Equals(lab, b, StringComparison.OrdinalIgnoreCase)) throw new Exception("'" + lab + "' is a built-in provider name — pick a different label.");
+            }
             if (!string.IsNullOrWhiteSpace(lab)) n["label"] = lab.Length > 60 ? lab.Substring(0, 60) : lab;
             raw.Add(n);
             WriteForgeConfigAtomic(cfg);
@@ -2822,11 +2867,15 @@ namespace Forge.SolidWorks
                 {
                     string dir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
                     string bmpPath = Path.Combine(dir ?? "", "forge.bmp");
-                    if (File.Exists(bmpPath))
-                    {
-                        using (var bmp = new System.Drawing.Bitmap(bmpPath))
-                            n.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon());
-                    }
+                        if (File.Exists(bmpPath))
+                        {
+                            using (var bmp = new System.Drawing.Bitmap(bmpPath))
+                            {
+                                IntPtr h = bmp.GetHicon();
+                                n.Icon = System.Drawing.Icon.FromHandle(h);
+                                _notifyHicon = h; // FromHandle never takes ownership: Shutdown must DestroyIcon it
+                            }
+                        }
                 }
                 catch { }
                 if (n.Icon == null) { try { n.Icon = System.Drawing.SystemIcons.Information; } catch { } }
@@ -2834,7 +2883,25 @@ namespace Forge.SolidWorks
                 n.Visible = true;
                 try { n.BalloonTipClicked += (s, e) => { try { _web.Focus(); } catch { } }; } catch { }
                 _notify = n;
-                try { Disposed += (s, e) => { try { var old = _notify; _notify = null; if (old != null) { old.Visible = false; old.Dispose(); } } catch { } }; } catch { }
+                try { Disposed += (s, e) => { try { Shutdown(); } catch { } }; } catch { }
+            }
+            catch { }
+        }
+
+        // Task-pane teardown (SwAddin.DisconnectFromSW calls this, then Dispose, before
+        // nulling the panel): the Disposed event alone never fired there, leaving a ghost
+        // tray icon plus a leaked HICON (Icon.FromHandle never owns its handle, so the
+        // wrapper's Dispose can never free it). Hide + dispose the NotifyIcon and destroy
+        // the owned HICON; the shared SystemIcons fallback holds no owned handle (Zero)
+        // and is never destroyed. Idempotent, never throws.
+        public void Shutdown()
+        {
+            try
+            {
+                var old = _notify; _notify = null;
+                IntPtr h = _notifyHicon; _notifyHicon = IntPtr.Zero;
+                try { if (old != null) { old.Visible = false; old.Dispose(); } } catch { }
+                try { if (h != IntPtr.Zero) DestroyIcon(h); } catch { }
             }
             catch { }
         }
@@ -2890,6 +2957,68 @@ namespace Forge.SolidWorks
                         web.CoreWebView2?.PostWebMessageAsString(json);
                 }
                 catch { /* control torn down mid-post */ }
+            }
+            catch { }
+        }
+
+        // Model/provider switch: the pill's % is cur/ContextWindowFor(currentModel) with
+        // cur recorded under the OLD model, so a switch to a smaller window spikes the %
+        // and can trip spurious auto-compact. Reset the current session's context totals
+        // (McpBuild's own clear path: CtxCur/CtxOutSum/CtxTurns under its CtxLock, sidecar
+        // re-saved) so the new window starts clean. History (Msgs) is untouched — minimum:
+        // reset, no per-window snapshots. McpBuild exposes no per-sid ctx reset
+        // (ClearHistory would also wipe every conversation), so touch the current-sid
+        // entries under McpBuild's own lock; any reflection shape change degrades to a
+        // no-op, never a throw.
+        // Global lock order (McpBuild): Sessions -> CtxLock -> Msgs. Sequential only —
+        // read the sid under Sessions, release, then take CtxLock. Never nest.
+        private static void ResetCtxForModelSwitch()
+        {
+            try
+            {
+                var t = typeof(McpBuild);
+                const BindingFlags bf = BindingFlags.NonPublic | BindingFlags.Static;
+                var fLock = t.GetField("CtxLock", bf);
+                var fCur = t.GetField("CtxCur", bf);
+                var fOut = t.GetField("CtxOutSum", bf);
+                var fTurns = t.GetField("CtxTurns", bf);
+                var fSessions = t.GetField("Sessions", bf);
+                var fCurSid = t.GetField("CurrentSid", bf);
+                var mSafe = t.GetMethod("SafeSid", bf);
+                var mSave = t.GetMethod("SaveCtx", bf);
+                if (fLock == null || fCur == null || fOut == null || fTurns == null
+                    || fSessions == null || fCurSid == null || mSafe == null || mSave == null) return;
+                object sessions = fSessions.GetValue(null);
+                object ctxLock = fLock.GetValue(null);
+                if (sessions == null || ctxLock == null) return;
+                string sid;
+                lock (sessions) { sid = fCurSid.GetValue(null) as string; } // release before taking CtxLock
+                string key = mSafe.Invoke(null, new object[] { sid }) as string;
+                if (string.IsNullOrEmpty(key)) key = "default";
+                lock (ctxLock)
+                {
+                    try
+                    {
+                        var cur = fCur.GetValue(null) as System.Collections.IDictionary;
+                        var sum = fOut.GetValue(null) as System.Collections.IDictionary;
+                        var turns = fTurns.GetValue(null) as System.Collections.IDictionary;
+                        if (cur == null || sum == null || turns == null) return;
+                        // Fresh empty per-turn list of McpBuild's private CtxTurn element type.
+                        object emptyTurns;
+                        try
+                        {
+                            var elem = t.GetNestedType("CtxTurn", BindingFlags.NonPublic);
+                            if (elem == null) return;
+                            emptyTurns = Activator.CreateInstance(typeof(List<>).MakeGenericType(elem));
+                        }
+                        catch { return; }
+                        turns[key] = emptyTurns;
+                        cur[key] = 0L;
+                        sum[key] = 0L;
+                    }
+                    catch { return; }
+                }
+                try { mSave.Invoke(null, new object[] { sid }); } catch { } // re-persist the zeroed sidecar (locks internally)
             }
             catch { }
         }
