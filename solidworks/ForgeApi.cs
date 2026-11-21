@@ -192,6 +192,7 @@ namespace Forge.SolidWorks
         public static async Task<List<BifrostEvent>> PollBifrost(string project, string since)
         {
             var list = new List<BifrostEvent>();
+            try { if (!Telemetry.Enabled) return list; } catch { return list; } // defense in depth: no background egress when sharing is off, regardless of caller
             string url = BaseUrl + "/api/bifrost/feed?project=" + Uri.EscapeDataString(project);
             if (!string.IsNullOrEmpty(since)) url += "&since=" + Uri.EscapeDataString(since);
 

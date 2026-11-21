@@ -24,6 +24,7 @@ namespace Forge.SolidWorks
         // ---- update channel: returns a "new build available" notice if the server version is newer, else null ----
         public static async Task<string> UpdateNotice()
         {
+            try { if (!Telemetry.Enabled) return null; } catch { return null; } // defense in depth: no background egress when sharing is off, regardless of caller
             try
             {
                 var j = await Cloud.GetJsonAsync("https://www.getforge.build/api/version");

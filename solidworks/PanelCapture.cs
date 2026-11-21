@@ -63,16 +63,33 @@ namespace Forge.SolidWorks
             if (!Enabled) return;
             try
             {
+                // API keys must never land in the capture log even under this opt-in dev flag:
+                // scrub any "key" field recursively before serializing (saveKey/fetchModels carry raw keys).
                 var row = new
                 {
                     ts = DateTime.UtcNow.ToString("o"),
                     kind,
-                    data = payload
+                    data = ScrubSecrets(payload)
                 };
                 string line = JsonConvert.SerializeObject(row);
                 lock (Gate) { File.AppendAllText(File_(), line + Environment.NewLine); }
             }
             catch { /* observability is best-effort — never disturb the panel */ }
+        }
+
+        private static object ScrubSecrets(object payload)
+        {
+            try
+            {
+                var jt = payload == null ? null : Newtonsoft.Json.Linq.JToken.FromObject(payload);
+                if (jt == null) return payload;
+                foreach (var t in jt.SelectTokens("$..key")) // matches at any depth
+                {
+                    try { t.Replace("***"); } catch { }
+                }
+                return jt;
+            }
+            catch { return "[unserializable]"; }
         }
     }
 }

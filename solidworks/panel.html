@@ -24,7 +24,7 @@
     --amber:#F5C169; --amber-soft:rgba(245,193,105,.10);
     --red:#F27D72;   --red-soft:rgba(242,125,114,.10);
     --sky:#7AA5FF;   --sky-soft:rgba(122,165,255,.12);
-    --violet:#B794F6;--violet-soft:rgba(183,148,246,.12);
+    --violet:#B794F6;
   }
   /* FDL v1 light (override only — tools that force it) */
   [data-theme="light"] {
@@ -124,8 +124,6 @@
   .card.review { background:var(--amber-soft); border-color:rgba(245,193,105,.30); }
   .card.review .tag { background:var(--amber-soft); color:var(--amber); border-color:rgba(245,193,105,.30); }
   .card.bifrost { background:var(--sky-soft); border-color:rgba(122,165,255,.30); }
-  .card.team { background:var(--violet-soft); border-color:rgba(183,148,246,.30); }
-  .card.team .tag { background:var(--violet-soft); color:var(--violet); border-color:rgba(183,148,246,.30); }
 
   /* FDL 4.4 ConfirmGate — the trust component (ember left border) */
   .gate { border-left:2px solid var(--accent); }
@@ -294,9 +292,10 @@
   .compact .chead { padding:8px 12px; cursor:pointer; color:var(--faint); font-size:11.5px; user-select:none; }
   .compact .chead:hover { color:var(--soft); }
   .compact .cbody { padding:0 8px 8px; display:flex; flex-direction:column; gap:8px; }
-  .compact .csum { padding:2px 12px 6px; color:var(--soft); white-space:pre-wrap; font-size:12px; }
+    .compact .csum { padding:2px 12px 6px; color:var(--soft); white-space:pre-wrap; font-size:12px; }
+    .transcript.hide-thinks .think { display:none; }
 
-  /* streaming chain-of-thought (Kilo-style thinking block) */
+    /* streaming chain-of-thought (Kilo-style thinking block) */
   .think { border:1px solid var(--line); border-radius:12px; background:var(--surface);
     font-size:12.5px; color:var(--soft); overflow:hidden; }
   .think .thead { padding:8px 12px; cursor:pointer; display:flex; align-items:center; gap:8px;
@@ -469,6 +468,14 @@
       <div class="rules"><span class="rlab">Always allowed</span><span class="rlist" id="allowlist"><span class="rempty">none</span></span></div>
       <div class="rules"><span class="rlab">Denied</span><span class="rlist" id="denylist"><span class="rempty">none</span></span></div>
       <div class="ssep"></div>
+      <div class="srow"><label>MCP server</label>
+        <span class="toggle"><input type="checkbox" id="mcptgl" checked title="Enable the SolidWorks-MCP helper server" /><span class="tk"></span></span>
+      </div>
+      <div class="srow" id="mcptmorow"><label>Timeout</label>
+        <span class="skeywrap"><input type="number" id="mcptimeout" min="30" step="30" value="300" title="Per-tool-call timeout in seconds" /><span style="font-size:11px;color:var(--faint)">sec</span></span>
+      </div>
+      <div class="ssub" id="mcpsub">multi-part builds use the local MCP server</div>
+      <div class="ssep"></div>
       <div class="srow"><label>Usage data</label>
         <span class="toggle"><input type="checkbox" id="telmtgl" /><span class="tk"></span></span>
       </div>
@@ -576,6 +583,7 @@
         all.forEach(s => { if (Array.isArray(s.turns) && s.turns.length > 20) s.turns = s.turns.slice(-20); });
         localStorage.setItem("forge_sessions", JSON.stringify(all.slice(0, 10)));
       } else { try { localStorage.removeItem("forge_history"); } catch (e2) {} }
+      if (k === "forge_sessions") { try { const pv = JSON.parse(v); if (Array.isArray(pv)) { pv.forEach(s => { if (s && Array.isArray(s.turns) && s.turns.length > 20) s.turns = s.turns.slice(-20); }); v = JSON.stringify(pv.slice(0, 10)); memStore[k] = v; } } catch (e7) {} }
     } catch (e3) {}
     try { localStorage.setItem(k, v); if (quotaFull) { quotaFull = false; renderCtx(); noteQuota(false); } } catch (e4) { quotaFull = true; try { renderCtx(); } catch (e5) {} try { noteQuota(true); } catch (e6) {} }
   }
@@ -615,7 +623,7 @@
     paint("denylist", dl, (t) => { safeSet(denyKey, JSON.stringify(loadList(denyKey).filter(x => x !== t))); renderRules(); post({ action: "denyTool", tool: t, denied: false }); });
     try {
       const dl2 = hostDeny || loadList(denyKey);
-      if (Array.isArray(dl2)) dl2.forEach(t => expireApprovalsFor(t, "🔶 Refused — deny added while waiting"));
+      if (Array.isArray(dl2)) dl2.forEach(t => expireApprovalsFor(t, "△ Refused — deny added while waiting"));
     } catch (e) {}
   }
   function trackAllow(t) { const l = loadList(allowKey); if (!l.includes(t)) { l.push(t); safeSet(allowKey, JSON.stringify(l.slice(-30))); } renderRules(); }
@@ -623,7 +631,7 @@
     const l = loadList(denyKey).filter(x => x !== t);
     if (denied) l.push(t);
     safeSet(denyKey, JSON.stringify(l.slice(-30))); renderRules();
-    if (denied) expireApprovalsFor(t, "🔶 Refused — deny added while waiting");
+    if (denied) expireApprovalsFor(t, "△ Refused — deny added while waiting");
   }
   // Live always→deny flip: a deny landing while a card is pending wins over a later approve click.
   function expireApprovalsFor(tool, label) {
@@ -633,7 +641,7 @@
         box.classList.add("done");
         box.querySelectorAll("button").forEach(x => { x.disabled = true; });
         const hd = box.querySelector(".ahead");
-        if (hd && hd.firstChild) hd.firstChild.textContent = label || "🔶 Expired — rule changed";
+        if (hd && hd.firstChild) hd.firstChild.textContent = label || "△ Expired — rule changed";
       });
     } catch (e) {}
   }
@@ -665,8 +673,25 @@
   loadApprCfg();
   renderRules();
 
+  // ---- MCP server (enable/disable + per-call timeout; host persists to mcp.json) ----
+  function syncMcpRow() {
+    const on = $("mcptgl") ? $("mcptgl").checked : true;
+    const r = $("mcptmorow"); if (r) r.style.opacity = on ? "" : ".4";
+  }
+  function pushMcpCfg() {
+    const on = $("mcptgl") ? $("mcptgl").checked : true;
+    let secs = $("mcptimeout") ? parseInt($("mcptimeout").value, 10) : 300;
+    if (isNaN(secs) || secs < 30) secs = 30;
+    if ($("mcptimeout")) $("mcptimeout").value = secs;
+    syncMcpRow();
+    post({ action: "mcpSet", enabled: on, timeoutMs: secs * 1000 });
+  }
+  if ($("mcptgl")) $("mcptgl").addEventListener("change", pushMcpCfg);
+  if ($("mcptimeout")) $("mcptimeout").addEventListener("change", pushMcpCfg);
+  syncMcpRow();
+
   function refresh() {
-    post({ action: "readModel" }); post({ action: "getProvider" });
+    post({ action: "readModel" }); post({ action: "getProvider" }); try { post({ action: "mcpConfig" }); } catch (emc) {}
     try {
       post({
         action: "setAutoApprove",
@@ -706,6 +731,7 @@
     preEnhance = null; $("enhanceUndo").style.display = "none"; ebReset();
     intent.value = ""; grow();
     renderCtx();
+    pinned = true; try { $("scrolldown").style.display = "none"; } catch (e) {}
     intent.focus();
   }
   $("clearbtn").addEventListener("click", clearPanel);
@@ -792,11 +818,13 @@
     const FIND_MAX = 400; // cap: first N marks only, keeps 500-turn transcripts responsive
     const walker = document.createTreeWalker(transcript, NodeFilter.SHOW_TEXT);
     const nodes = []; let n;
+    const hideThinks = transcript.classList.contains("hide-thinks");
     while ((n = walker.nextNode())) {
       // Skip text hidden inside collapsed compact blocks — jumping there shows nothing.
       let el = n.parentElement, hidden = false;
       while (el && el !== transcript) {
-        if (el.classList && el.classList.contains("cbody") && el.style.display === "none") { hidden = true; break; }
+        if (el.style && el.style.display === "none") { hidden = true; break; } // collapsed compact body or collapsed step flood-guard line: jumping there shows nothing
+        if (hideThinks && el.classList && el.classList.contains("think")) { hidden = true; break; }
         el = el.parentElement;
       }
       if (!hidden && n.nodeValue.toLowerCase().includes(ql)) { nodes.push(n); if (nodes.length >= FIND_MAX) break; }
@@ -846,7 +874,7 @@
     else { focusIfHidden(h); h.style.display = "none"; setExpanded("histbtn", false); intent.focus(); }
   });
   $("hsearch").addEventListener("input", renderHistoryList);
-  $("hsearch").addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Escape") { focusIfHidden($("history")); $("history").style.display = "none"; setExpanded("histbtn", false); intent.focus(); } });
+  $("hsearch").addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Escape") { focusIfHidden($("history")); $("history").style.display = "none"; setExpanded("histbtn", false); intent.focus(); } else if (e.key === "ArrowDown" || e.key === "Enter") { const f = $("hlist").querySelector(".hrow"); if (f && (e.key === "ArrowDown" || $("hlist").querySelectorAll(".hrow").length)) { e.preventDefault(); f.focus(); } } else if (e.key === "ArrowUp") { const rs = $("hlist").querySelectorAll(".hrow"); if (rs.length) { e.preventDefault(); rs[rs.length - 1].focus(); } } });
   $("hnew").addEventListener("click", () => { clearPanel(); focusIfHidden($("history")); $("history").style.display = "none"; setExpanded("histbtn", false); intent.focus(); });
   document.addEventListener("click", (e) => { if (!e.target.closest("#history") && !e.target.closest("#histbtn")) { const h = $("history"); if (h && !popHidden(h)) { focusIfHidden(h); h.style.display = "none"; setExpanded("histbtn", false); } } });
 
@@ -869,6 +897,7 @@
   }
   $("setprov").addEventListener("change", () => {
     $("setkey").value = "";
+    try { safeSet("forge_provider", $("setprov").value); } catch (ep) {}
     curSlug = $("setprov").value; // optimistic: pill/ctx stop showing the previous provider
     lastHasKey = curSlug === "ollama" ? true : null;
     curModel = null; renderPill(); renderCtx();
@@ -927,6 +956,15 @@
   $("compacttgl").addEventListener("change", pushCompactCfg);
   $("compactat").addEventListener("change", pushCompactCfg);
   loadCompactCfg();
+  try {
+    const pv0 = safeGet("forge_provider");
+    if (pv0 && $("setprov").querySelector(`option[value="${pv0}"]`)) $("setprov").value = pv0;
+    // Seed the optimistic provider before the host's provider reply so the usage
+    // popover and Settings reflect persisted state on first paint (no "?" flash).
+    curSlug = $("setprov").value;
+    if ($("setkeyrow")) $("setkeyrow").style.display = curSlug === "ollama" ? "none" : "";
+    if ($("setsub")) $("setsub").textContent = curSlug + " · …";
+  } catch (epv) {}
   function applyTheme() {
     let saved = null; try { saved = safeGet("forge_theme"); } catch (e) {}            // "dark" | "light" | null = follow OS
     const osLight = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches;
@@ -937,7 +975,8 @@
   $("gearbtn").addEventListener("click", (e) => {
     e.stopPropagation();
     const open = settingsEl.style.display === "none";
-    if (open) showPop("settings"); else { focusIfHidden(settingsEl); settingsEl.style.display = "none"; }
+    if (open) { showPop("settings"); try { post({ action: "mcpConfig" }); } catch (em) {} }
+    else { focusIfHidden(settingsEl); settingsEl.style.display = "none"; }
     setExpanded("gearbtn", open);
     if (open) $("setprov").focus(); else intent.focus();
   });
@@ -954,7 +993,7 @@
       if (anyPop) { intent.focus(); return; } // closing a popover must not stop the run or touch approvals
       if (working || enhanceActive) { e.stopPropagation(); post({ action: "stop" }); if (enhanceActive) ebReset(); intent.focus(); return; }
       // Idle with a ConfirmGate showing: Esc means "Not yet".
-      const nope = document.querySelector(".gate .nope");
+      const nope = document.querySelector(".gate .nope, .appr:not(.done) .abtns button:last-child");
       if (nope) nope.click();
       intent.focus(); // every popover close lands back in the composer
     }
@@ -971,6 +1010,8 @@
       if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); menAccept(menIdx); return; }
       if (e.key === "ArrowDown") { e.preventDefault(); if (menItems.length) { menIdx = (menIdx + 1) % menItems.length; renderMenList(); } return; }
       if (e.key === "ArrowUp") { e.preventDefault(); if (menItems.length) { menIdx = (menIdx + menItems.length - 1) % menItems.length; renderMenList(); } return; }
+      if (e.key === "Home") { e.preventDefault(); if (menItems.length) { menIdx = 0; renderMenList(); } return; }
+      if (e.key === "End") { e.preventDefault(); if (menItems.length) { menIdx = menItems.length - 1; renderMenList(); } return; }
       if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); menClose(); return; }
     }
     if (e.key === "Enter" && !e.shiftKey) {
@@ -1027,6 +1068,8 @@
       const em = document.createElement("div"); em.className = "mempty";
       em.textContent = "No matching files — click to 📎 attach one instead.";
       em.style.cursor = "pointer"; em.title = "Attach a file instead";
+      em.tabIndex = 0; em.setAttribute("role", "button");
+      em.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.target.click(); } });
       em.addEventListener("click", () => { menClose(); if (!hasBridge) { systemCard(needBridgeMsg("Attaching files")); return; } post({ action: "attach" }); intent.focus(); });
       list.appendChild(em);
     }
@@ -1077,9 +1120,19 @@
     });
   }
   function menCheck() {
-    if (mentionPaths.length && !mentionPaths.every(p => menHas(p.name))) {
-      for (let i = mentionPaths.length - 1; i >= 0; i--) if (!menHas(mentionPaths[i].name)) mentionPaths.splice(i, 1);
-      renderChips();
+    if (mentionPaths.length) {
+      const counts = {};
+      const drop = [];
+      for (let i = mentionPaths.length - 1; i >= 0; i--) {
+        const nm = mentionPaths[i].name;
+        if (!(nm in counts)) {
+          const re = new RegExp("(?:^|\\s)@" + escRx(nm) + "(?=[\\s,.;:!?\\)\\]\"']|$)", "g");
+          counts[nm] = (intent.value.match(re) || []).length;
+        }
+        const sameBefore = mentionPaths.slice(0, i + 1).filter(p => p.name === nm).length;
+        if (!menHas(nm) || sameBefore > counts[nm]) drop.push(i);
+      }
+      if (drop.length) { drop.forEach(i => mentionPaths.splice(i, 1)); renderChips(); }
     }
     const q = menQuery();
     if (!q) { if (menOpen) menClose(); return; }
@@ -1112,10 +1165,10 @@
     clearThinkTimeout();
     thinkTimer = setTimeout(() => {
       try {
-        if (thinkEl === el && el.isConnected && working && !el._manual) {
+        if (thinkEl === el && el.isConnected && working) {
           const hd = el.querySelector(".thead");
-          if (hd) hd.textContent = "Thought (timed out — showing partial) — click to expand";
-          el.classList.add("collapsed");
+          if (hd) hd.textContent = "Interrupted — partial thinking kept (click to expand)";
+          if (!el._manual) el.classList.remove("collapsed");
           thinkEl = null;
         }
       } catch (e) {} thinkTimer = null;
@@ -1127,7 +1180,7 @@
         box.classList.add("done");
         box.querySelectorAll("button").forEach(x => { x.disabled = true; });
         const hd = box.querySelector(".ahead");
-        if (hd && hd.firstChild) hd.firstChild.textContent = "🔶 Expired — run ended";
+        if (hd && hd.firstChild) hd.firstChild.textContent = "△ Expired — run ended";
       });
     } catch (e) {}
   }
@@ -1136,11 +1189,11 @@
   // ---- chat history (Kilo-style sessions: search, restore, delete, new) ----
   let sessionId = null;
   const sessKey = "forge_sessions";
-  const loadSessions = () => { try { const v = JSON.parse(safeGet(sessKey)); if (!Array.isArray(v)) return []; return v.filter(s => s && typeof s === "object").map(s => {
+  const loadSessions = () => { try { const v = JSON.parse(safeGet(sessKey)); if (!Array.isArray(v)) return []; const seen = {}; return v.filter(s => s && typeof s === "object").map(s => {
       let turns = Array.isArray(s.turns) ? s.turns : (Array.isArray(s.messages) ? s.messages : []);
-      turns = turns.map(t => typeof t === "string" ? { q: t, a: "" } : (t && typeof t === "object" ? { q: String(t.q ?? t.prompt ?? ""), a: String(t.a ?? t.html ?? t.answer ?? "") } : { q: "", a: "" }));
-      return { id: String(s.id || ""), title: String(s.title || (turns[0] && turns[0].q) || "chat").slice(0, 60), started: Number(s.started) || Date.now(), updated: Number(s.updated || s.started) || Date.now(), model: s.model ? String(s.model) : "", turns };
-    }).filter(s => s.id); } catch (e) { return []; } };
+      turns = turns.slice(-100).map(t => typeof t === "string" ? { q: t, a: "" } : (t && typeof t === "object" ? { q: String(t.q ?? t.prompt ?? ""), a: String(t.a ?? t.html ?? t.answer ?? "") } : { q: "", a: "" }));
+      return { id: String(s.id || ""), title: String(s.title || (turns[0] && turns[0].q) || "chat").slice(0, 60), started: Number(s.started) || Date.now(), updated: Number(s.updated || s.started) || Date.now(), model: s.model ? String(s.model) : "", prov: s.prov ? String(s.prov) : "", turns };
+    }).filter(s => s.id && !seen[s.id] && (seen[s.id] = 1)); } catch (e) { return []; } };
   const saveSessions = (s) => { try { safeSet(sessKey, JSON.stringify(s.slice(0, 30))); } catch (e) {} };
   const ago = (t) => { const m = Math.floor((Date.now() - t) / 60000); if (m < 1) return "just now"; if (m < 60) return m + "m ago"; const h = Math.floor(m / 60); if (h < 24) return h + "h ago"; return Math.floor(h / 24) + "d ago"; };
   const shortModel = (id) => String(id || "").split("/").pop();
@@ -1148,8 +1201,9 @@
     if (!lastPrompt) return;
     const all = loadSessions();
     let s = all.find(x => x.id === sessionId);
-    if (!s) { sessionId = "s" + Date.now(); s = { id: sessionId, title: lastPrompt.slice(0, 60), started: Date.now(), turns: [] }; all.unshift(s); }
-    s.updated = Date.now(); s.model = shortModel(curModel);
+    if (!s) { sessionId = "s" + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36); s = { id: sessionId, title: lastPrompt.slice(0, 60), started: Date.now(), turns: [] }; all.unshift(s); }
+    else { all.splice(all.indexOf(s), 1); all.unshift(s); }
+    s.updated = Date.now(); s.model = shortModel(curModel); s.prov = curSlug || s.prov || "";
     s.turns.push({ q: lastPrompt, a: html || "" });
     if (s.turns.length > 100) s.turns = s.turns.slice(-100);
     saveSessions(all);
@@ -1185,7 +1239,7 @@
       const restore = () => restoreSession(s.id);
       main.addEventListener("click", restore);
       row.addEventListener("click", (e) => { if (e.target === row) restore(); });
-      row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); restore(); } });
+      row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); restore(); } else if (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Home" || e.key === "End") { e.preventDefault(); const rs = [...$("hlist").querySelectorAll(".hrow")]; let i = rs.indexOf(row); if (e.key === "ArrowDown") i = Math.min(rs.length - 1, i + 1); else if (e.key === "ArrowUp") i = Math.max(0, i - 1); else if (e.key === "Home") i = 0; else i = rs.length - 1; if (rs[i]) rs[i].focus(); } else if (e.key === "Escape") { focusIfHidden($("history")); $("history").style.display = "none"; setExpanded("histbtn", false); intent.focus(); } });
       row.append(main, del); list.appendChild(row);
     });
   }
@@ -1210,21 +1264,23 @@
     focusIfHidden($("history")); $("history").style.display = "none"; setExpanded("histbtn", false);
     post({ action: "loadHistory", sid: id });
     const rt = [...transcript.querySelectorAll(":scope > .turn")];
-    if (rt.length > 20) {
-      const old = rt.slice(0, rt.length - 10);
+    const rkeep = 10, rgate = Math.max(20, effectiveCompactAt(60));
+    if (rt.length > rgate) {
+      const old = rt.slice(0, rt.length - rkeep);
       const { block, sum, body } = buildCompactBlock(old, null);
       sum.textContent = titlesDigest(body);
-      transcript.insertBefore(block, rt[rt.length - 10]);
+      transcript.insertBefore(block, rt[rt.length - rkeep]);
     }
-    renderHistoryList(); scroll(true); intent.focus();
-    try { transcript.querySelectorAll(".appr:not(.done)").forEach(box => { box.classList.add("done"); box.querySelectorAll("button").forEach(x => { x.disabled = true; }); const hd = box.querySelector(".ahead"); if (hd && hd.firstChild) hd.firstChild.textContent = "🔶 Expired — run ended"; }); } catch (e) {}
+    renderHistoryList(); pinned = true; try { $("scrolldown").style.display = "none"; } catch (e) {} scroll(true); intent.focus();
+    try { transcript.querySelectorAll(".appr:not(.done)").forEach(box => { box.classList.add("done"); box.querySelectorAll("button").forEach(x => { x.disabled = true; }); const hd = box.querySelector(".ahead"); if (hd && hd.firstChild) hd.firstChild.textContent = "△ Expired — run ended"; }); } catch (e) {}
     try { transcript.querySelectorAll(".think .thead").forEach(hd => { if (/live/.test(hd.textContent || "")) { hd.textContent = "Thought (restored — click to expand)"; const th = hd.closest(".think"); if (th) th.classList.add("collapsed"); } }); } catch (e2) {}
     if (!s.turns.length) systemCard("This saved chat is empty — nothing to show. Send a prompt to start it again.");
     else {
       const notes = [];
       try {
         if (s.model && chatModels.length && !chatModels.some(id => String(id).split("/").pop() === s.model) && !chatModels.includes(s.model)) notes.push(`It was saved with model <b>${String(s.model).replace(/</g, "&lt;")}</b>, which isn't in the current list — you're on <b>${String(shortModel(curModel) || curSlug || "the current model").replace(/</g, "&lt;")}</b>. Sending still works.`);
-        if (needsKey()) { lastNoKeyPrompt = curSlug; notes.push(`<b>${curSlug}</b> has no key saved — add one in Settings → API key before sending, or the run will fail. The restored text is kept.`); }
+        if (s.prov && curSlug && s.prov !== curSlug) notes.push(`It was saved under provider <b>${String(s.prov).replace(/</g, "&lt;")}</b> — you're on <b>${String(curSlug).replace(/</g, "&lt;")}</b>. Sending runs on the current provider; switch back in Settings to resume where it left off.`);
+        if (needsKey() && lastNoKeyPrompt !== curSlug) { lastNoKeyPrompt = curSlug; notes.push(`<b>${curSlug}</b> has no key saved — add one in Settings → API key before sending, or the run will fail. The restored text is kept.`); }
       } catch (e3) {}
       if (notes.length) systemCard(notes.join("<br>"));
     }
@@ -1246,10 +1302,14 @@
   function run(text) {
     if (text.startsWith("/")) { intent.value = ""; grow(); slashRun(text); return; }
     if (working) return;
-    closePops(); clearFind();
+    closeOthers(); clearFind();
     working = true;
+    if (thinkEl) { // previous run never sent thinkEnd (killed): close it interrupted so the new run starts clean
+      try { const phd = thinkEl.querySelector(".thead"); if (phd && /live/.test(phd.textContent)) phd.textContent = "Interrupted — partial thinking kept (click to expand)"; if (!thinkEl._manual) thinkEl.classList.remove("collapsed"); } catch (e) {}
+      thinkEl = null; clearThinkTimeout();
+    }
     lastPrompt = text;
-    if (!sessionId) sessionId = "s" + Date.now();
+    if (!sessionId) sessionId = "s" + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
     histList.push(text); histSave(); hIdx = -1; draftStash = null;
     const e = $("empty"); if (e) e.remove();
 
@@ -1273,7 +1333,9 @@
     transcript.append(t);
     turn = { el: t, steps, thinking, result, tword: thinking.querySelector(".tword") };
 
+    pinned = true; try { $("scrolldown").style.display = "none"; } catch (e) {}
     scroll(true);
+    try { if ($("findbar") && $("findbar").style.display !== "none" && $("findinput").value) runFind(); } catch (ef) {}
     startWords();
 
     // CLEAR the input — like any chat
@@ -1291,7 +1353,16 @@
   }
 
   // ---- slash commands (Kilo-style: local, instant, no LLM round-trip) ----
-  const SLASH_HELP = "/compact — summarize older turns into an expandable block\n/summarize — same as /compact\n/clear, /new — start a fresh chat\n/regen, /regenerate — re-run the last prompt\n/model, /models — open the model picker\n/provider [slug] — switch provider (deepseek|openrouter|nvidia|openai|anthropic|ollama) or open settings\n/connect — open provider settings (Kilo-style connect)\n/allow <tool> — always allow one tool going forward\n/deny <tool> — block one tool outright · /undeny <tool> — unblock it\n/auto-approve [on|off] — master switch for unattended tool runs (aliases: /autoapprove /approve-all /approveall)\n/mcps — show the MCP server status\n/history, /sessions — open chat history · /resume, /continue — same list\n/rename <title> — rename the current chat\n/status — show usage details\n/undo — revert the last turn · /redo — restore it\n/help — this list\n/unrevert — restore the last reverted turns";
+  const SLASH_HELP = "/compact — summarize older turns into an expandable block (aliases: /summarize, /smol, /condense)\n/settings — open Settings\n/clear, /new — start a fresh chat\n/regen, /regenerate — re-run the last prompt\n/model, /models — open the model picker\n/provider [slug] — switch provider (deepseek|openrouter|nvidia|openai|anthropic|ollama) or open settings\n/connect — open provider settings (Kilo-style connect)\n/allow <tool> — always allow one tool going forward\n/deny <tool> — block one tool outright · /undeny <tool> — unblock it\n/auto-approve [on|off] — master switch for unattended tool runs (aliases: /autoapprove /approve-all /approveall)\n/mcps — show the MCP server status\n/history, /sessions — open chat history · /resume, /continue — same list\n/rename <title> — rename the current chat\n/status — show usage details\n/undo — revert the last turn · /redo — restore it · /copy — copy last answer · /copy-session — copy whole chat · /export — save transcript as markdown (rendered turns only) · /about — panel/provider info (no diagnostics copy) · /review — design review of the active model (ignores extra args) · /thinking, /toggle-thinking — toggle thinking blocks\n/help — this list\n/unrevert — restore the last reverted turns";
+  function fallbackCopy(text) {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      const ok = document.execCommand("copy"); ta.remove();
+      return ok;
+    } catch (e) { return false; }
+  }
   function slashRun(text) {
     const parts = text.slice(1).trim().split(/\s+/);
     const cmd = (parts[0] || "").toLowerCase(), args = parts.slice(1);
@@ -1310,6 +1381,7 @@
           const pv = args[0].toLowerCase();
           if (!$("setprov").querySelector(`option[value="${pv}"]`)) { systemCard(`Unknown provider <b>${pv.replace(/</g, "&lt;")}</b> — pick one in Settings.`); showPop("settings"); break; }
           $("setprov").value = pv;
+          try { safeSet("forge_provider", pv); } catch (ep2) {}
           $("setkey").value = "";
           curSlug = pv; lastHasKey = pv === "ollama" ? true : null; curModel = null; renderPill(); renderCtx();
           if ($("setkeyrow")) $("setkeyrow").style.display = pv === "ollama" ? "none" : "";
@@ -1360,7 +1432,8 @@
         systemCard(`Chat renamed to “${title.replace(/</g, "&lt;")}”.`);
         break;
       }
-      case "compact": case "summarize": compactTranscript(false); break;
+      case "compact": case "summarize": case "smol": case "condense": compactTranscript(false); break;
+      case "settings": showPop("settings"); break;
       case "undo": {
         const turns = [...transcript.querySelectorAll(":scope > .turn")];
         const last = turns.reverse().find(t => t.querySelector(".revertbtn"));
@@ -1369,9 +1442,61 @@
         break;
       }
       case "redo": unrevert(); break;
+      case "copy": case "copy-session": {
+        if (working) { systemCard("Still working — wait for the run to finish, then /copy grabs the result."); break; }
+        const scopeAll = cmd === "copy-session";
+        const turns = [...transcript.querySelectorAll(".turn")].filter(t => t.querySelector(":scope > .bubble.user"));
+        if (!turns.length) { systemCard("Nothing to copy yet — send a prompt first."); break; }
+        const pick = scopeAll ? turns : turns.slice(-1);
+        const md = pick.map(t => {
+          const q = (t.querySelector(".bubble.user") || {}).textContent || "";
+          const a = (t.querySelector(".forge") || {}).textContent || "";
+          return scopeAll ? `## You\n${q}\n\n## Forge\n${a}` : a;
+        }).join(scopeAll ? "\n\n---\n\n" : "");
+        const done = (ok) => systemCard(ok ? (scopeAll ? "Chat copied to the clipboard." : "Last answer copied to the clipboard.") : "Copy failed — select the text manually.");
+        if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(md).then(() => done(true)).catch(() => done(fallbackCopy(md)));
+        else done(fallbackCopy(md));
+        break;
+      }
+      case "export": {
+        if (working) { systemCard("Still working — wait for the run to finish, then /export saves the transcript."); break; }
+        const turns = [...transcript.querySelectorAll(".turn")].filter(t => t.querySelector(":scope > .bubble.user"));
+        if (!turns.length) { systemCard("Nothing to export yet — send a prompt first."); break; }
+        const md = `# Forge chat export\n\n` + turns.map((t, i) => {
+          const q = ((t.querySelector(".bubble.user") || {}).textContent || "").trim();
+          const a = ((t.querySelector(".forge") || {}).textContent || "").trim();
+          return `## Turn ${i + 1} — You\n${q}\n\n### Forge\n${a}`;
+        }).join("\n\n---\n\n");
+        const blob = new Blob([md], { type: "text/markdown" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "forge-chat.md";
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => { URL.revokeObjectURL(url); }, 1000);
+        systemCard("Transcript exported as <b>forge-chat.md</b>.");
+        break;
+      }
+      case "about": {
+        const prov = curSlug || "none", mod = curModel ? shortName(curModel) : "–";
+        systemCard(`<b>Forge</b> for SolidWorks (WebView2 panel)<br>Provider: <b>${prov}</b> · Model: <b>${String(mod).replace(/</g, "&lt;")}</b><br>Use <b>/status</b> for live usage, <b>/models</b> to switch models, <b>/help</b> for all commands.`);
+        break;
+      }
+      case "review": {
+        if (working) { systemCard("Still working — wait for this run (or Esc to stop it), then /review checks the model."); break; }
+        run("Review the active model for design and manufacturability issues: check wall thickness, fillets, draft, hole sizes vs standard fasteners, and anything that would fail in machining or 3D printing. Be specific with numbers."); break;
+      }
+      case "thinking": case "toggle-thinking": {
+        const hide = !transcript.classList.contains("hide-thinks");
+        transcript.classList.toggle("hide-thinks", hide);
+        systemCard(hide ? "Thinking blocks hidden — <b>/thinking</b> again to show them." : "Thinking blocks shown.");
+        if ($("findbar") && $("findbar").style.display !== "none" && $("findinput").value) runFind();
+        break;
+      }
       case "status": toggleCtx(true); break;
       default: systemCard(`Unknown command <b>/${cmd.replace(/</g, "&lt;")}</b>.<br>${SLASH_HELP.replace(/</g, "&lt;").replace(/\n/g, "<br>")}`); break;
     }
+    try { if ($("findbar") && $("findbar").style.display !== "none" && $("findinput").value) runFind(); } catch (e) {}
     scroll();
   }
 
@@ -1382,12 +1507,13 @@
     if (working) { systemCard("Still working — wait for this run (or Esc to stop it), then /unrevert restores it."); return; }
     if (!lastReverted || !lastReverted.nodes.length) { systemCard("Nothing to unrevert — ↩ revert on a turn stashes it here for one step."); return; }
     if (sessionId && lastReverted.sid && lastReverted.sid !== sessionId) { lastReverted = null; systemCard("Nothing to unrevert — the chat changed since that revert, so there is nothing safe to restore."); return; }
+    if (lastReverted.prov !== undefined && curSlug && lastReverted.prov !== curSlug) { lastReverted = null; systemCard("Nothing to unrevert — the provider changed since that revert, so the stashed turns belong to the old provider."); return; }
     if (sessionId && lastReverted.keep != null) { // a new message sent post-revert grew the session — refuse, don't splice stale turns around it
       const cur = (loadSessions().find(x => x.id === sessionId) || {}).turns;
       if (cur && cur.length !== lastReverted.keep) { lastReverted = null; systemCard("Nothing to unrevert — you sent a new message after that revert, so there is nothing safe to restore."); return; }
     }
-    closePops(); clearFind();
-    const ref = lastReverted.refNext && document.contains(lastReverted.refNext) ? lastReverted.refNext : null;
+    closeOthers(); clearFind();
+    const ref = lastReverted.refNext && lastReverted.refNext.parentElement === transcript ? lastReverted.refNext : null;
     lastReverted.nodes.forEach(n => transcript.insertBefore(n, ref));
     if (sessionId) {
       const all = loadSessions();
@@ -1396,12 +1522,13 @@
     }
     lastReverted = null;
     renderCtx();
-    scroll(true); intent.focus();
+    try { if ($("findbar") && $("findbar").style.display !== "none" && $("findinput").value) runFind(); } catch (e) {}
+    pinned = true; try { $("scrolldown").style.display = "none"; } catch (e) {} scroll(true); intent.focus();
   }
   function buildCompactBlock(oldTurns, summaryText) {
     const block = document.createElement("div"); block.className = "compact";
     const hd = document.createElement("div"); hd.className = "chead";
-    hd.tabIndex = 0; hd.setAttribute("role", "button"); hd.setAttribute("aria-label", `Expand ${oldTurns.length} compacted turns`);
+    hd.tabIndex = 0; hd.setAttribute("role", "button"); hd.setAttribute("aria-expanded", "false"); hd.setAttribute("aria-label", `Expand ${oldTurns.length} compacted turns`);
     const ht = document.createElement("span");
     ht.textContent = `🗜 ${oldTurns.length} earlier turns compacted — click to expand`;
     hd.appendChild(ht);
@@ -1410,7 +1537,7 @@
     if (summaryText) sum.textContent = summaryText;
     bd.appendChild(sum);
     oldTurns.forEach(t => bd.appendChild(t));
-    const toggle = () => { bd.style.display = bd.style.display === "none" ? "" : "none"; scroll(); if (bd.style.display !== "none" && $("findbar") && $("findbar").style.display !== "none" && $("findinput").value) runFind(); };
+    const toggle = () => { bd.style.display = bd.style.display === "none" ? "" : "none"; hd.setAttribute("aria-expanded", bd.style.display !== "none" ? "true" : "false"); scroll(); try { if ($("findbar") && $("findbar").style.display !== "none" && $("findinput").value) runFind(); } catch (e) {} };
     hd.addEventListener("click", toggle);
     hd.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
     block.append(hd, bd);
@@ -1423,7 +1550,7 @@
   function compactTranscript(auto) {
     if (working && !auto) { systemCard("Still working — wait for this run (or Esc to stop it), then compact."); return; }
     if (pendingCompact) { if (!auto) systemCard("Already summarizing — wait for this compact to finish."); return; }
-    let turns = [...transcript.querySelectorAll(":scope > .turn")];
+    let turns = [...transcript.querySelectorAll(":scope > .turn")].filter(t => t.querySelector(":scope > .bubble.user"));
     if (working) turns = turns.slice(0, -1);
     const keep = 10;
     if (turns.length <= keep + 1) { if (!auto) systemCard("Nothing to compact — chat is short; older turns collapse here once you pass 10."); return; }
@@ -1513,6 +1640,7 @@
         more.innerHTML = `<span class="glyph">…</span><span>${exp ? "showing all steps — click to collapse" : more.dataset.label}</span>`;
       } else if (more) { more.remove(); delete stepsEl.dataset.exp; }
     } catch (e) {}
+    try { if ($("findbar") && $("findbar").style.display !== "none" && $("findinput").value) { try { if (findTimer) clearTimeout(findTimer); } catch (e2) {} findTimer = setTimeout(runFind, 400); } } catch (e3) {}
     if (wasBottom) scroll();
   }
 
@@ -1521,8 +1649,8 @@
   function finish(html) {
     stopWords(); clearThinkTimeout(); expireApprovals();
     const wasTurn = !!turn && !!lastPrompt;
-    if (thinkEl) { // a zero-tool text finish still closes a live think block (Kilo text-response parity)
-      try { const hd = thinkEl.querySelector(".thead"); if (hd && /live/.test(hd.textContent)) hd.textContent = "Thought — click to expand"; if (!thinkEl._manual) thinkEl.classList.add("collapsed"); } catch (e) {}
+    if (thinkEl) { // run ended with no thinkEnd (killed mid-stream): keep the partial block, marked interrupted
+      try { const hd = thinkEl.querySelector(".thead"); if (hd && /live/.test(hd.textContent)) hd.textContent = "Interrupted — partial thinking kept (click to expand)"; if (!thinkEl._manual) thinkEl.classList.remove("collapsed"); } catch (e) {}
       if (thinkEl.contains(document.activeElement)) { try { intent.focus(); } catch (e) {} }
       thinkEl = null;
     }
@@ -1535,9 +1663,10 @@
       systemCard(html);
     }
     if (wasTurn) recordTurn(html);
+    try { if ($("findbar") && $("findbar").style.display !== "none" && $("findinput").value) runFind(); } catch (e) {}
     working = false; turn = null;
     scroll(); renderCtx();
-    if (autoCompactOn() && !pendingCompact && transcript.querySelectorAll(":scope > .turn").length > effectiveCompactAt(60)) compactTranscript(true);
+    if (autoCompactOn() && !pendingCompact && [...transcript.children].filter(x => x.classList && x.classList.contains("turn") && x.querySelector(":scope > .bubble.user")).length > effectiveCompactAt(60)) compactTranscript(true);
   }
 
   function renderRedWave(m) {
@@ -1609,20 +1738,20 @@
       const tn = (m.model ? String(m.model).split("/").pop() : "");
       thinkEl.innerHTML = "";
       const hd = document.createElement("div"); hd.className = "thead";
-      hd.tabIndex = 0; hd.setAttribute("role", "button");
-      thinkEl._t0 = Date.now(); thinkEl._label = m.label || "Thinking"; thinkEl._model = tn; thinkEl._len = 0;
+      hd.tabIndex = 0; hd.setAttribute("role", "button"); hd.setAttribute("aria-expanded", "true");
+      thinkEl._t0 = Date.now(); thinkEl._label = m.label || "Thinking"; thinkEl._model = tn; thinkEl._len = 0; thinkEl._turn = turn;
       hd.textContent = `✨ ${thinkEl._label}` + (tn ? ` · ${tn}` : "") + "… (live · 0s)";
       const bd = document.createElement("div"); bd.className = "tbody";
       thinkEl.append(hd, bd);
       const selfThink = thinkEl; // capture the block: the shared var moves on to the next think
-      const toggleThink = () => { try { selfThink.classList.toggle("collapsed"); selfThink._manual = true; } catch (e) {} };
+      const toggleThink = () => { try { selfThink.classList.toggle("collapsed"); selfThink._manual = true; hd.setAttribute("aria-expanded", selfThink.classList.contains("collapsed") ? "false" : "true"); } catch (e) {} };
       hd.addEventListener("click", toggleThink);
       hd.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleThink(); } });
       turn.result.appendChild(thinkEl); scroll();
       armThinkTimeout(thinkEl);
     }
     else if (m.type === "think") {
-      if (!thinkEl || !thinkEl.isConnected) return;
+      if (!thinkEl || !thinkEl.isConnected || !working || !turn || thinkEl._turn !== turn) return; // stale (raced revert/clear/restore): drop, never append to another run's block
       const bd = thinkEl.querySelector(".tbody");
       if (bd && m.text) {
         if ((thinkEl._len || 0) >= 50000) { try { const hcap = thinkEl.querySelector(".thead"); if (hcap && !/truncated at 50k/.test(hcap.textContent)) hcap.textContent += " — truncated at 50k"; thinkEl.classList.add("collapsed"); } catch (e3) {} return; }
@@ -1647,9 +1776,9 @@
     }
     else if (m.type === "thinkEnd") {
       clearThinkTimeout();
-      if (!thinkEl) return;
+      if (!thinkEl) return; // already finalized (or raced away): no-op
+      if (!working || !turn || thinkEl._turn !== turn || !thinkEl.isConnected) return; // stale (raced revert/clear/restore): no-op, never touch the current block
       const done = thinkEl; thinkEl = null;
-      if (!done.isConnected) return;
       const hd = done.querySelector(".thead");
       if (m.interrupted) {
         if (hd) hd.textContent = "Interrupted — partial thinking kept (click to expand)";
@@ -1657,13 +1786,14 @@
         } else if (hd) {
           hd.textContent = `Thought for ${m.seconds || 0}s` + (done.classList.contains("collapsed") ? " — long output collapsed, click to expand" : " — click to collapse") + ((done._len || 0) >= 50000 ? " — truncated at 50k" : "");
         }
+      try { if ($("findbar") && $("findbar").style.display !== "none" && $("findinput").value) runFind(); } catch (er) {}
     }
 
     else if (m.type === "approve") {
       if (!working || !turn) { // orphan card: run already ended/cancelled — show expired, post nothing
         const exp = document.createElement("div");
         exp.className = "appr done";
-        exp.innerHTML = `<div class="ahead"><span>🔶 Approval expired — run ended</span></div>`;
+        exp.innerHTML = `<div class="ahead"><span>△ Permission expired — run ended</span></div>`;
         transcript.appendChild(exp); scroll();
         return;
       }
@@ -1671,37 +1801,44 @@
       box.className = "appr";
       box.dataset.apprId = m.id || "";
       box.dataset.tool = m.tool || "";
+      const isDoom = (m.tool || "").indexOf("(repeat loop)") === 0;
       const hd = document.createElement("div"); hd.className = "ahead";
-      hd.innerHTML = `<span>🔶 Approval needed</span>`;
-      const tn = document.createElement("span"); tn.className = "atool"; tn.textContent = m.tool || "tool";
+      hd.innerHTML = `<span>△ Permission required</span>`;
+      const tn = document.createElement("span"); tn.className = "atool";
+      tn.textContent = isDoom ? "Continue after repeated failures" : "Call tool " + (m.tool || "unknown tool");
       hd.appendChild(tn);
-      const ag = document.createElement("div"); ag.className = "aargs";
+    const ag = document.createElement("div"); ag.className = "aargs";
+    if (isDoom) {
+      ag.textContent = "This keeps the session running despite repeated failures.";
+    } else {
       let as_ = "";
       try { as_ = JSON.stringify(m.args || {}, null, 1); } catch (e) { as_ = String(m.args || ""); }
       ag.textContent = as_.length > 600 ? as_.slice(0, 600) + "…" : as_;
+    }
       const btns = document.createElement("div"); btns.className = "abtns";
       const mk = (label, decision, cls) => {
         const b = document.createElement("button"); b.textContent = label; if (cls) b.className = cls;
         b.addEventListener("click", () => {
           if (box.classList.contains("done")) return; // double-click race: one decision only
-          if (!working || !turn || !box.isConnected || !turn.result.contains(box)) {
-            box.classList.add("done");
-            btns.querySelectorAll("button").forEach(x => x.disabled = true);
-            hd.firstChild.textContent = "🔶 Expired — run ended";
-            return; // stale verdict: ignored, visibly expired, nothing posted
-          }
+        if (!working || !turn || !box.isConnected || !turn.result.contains(box)) {
           box.classList.add("done");
           btns.querySelectorAll("button").forEach(x => x.disabled = true);
-          hd.firstChild.textContent = `🔶 ${label} — ${m.tool || "tool"}`;
+          hd.firstChild.textContent = "△ Expired — run ended";
+          return; // stale verdict: ignored, visibly expired, nothing posted
+        }
+          box.classList.add("done");
+          btns.querySelectorAll("button").forEach(x => x.disabled = true);
+          hd.firstChild.textContent = `△ ${label} — ${m.tool || "tool"}`;
           if (decision === "always" && m.tool) trackAllow(m.tool);
           post({ action: "approveReply", id: m.id, decision });
         });
         return b;
       };
-      btns.append(mk("Approve", "approve", "go"), mk("Always allow", "always"), mk("Reject", "reject"));
+      btns.append(mk("Allow once", "approve", "go"), mk("Allow always", "always"), mk("Reject", "reject"));
       box.append(hd, ag, btns);
       turn.result.appendChild(box);
-      scroll();
+      pinned = true; scroll(true); // attention-required: a gate hidden above the fold reads as a stuck run
+      try { btns.querySelector("button").focus({ preventScroll: true }); } catch (e2) {}
     }
     else if (m.type === "rules") {
       if (Array.isArray(m.allow)) { try { safeSet(allowKey, JSON.stringify(m.allow.slice(0, 30))); } catch (e) {} }
@@ -1735,8 +1872,18 @@
       chatModels = (m.models || []).slice();
       if (m.error === "nokey") lastHasKey = false;
       renderModelList($("msearch") ? $("msearch").value : "");
+      if (m.error === "nokey") {
+        if ($("mcount")) $("mcount").textContent = "Needs a key — see Settings.";
+        if ($("mcount")) $("mcount").title = "Paste a key in Settings → API key, hit Save, then Refresh.";
+        if (!document.querySelector("#obmodel") && curSlug !== "ollama") { if ($("setkeyrow")) $("setkeyrow").style.display = ""; if ($("setsub")) $("setsub").textContent = (curSlug || "") + " · no key"; }
+      } else if (m.error) {
+        if ($("mcount")) $("mcount").textContent = "Couldn't load models.";
+        if ($("mcount")) $("mcount").title = `${m.error} — check the key, then hit Refresh.`;
+      } else if ($("mcount")) { $("mcount").title = ""; }
       const sel = document.querySelector("#obmodel");
-      if (sel) {
+      const obp = document.querySelector("#obprov");
+      const staleOb = !!(sel && obp && sel.dataset.prov && obp.value !== sel.dataset.prov);
+      if (sel && !staleOb) {
         const st = document.querySelector("#obmstat");
         sel.innerHTML = "";
         if (m.error || !m.models || !m.models.length) {
@@ -1747,14 +1894,7 @@
           if (m.selected) sel.value = m.selected;
           if (st) st.textContent = m.models.length + " models served right now — pick one.";
         }
-      } else if (m.error === "nokey") {
-        $("mcount").textContent = "Needs a key — see Settings.";
-        $("mcount").title = "Paste a key in Settings → API key, hit Save, then Refresh.";
-        if (curSlug !== "ollama") { if ($("setkeyrow")) $("setkeyrow").style.display = ""; if ($("setsub")) $("setsub").textContent = (curSlug || "") + " · no key"; }
-      } else if (m.error) {
-        $("mcount").textContent = "Couldn't load models.";
-        $("mcount").title = `${m.error} — check the key, then hit Refresh.`;
-      } else { $("mcount").title = ""; }
+      }
     }
 
     else if (m.type === "usage") {
@@ -1764,21 +1904,36 @@
       }
     }
 
+    else if (m.type === "mcpConfig") {
+      if ($("mcptgl")) $("mcptgl").checked = !!m.enabled;
+      if ($("mcptimeout") && m.timeoutMs != null) $("mcptimeout").value = Math.max(30, Math.round(m.timeoutMs / 1000));
+      if ($("mcpsub")) $("mcpsub").textContent = (!m.enabled ? "disabled" : (m.running ? "running" : "not running")) + " · " + (m.command || "uvx") + " " + (m.args || "solidworks-mcp");
+      syncMcpRow();
+    }
+
     else if (m.type === "provider") {
       if (!m.error) {
+        const prevSlug = curSlug;
         curModel = m.model || null; curDynamic = !!m.dynamic; curSlug = m.slug || null;
-        if (m.model || m.baseUrl) onboardHasConfig = true;
+        if (m.slug || m.model || m.baseUrl || m.hasKey) onboardHasConfig = true;
         lastHasKey = (m.slug === "ollama") ? true : !!m.hasKey;
-        if (!curDynamic && chatModels.length) { chatModels = []; renderModelList($("msearch") ? $("msearch").value : ""); }
+        try { const ob = document.querySelector("#obprov"); if (ob && m.slug && ob.querySelector(`option[value="${m.slug}"]`)) ob.value = m.slug; } catch (eob) {}
+        if (m.slug && prevSlug && m.slug !== prevSlug) {
+          chatModels = []; renderModelList($("msearch") ? $("msearch").value : "");
+          try { transcript.querySelectorAll(".appr:not(.done)").forEach(box => { box.classList.add("done"); box.querySelectorAll("button").forEach(x => { x.disabled = true; }); const hd = box.querySelector(".ahead"); if (hd && hd.firstChild) hd.firstChild.textContent = "△ Expired — provider switched"; }); } catch (eex) {}
+          try { post({ action: "setAutoApprove", master: safeGet("forge_appr_master") !== "0", read: safeGet("forge_appr_read") !== "0", build: safeGet("forge_appr_build") !== "0", destructive: safeGet("forge_appr_dest") === "1" }); } catch (eap) {}
+        } else if (!curDynamic) { chatModels = []; renderModelList($("msearch") ? $("msearch").value : ""); }
         renderPill();
         renderSettings(m);
         renderCtx();
         $("mrefresh").style.display = curDynamic ? "" : "none";
-        if (!m.hasKey && m.slug && m.slug !== "ollama" && lastNoKeyPrompt !== m.slug) { lastNoKeyPrompt = m.slug; systemCard(`No key saved for <b>${m.slug}</b> — paste it in Settings → API key, hit Save, then pick a model.`); }
+        if (!m.hasKey && m.slug && m.slug !== "ollama" && lastNoKeyPrompt !== m.slug && !document.getElementById("onboard")) { lastNoKeyPrompt = m.slug; systemCard(`No key saved for <b>${m.slug}</b> — paste it in Settings → API key, hit Save, then pick a model.`); }
         if (m.hasKey) lastNoKeyPrompt = null; // key present again: a later no-key episode re-warns once
         if (curDynamic && !chatModels.length) post({ action: "refreshModels" });
       } else if (m.error === "nokey") {
         lastHasKey = false;
+        chatModels = []; renderModelList($("msearch") ? $("msearch").value : "");
+        if ($("mcount")) { $("mcount").textContent = "Needs a key — see Settings."; $("mcount").title = "Paste a key in Settings → API key, hit Save, then Refresh."; }
         if ($("setkeyrow") && curSlug !== "ollama") $("setkeyrow").style.display = "";
         if ($("setsub") && curSlug) $("setsub").textContent = curSlug + " · no key";
         renderCtx();
@@ -1808,6 +1963,7 @@
     }
 
     else if (m.type === "answer") {
+      if (working && turn && /^MCP server[ :]/.test(m.answer || "")) { systemCard(`<div class="card"><div class="answer">${(m.answer || "").replace(/</g,"&lt;")}</div></div>`); return; } // settings echo: never finish the active run
       const thumbs = m.runId ? `<div class="fb" data-run="${m.runId}" data-handler="${m.handler||''}">
           <button class="tup" title="worked">👍</button><button class="tdn" title="not right">👎</button>
           <span class="reasons" style="display:none">
@@ -1883,6 +2039,7 @@
     const t = document.createElement("div"); t.className = "turn"; t.innerHTML = html;
     transcript.append(t);
     if (wasBottom) scroll();
+    try { if ($("findbar") && $("findbar").style.display !== "none" && $("findinput").value) runFind(); } catch (e) {}
     return t;
   }
 
@@ -1922,7 +2079,7 @@
         <option value="anthropic">Anthropic</option>
         <option value="ollama">Ollama — local, no key needed</option>
       </select>
-      <input class="obkey" id="obkey" placeholder="Paste a provider key (optional) — or get a free one" />
+      <input class="obkey" id="obkey" aria-label="Provider key" placeholder="Paste a provider key (optional) — or get a free one" />
       <select class="obkey" id="obmodel" aria-label="Model" style="display:none"></select>
       <button class="obghost obpill" id="obreload" style="display:none">↻ Load models served right now</button>
       <div class="obsub" id="obmstat" style="display:none;font-size:12px"></div>
@@ -1942,6 +2099,7 @@
       <button class="obpill" id="obfinish">Start using Forge</button>`;
     const applyLocalProvider = (slug, model) => {
       if (slug && $("setprov").querySelector(`option[value="${slug}"]`)) $("setprov").value = slug;
+      try { safeSet("forge_provider", $("setprov").value); } catch (eap2) {}
       const next = slug || curSlug || $("setprov").value;
       if (next !== curSlug && !model) curModel = null;
       else if (model) curModel = model;
@@ -2009,6 +2167,7 @@
         if (md) md.style.display = canList ? "" : "none";
         if (rl) rl.style.display = canList ? "" : "none";
         if (st) st.style.display = canList ? "" : "none";
+        if (md && canList) { md.innerHTML = ""; md.dataset.prov = pr.value; const d0 = document.createElement("option"); d0.value = ""; d0.textContent = "Default model"; md.appendChild(d0); }
         if (canList) tryFetch();
       };
       const nxt = o.querySelector("#obnext");
@@ -2037,10 +2196,15 @@
           const adopted = (pr && pr.value) || o.dataset.prov || curSlug || $("setprov").value || null;
           applyLocalProvider(adopted, null);
           if (!o.dataset.saved && !onboardHasConfig && adopted && hasBridge) { try { post({ action: "setProvider", provider: adopted }); } catch (e3) {} }
+        } else {
+          // Host already configured, nothing saved: keep the host's provider/model exactly —
+          // the dropdown default must never fork a configured setup on Skip/Continue.
+          applyLocalProvider(curSlug || $("setprov").value, null);
         }
         try { safeSet("forge_onboarded","1"); } catch (e) {} try { if (o.dataset.saved) post({ action: "getProvider" }); } catch (e2) {} o.remove(); refresh(); intent.focus(); };
     render();
     transcript.appendChild(o);
+    o.addEventListener("keydown", (e) => { if (e.key !== "Tab") return; const f = [...o.querySelectorAll("button, select, input")].filter(el => el.style.display !== "none"); if (!f.length) return; const first = f[0], last = f[f.length - 1]; if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); } else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); } });
     try { const f = o.querySelector("#obprov"); if (f) f.focus(); } catch (e) {}
   }
   // the host tells us it's a fresh run; until it does, the standalone preview still shows onboarding once
@@ -2177,21 +2341,22 @@
         earlier.filter(n => n.classList && n.classList.contains("turn")).forEach(n => transcript.insertBefore(n, top));
       }
     }
+    try { transcript.querySelectorAll(".think .thead").forEach(hd => { if (/live/.test(hd.textContent || "")) { hd.textContent = "Thought (run ended — click to expand)"; const th = hd.closest(".think"); if (th) th.classList.add("collapsed"); } }); } catch (e9) {}
     const removed = [];
     let nxt = top.nextElementSibling;
     while (nxt) { const rm = nxt; nxt = nxt.nextElementSibling; removed.push(rm); rm.remove(); }
     removed.unshift(top); top.remove();
     if (pendingCompact && !document.contains(pendingCompact.body)) pendingCompact = null;
     if (thinkEl && !thinkEl.isConnected) thinkEl = null;
-    try { transcript.querySelectorAll(".think .thead").forEach(hd => { if (/live/.test(hd.textContent || "")) { hd.textContent = "Thought (run ended — click to expand)"; const th = hd.closest(".think"); if (th) th.classList.add("collapsed"); } }); } catch (e9) {}
     if (bubble) { intent.value = bubble.textContent; grow(); }
     const banner = systemCard("Rewound conversation here — the CAD model itself is unchanged. Edit and resend to continue from this point.");
-    if (removed.length) lastReverted = { nodes: removed, refNext: banner || null, sid: sessionId, turns: savedTurns, keep: keepCount };
+    if (removed.length) lastReverted = { nodes: removed, refNext: banner || null, sid: sessionId, turns: savedTurns, keep: keepCount, prov: curSlug };
     else lastReverted = null;
     preEnhance = null; $("enhanceUndo").style.display = "none";
     mentionPaths.length = 0; renderChips(); menClose(); // restored text re-resolves host-side; drop stale chips
     turn = null; thinkEl = null; working = false; stopWords(); clearThinkTimeout();
-    clearFind(); closePops(); renderCtx();
+    clearFind(); closeOthers(); try { if ($("findbar") && $("findbar").style.display !== "none" && $("findinput").value) runFind(); } catch (e) {} renderCtx();
+    pinned = true; try { $("scrolldown").style.display = "none"; } catch (e) {}
     intent.focus(); scroll(true);
   });
 
@@ -2273,7 +2438,7 @@
   function openModels() {
     if (!hasBridge) { systemCard(needBridgeMsg("The model picker")); return; }
     if (needsKey()) { if (lastNoKeyPrompt !== curSlug) { lastNoKeyPrompt = curSlug; systemCard(`No key saved for <b>${curSlug || "this provider"}</b> — paste it in Settings → API key, hit Save, then Refresh.`); } showPop("settings"); return; }
-    if (!chatModels.length && curDynamic) post({ action: "refreshModels" });
+    if (!chatModels.length && curDynamic) { if ($("mcount")) $("mcount").textContent = "Loading…"; post({ action: "refreshModels" }); }
     closeOthers("modelpop");
     $("modelpop").style.display = "flex"; setExpanded("modelpick", true);
     $("msearch").value = "";
@@ -2344,7 +2509,7 @@
         const starred = isFav(id);
         row.innerHTML = `<span class="mcheck">${id === curModel ? "✓" : ""}</span>` +
           `<span class="mname">${shortName(id).replace(/</g,"&lt;")}<small>${String(id).replace(/</g,"&lt;")}</small></span>` +
-          `<button class="mstar${starred ? " on" : ""}" title="${starred ? "Unfavorite" : "Favorite"}">${starred ? "★" : "☆"}</button>`;
+          `<button class="mstar${starred ? " on" : ""}" aria-label="${starred ? "Unfavorite" : "Favorite"} ${shortName(id).replace(/"/g,"")}" title="${starred ? "Unfavorite" : "Favorite"}">${starred ? "★" : "☆"}</button>`;
         row.addEventListener("click", (e) => {
           const st = e.target.closest(".mstar");
           if (st) {
@@ -2367,13 +2532,15 @@
       if (chatModels.length) {
         em.textContent = "No models match — clear the search to see all.";
         em.style.cursor = "pointer"; em.title = "Clear the search";
+        em.tabIndex = 0; em.setAttribute("role", "button");
+        em.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.target.click(); } });
         em.addEventListener("click", () => { $("msearch").value = ""; renderModelList(""); $("msearch").focus(); });
       } else {
-        em.textContent = !hasBridge ? "Preview mode — model list needs SolidWorks." : curDynamic ? "No models loaded yet — hit Refresh." : "One fixed model on this provider — nothing to load.";
+        em.textContent = !hasBridge ? "Preview mode — model list needs SolidWorks." : needsKey() ? "Needs a key — see Settings." : curDynamic ? "No models loaded yet — hit Refresh." : "One fixed model on this provider — nothing to load.";
       }
       list.appendChild(em);
     }
-    $("mcount").textContent = chatModels.length ? chatModels.length + " models" + (capped ? ` — showing first ${MODEL_MAX}, refine the search` : "") : (curMissing ? "1 model (current)" : "");
+    $("mcount").textContent = chatModels.length ? chatModels.length + " models" + (capped ? ` — showing first ${MODEL_MAX}, refine the search` : "") : (curMissing ? "1 model (current)" : (!hasBridge ? "Preview mode — model list needs SolidWorks." : needsKey() ? "Needs a key — see Settings." : curDynamic ? "No models loaded yet — hit Refresh." : "One fixed model on this provider — nothing to load."));
   }
   $("modelpick").addEventListener("click", (e) => {
     e.stopPropagation();

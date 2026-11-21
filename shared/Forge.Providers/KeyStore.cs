@@ -59,9 +59,9 @@ namespace Forge.Providers
             // never leave a half-written .key file behind that Load then misreads.
             string path = PathFor(provider);
             string tmp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
-            File.WriteAllText(tmp, Convert.ToBase64String(protectedBlob));
             try
             {
+                File.WriteAllText(tmp, Convert.ToBase64String(protectedBlob));
                 if (File.Exists(path)) File.Replace(tmp, path, null);
                 else File.Move(tmp, path);
             }
@@ -82,7 +82,8 @@ namespace Forge.Providers
                 string b64 = File.ReadAllText(path).Trim();
                 byte[] protectedBlob = Convert.FromBase64String(b64);
                 byte[] plain = ProtectedData.Unprotect(protectedBlob, null, DataProtectionScope.CurrentUser);
-                return Encoding.UTF8.GetString(plain);
+                string s = Encoding.UTF8.GetString(plain);
+                return string.IsNullOrWhiteSpace(s) ? null : s;
             }
             catch
             {

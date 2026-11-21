@@ -5394,9 +5394,9 @@ namespace Forge.SolidWorks
         {
             // The doc is captured before awaits (cloud parse, approvals): it can be null or closed
             // by the time we run. Fail closed with an actionable message — never a COM cascade.
-            if (doc == null) { Send(new { type = "error", message = "Open a part or assembly first, then tell me what to do." }); return new HOutcome { Error = "no open document" }; }
+            if (doc == null) { Send(new { type = "error", message = "Open a part or assembly first, then tell me what to do." }); return new HOutcome { Error = "no open document — open a part or assembly first, then tell me what to do" }; }
             try { string probe = doc.GetTitle(); }
-            catch { Send(new { type = "error", message = "The model was closed — reopen it and ask again." }); return new HOutcome { Error = "model closed" }; }
+            catch { Send(new { type = "error", message = "The model was closed — reopen it and ask again." }); return new HOutcome { Error = "model was closed — reopen it and ask again" }; }
             OpCounter.Increment();
             ForgeData.RunBegin(spec.Name, ForgeData.Mask(intent, IntentLayer.ComponentNames(doc)), 0);
             var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -5409,7 +5409,7 @@ namespace Forge.SolidWorks
             {
                 LogRun(spec.Name, intent, doc, "error", false, 0, plan, ex.GetType().Name, sw.ElapsedMilliseconds);
                 Telemetry.Log("edit_run", success: false, swVersion: SwVer(), opsUsed: OpCounter.Count, errorCode: ex.GetType().Name, questionType: "edit", questionSummary: spec.Name);
-                Send(new { type = "error", message = "Couldn't finish '" + spec.Name + "' (" + BoundDetail(ex.Message, 300) + ") — check the model for partial changes, then retry." });
+                Send(new { type = "error", message = "Couldn't finish that step (" + BoundDetail(ex.Message, 300) + ") — check the model for partial changes, then retry." });
                 return new HOutcome { Error = BoundDetail(ex.Message, 200) };
             }
 
@@ -5481,14 +5481,14 @@ namespace Forge.SolidWorks
                 var nextSpec = Specs().Find(s => Array.IndexOf(s.Actions, action) >= 0);
                 if (nextSpec == null)
                 {
-                    Send(new { type = "answer", answer = "(also asked: \"" + action + "\" — Forge doesn't have a handler for that yet, skipped)" });
+                    Send(new { type = "answer", answer = "(also asked: \"" + action + "\" — Forge doesn't have a handler for that yet, skipped; rephrase it as explicit steps and resend)" });
                     incomplete.Add("\"" + action + "\": no handler, skipped");
                     continue;
                 }
                 bool isAsm = (int)liveDoc.GetType() == (int)swDocumentTypes_e.swDocASSEMBLY;
                 if (nextSpec.AssemblyOnly && !isAsm)
                 {
-                    Send(new { type = "answer", answer = "(also asked: \"" + action + "\" — needs the assembly open, skipped)" });
+                    Send(new { type = "answer", answer = "(also asked: \"" + action + "\" — needs the assembly open, skipped; open the assembly (.SLDASM) and resend)" });
                     incomplete.Add("\"" + action + "\": needs an assembly, skipped");
                     continue;
                 }
@@ -5593,7 +5593,7 @@ namespace Forge.SolidWorks
             var part = App?.ActiveDoc as IModelDoc2;
             if (part == null)
             {
-                Send(new { type = "answer", answer = "The primary was created but no part document is open to add the " + comp.SecondaryShape + " to — check the model.", runId = _currentRunId, handler = spec.Name + "+on_top" });
+                Send(new { type = "answer", answer = "The primary was created but no part document is open to add the " + comp.SecondaryShape + " to — open the created part, then ask for the " + comp.SecondaryShape + " again.", runId = _currentRunId, handler = spec.Name + "+on_top" });
                 return true;
             }
 
@@ -6055,6 +6055,7 @@ namespace Forge.SolidWorks
             if (Regex.IsMatch(intent, @"\b(this|that|these|those|it)\b.{0,20}\b(thicker|thinner|taller|shorter|wider|narrower|larger|smaller|longer)\b", RegexOptions.IgnoreCase)) return true;
             if (Regex.IsMatch(intent, @"\b(the|this|that)\b[^,.;]{0,25}\b(thicker|thinner)\b", RegexOptions.IgnoreCase)) return true;
             if (Regex.IsMatch(intent, @"\bmake\s+it\s+\d", RegexOptions.IgnoreCase)) return true;
+            if (Regex.IsMatch(intent, @"\b(the|this|that|it|its)\s+(length|width|height|depth|diameter|radius|thickness)\b", RegexOptions.IgnoreCase)) return true;
             return false;
         }
 

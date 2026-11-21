@@ -131,6 +131,7 @@ namespace Forge.SolidWorks
         public static void AddAlwaysAllow(string tool)
         {
             if (string.IsNullOrWhiteSpace(tool)) return;
+            if (tool.TrimStart().StartsWith("(")) return; // synthetic card ids (doom-loop "(repeat loop)") never become rules
             lock (Rules)
             {
                 Rules.RemoveAll(r => string.Equals(r.Pattern, tool.Trim(), StringComparison.OrdinalIgnoreCase));
@@ -270,6 +271,7 @@ namespace Forge.SolidWorks
         public static bool SetDenied(string tool, bool denied)
         {
             if (string.IsNullOrWhiteSpace(tool)) return false;
+            if (denied && tool.TrimStart().StartsWith("(")) return false; // synthetic card ids never become rules
             lock (Rules)
             {
                 Rules.RemoveAll(r => string.Equals(r.Pattern, tool.Trim(), StringComparison.OrdinalIgnoreCase));
@@ -321,7 +323,9 @@ namespace Forge.SolidWorks
             if (d == "always")
             {
                     // Never persist synthetic card ids (doom-loop "(repeat loop)" etc.) as rules.
-                    if (!string.IsNullOrWhiteSpace(tool) && !tool.StartsWith("(")) AddAlwaysAllow(tool);
+                    // A deny landing while the card was pending wins: persisting allow here would
+                    // wipe that deny and defeat the GateToolAsync/doom-loop deny rechecks, so skip the write.
+                    if (!string.IsNullOrWhiteSpace(tool) && !tool.TrimStart().StartsWith("(") && ApprovalFor(tool) != "deny") AddAlwaysAllow(tool);
                     d = "approve";
             }
             try { tcs.TrySetResult(d); } catch { }
@@ -346,7 +350,7 @@ namespace Forge.SolidWorks
             if (verdict == "approve" && ApprovalFor(tool) == "deny")
                 return new McpBridge.ToolResult { Ok = false, Text = DenyText(tool) };
             if (verdict == "approve") return null;
-            return new McpBridge.ToolResult { Ok = false, Text = "User rejected this step — work around it or ask what to do instead." };
+            return new McpBridge.ToolResult { Ok = false, Text = "You rejected this step — work around it or say what to do instead." };
         }
 
         // Puts up an approval card and waits for the verdict ("approve"/"reject"; "always" is
@@ -358,7 +362,7 @@ namespace Forge.SolidWorks
             string id = "appr_" + Guid.NewGuid().ToString("N").Substring(0, 8) + "_" + tool;
             var tcs = new System.Threading.Tasks.TaskCompletionSource<string>();
             lock (PendingApprovals) { PendingApprovals[id] = tcs; }
-            lock (ApprovalToolById) { ApprovalToolById[id] = tool ?? ""; }
+            lock (ApprovalToolById) { ApprovalToolById[id] = (tool ?? "").Trim(); }
             // Run-scoped sender when the pipeline supplied one: the shared CardSender slot can
             // already point at a NEWER run's sender (it is overwritten per Generate), and reading
             // it here would post this run's card through the new run's stale-guard — delivering a
@@ -538,13 +542,12 @@ namespace Forge.SolidWorks
             lock (Sessions) { Sessions.Clear(); CurrentSid = null; AgentMsgCount = 0; }
             // Fail pending approval gates instead of orphaning them: the panel is gone and no
             // verdict can ever arrive, so waiting runs would hang until their own cancel.
-            lock (PendingApprovals)
-            {
-                foreach (var kv in PendingApprovals)
-                    try { kv.Value.TrySetResult("reject"); } catch { }
-                PendingApprovals.Clear();
-            }
+            // Snapshot + resolve OUTSIDE the lock: TrySetResult runs waiter continuations
+            // inline, which must never execute while the map lock is held.
+            System.Collections.Generic.List<System.Threading.Tasks.TaskCompletionSource<string>> wake;
+            lock (PendingApprovals) { wake = new System.Collections.Generic.List<System.Threading.Tasks.TaskCompletionSource<string>>(PendingApprovals.Values); PendingApprovals.Clear(); }
             lock (ApprovalToolById) { ApprovalToolById.Clear(); }
+            foreach (var t in wake) try { t.TrySetResult("reject"); } catch { }
         }
 
         public static int HistoryCount()
@@ -713,6 +716,9 @@ namespace Forge.SolidWorks
             // Question/inspection openers ("review the model", "what is this") name the model noun
             // without asking to build — never a from-scratch create.
             if (Regex.IsMatch(text, @"^\s*(review|inspect|show|check|analy[sz]e|explain|describe|what|how|is|are|list|tell)\b", RegexOptions.IgnoreCase)) return false;
+            // Model-picker phrasing ("set model to kimi") trips CreateVerbRx on the "model" word itself —
+            // it names the chat model, never a from-scratch build.
+            if (Regex.IsMatch(text, @"\bset\s+(the\s+)?model\s+to\b", RegexOptions.IgnoreCase)) return false;
             if (!CreateVerbRx.IsMatch(text)) return false;
             if (DrawingDomainRx.IsMatch(text)) return false; // drawing/view/export: edit-domain, not a from-scratch build
             if (EditCueRx.IsMatch(text)) return false;       // "make this thicker" / "build up the flange": edits, not builds
@@ -774,7 +780,10 @@ namespace Forge.SolidWorks
             catch (OperationCanceledException) { outcome.Error = "INTERRUPTED"; return outcome; }
             catch (Exception ex)
             {
-                outcome.Error = "Couldn't start the SolidWorks-MCP server (" + CleanDetail(ex.Message, 300) + ") — restart SolidWorks, then resend.";
+                if ((ex.Message ?? "").IndexOf("disabled", StringComparison.OrdinalIgnoreCase) >= 0)
+                    outcome.Error = "The SolidWorks-MCP server is disabled — turn it on in Settings → MCP server, then resend.";
+                else
+                    outcome.Error = "Couldn't start the SolidWorks-MCP server (" + CleanDetail(ex.Message, 300) + ") — restart SolidWorks, then resend.";
                 return outcome;
             }
 
@@ -828,7 +837,7 @@ namespace Forge.SolidWorks
                 // silently defaulting to {} would run a mutating tool with invented dims.
                 if (so["args"] != null && !(so["args"] is JObject))
                 {
-                    outcome.Error = "The plan's '" + TruncPlan(toolName, 60) + "' step sent unusable settings (not a settings object) — ask again.";
+                    outcome.Error = "The plan's '" + TruncPlan(toolName, 60) + "' step sent invalid settings — ask again.";
                     return outcome;
                 }
             }
@@ -920,7 +929,10 @@ namespace Forge.SolidWorks
             catch (OperationCanceledException) { outcome.Error = "INTERRUPTED"; return outcome; }
             catch (Exception ex)
             {
-                outcome.Error = "Couldn't start the SolidWorks-MCP server (" + CleanDetail(ex.Message, 300) + ") — restart SolidWorks, then resend.";
+                if ((ex.Message ?? "").IndexOf("disabled", StringComparison.OrdinalIgnoreCase) >= 0)
+                    outcome.Error = "The SolidWorks-MCP server is disabled — turn it on in Settings → MCP server, then resend.";
+                else
+                    outcome.Error = "Couldn't start the SolidWorks-MCP server (" + CleanDetail(ex.Message, 300) + ") — restart SolidWorks, then resend.";
                 return outcome;
             }
 
@@ -1203,7 +1215,7 @@ namespace Forge.SolidWorks
             IProviderClient client, JArray history, ProviderOptions opts, System.Threading.CancellationToken ct, Action<string, string> onThink)
         {
             var oc = client as OpenAiCompatibleClient;
-            if (oc == null) throw new Exception("The agent loop needs an OpenAI-compatible provider — switch provider in settings to build.");
+            if (oc == null) throw new Exception("The agent loop needs an OpenAI-compatible provider — switch provider in Settings → Provider to build.");
             var res = await oc.CompleteStreamingRawAsync(history, opts, ct, onThink);
             return res;
         }

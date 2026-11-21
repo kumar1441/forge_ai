@@ -105,7 +105,7 @@ namespace Forge.Providers
             IReadOnlyList<ChatMessage> messages, ProviderOptions opts, CancellationToken ct, System.Action<string, string> onDelta)
         {
             // Faulted task (not a synchronous throw) so `var t = ...; await t` callers see the same error.
-            try { throw new ProviderException("Streaming is not supported for the Anthropic provider — Enhance and planning fall back to a single fast call automatically; the full agent build loop needs an OpenAI-compatible model (switch provider in settings to build)."); }
+            try { throw new ProviderException("Streaming is not supported for the Anthropic provider — Enhance and planning fall back to a single fast call automatically; the full agent build loop needs an OpenAI-compatible model (switch provider in Settings → Provider to build)."); }
             catch (ProviderException ex) { var tcs = new TaskCompletionSource<ProviderResult>(); tcs.SetException(ex); return tcs.Task; }
         }
 

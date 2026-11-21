@@ -252,7 +252,10 @@ namespace Forge.Providers
                 try { req0.Dispose(); } catch { } // sent: release it on every path (success + retries)
                 if (resp.IsSuccessStatusCode) break;
                 string t = "";
-                try { t = await resp.Content.ReadAsStringAsync().ConfigureAwait(false); } catch { }
+                try { t = await resp.Content.ReadAsStringAsync().ConfigureAwait(false); }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { try { resp.Dispose(); } catch { } resp = null; throw; }
+                catch { }
+                ct.ThrowIfCancellationRequested();
                 int code = (int)resp.StatusCode;
                 try { resp.Dispose(); } catch { }
                 resp = null;
@@ -266,27 +269,70 @@ namespace Forge.Providers
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             }
 
+            ct.ThrowIfCancellationRequested();
+            // Split-frame reassembly: one JSON event may arrive as several data: lines, so a
+            // failed parse is stashed once and prepended to the next payload. firstNonData
+            // surfaces a non-SSE (HTML/JSON) error body in the final error. Both are read below
+            // the using blocks, hence declared here.
+            string pendingFrag = null;
+            string firstNonData = null;
             using (resp)
             {
                     using (var stream = await resp.Content.ReadAsStreamAsync().ConfigureAwait(false))
                     using (var reader = new StreamReader(stream, Encoding.UTF8))
                     // Cancel must break a stalled mid-stream read: ReadLineAsync takes no token,
                     // so disposing the response on cancel is what unblocks the pending read.
+                    // (Installed after ReadAsStreamAsync has returned: a cancel landing in that
+                    // narrow window is caught by the per-line check on the first line below.)
                     using (ct.Register(() => { try { resp.Dispose(); } catch { } }))
                     {
+                        ct.ThrowIfCancellationRequested();
                         string line;
                         try
                         {
                         while ((line = await reader.ReadLineAsync().ConfigureAwait(false)) != null)
                         {
                             if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
-                            line = line.Trim();
-                            if (line.Length < 5 || !line.StartsWith("data:")) continue;
-                            string data = line.Substring(5).Trim();
+                            line = line.Trim().TrimStart((char)0xFEFF);
+                            if (line.Length == 0) continue;
+                            if (line[0] == ':') continue; // SSE comment / heartbeat
+                            if (line == "data") line = "data:";
+                            if (line.Length < 5 || !line.StartsWith("data:"))
+                            {
+                                // Non-SSE error body mid-stream (200-then-HTML/JSON): sniff a
+                                // structured error envelope, else stash the head for the final error.
+                                if (firstNonData == null && line.Length > 0)
+                                    firstNonData = line.Length > 500 ? line.Substring(0, 500) : line;
+                                if (line.StartsWith("{") && line.Contains("\"error\""))
+                                {
+                                    try
+                                    {
+                                        var rawErr = JObject.Parse(line);
+                                        var re = rawErr["error"];
+                                        if (re != null && re.Type != JTokenType.Null)
+                                        {
+                                            string em2 = (re as JObject) != null ? (string)((JObject)re)["message"] : null;
+                                            throw new ProviderException("Provider stream error (" + Truncate(em2 ?? re.ToString()) + ") — try again; if it repeats, switch model.");
+                                        }
+                                    }
+                                    catch (ProviderException) { throw; }
+                                    catch { }
+                                }
+                                continue;
+                            }
+                            string data = line.Substring(5).Trim().TrimStart((char)0xFEFF);
+                            if (data.Length == 0) continue; // keepalive
                             if (data == "[DONE]") break;
+                            if (pendingFrag != null) { data = pendingFrag + data; pendingFrag = null; }
                             JObject evt;
                             try { evt = JObject.Parse(data); }
-                            catch { continue; }
+                            catch
+                            {
+                                // Split frame: hold one bounded fragment for the next data: line.
+                                // A truncated tail at EOF is discarded; prior deltas are kept.
+                                pendingFrag = data.Length < 100000 ? data : null;
+                                continue;
+                            }
                             // 200-then-error mid-stream: without this the error event is skipped
                             // as delta-less and the run ends with misleading "no content".
                             var streamErr = evt["error"];
@@ -379,7 +425,7 @@ namespace Forge.Providers
             var calls = new System.Collections.Generic.List<ToolCall>(ordered.Count);
             foreach (int k in ordered) calls.Add(toolParts[k]);
             if (string.IsNullOrWhiteSpace(content) && calls.Count == 0)
-                throw new ProviderException("Provider returned no content — try again or rephrase.");
+                throw new ProviderException("Provider returned no content" + (string.IsNullOrEmpty(firstNonData) ? "" : " (detail: " + Truncate(firstNonData) + ")") + " — try again or rephrase.");
             return new ProviderResult { Text = content, TokIn = tokIn, TokOut = tokOut, Model = gotModel ?? model, ToolCalls = calls };
         }
 

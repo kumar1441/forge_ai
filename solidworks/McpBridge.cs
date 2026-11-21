@@ -43,6 +43,8 @@ namespace Forge.SolidWorks
             public string Command = "uvx";
             public string[] Args = new[] { "solidworks-mcp" };
             public int StartTimeoutMs = 300000;
+            public bool Enabled = true;
+            public int TimeoutMs = 300000;
         }
 
         private static McpConfig LoadConfig()
@@ -63,9 +65,33 @@ namespace Forge.SolidWorks
                 }
                 int tmo = (int?)j["startTimeoutMs"] ?? 0;
                 if (tmo >= 30000) cfg.StartTimeoutMs = tmo;
+                if (j["enabled"] != null) { try { cfg.Enabled = (bool)j["enabled"]; } catch { cfg.Enabled = true; } }
+                int ptmo = (int?)j["timeoutMs"] ?? 0;
+                if (ptmo >= 30000) cfg.TimeoutMs = ptmo;
             }
             catch { }
             return cfg;
+        }
+
+        private static string ConfigPath()
+        {
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Forge", "mcp.json");
+        }
+
+        /// <summary>Persist MCP settings (merges with the existing file so command/args survive).</summary>
+        public static void SaveConfig(bool? enabled, int timeoutMs)
+        {
+            try
+            {
+                string p = ConfigPath();
+                JObject j = new JObject();
+                try { if (File.Exists(p)) j = JObject.Parse(File.ReadAllText(p)); } catch { j = new JObject(); }
+                if (enabled.HasValue) j["enabled"] = enabled.Value;
+                if (timeoutMs >= 30000) j["timeoutMs"] = timeoutMs;
+                Directory.CreateDirectory(Path.GetDirectoryName(p));
+                File.WriteAllText(p, j.ToString(Newtonsoft.Json.Formatting.None));
+            }
+            catch { }
         }
 
         public static bool IsRunning
@@ -73,17 +99,28 @@ namespace Forge.SolidWorks
             get { lock (Gate) { try { return Proc != null && !Proc.HasExited; } catch { return false; } } }
         }
 
-        /// <summary>Launch configuration for status display (read-only snapshot).</summary>
-        public static void Describe(out string command, out string args)
-        {
-            var cfg = LoadConfig();
-            command = cfg.Command ?? "";
-            args = cfg.Args != null ? string.Join(" ", cfg.Args) : "";
-        }
+    /// <summary>Launch configuration for status display (read-only snapshot).</summary>
+    public static void Describe(out string command, out string args)
+    {
+        bool enabledDummy;
+        int timeoutDummy;
+        DescribeFull(out command, out args, out enabledDummy, out timeoutDummy);
+    }
+
+    public static void DescribeFull(out string command, out string args, out bool enabled, out int timeoutMs)
+    {
+        var cfg = LoadConfig();
+        command = cfg.Command ?? "";
+        args = cfg.Args != null ? string.Join(" ", cfg.Args) : "";
+        enabled = cfg.Enabled;
+        timeoutMs = cfg.TimeoutMs;
+    }
 
         /// <summary>Start the server + handshake if needed. Throws McpException with a setup hint on failure.</summary>
         public static async Task EnsureStartedAsync(int timeoutMs = 0, CancellationToken ct = default(CancellationToken))
         {
+            if (!LoadConfig().Enabled)
+                throw new McpException("MCP server is disabled — turn it on in Settings → MCP server, then retry.");
             int initTimeout;
             bool acquired = false;
             try
@@ -193,8 +230,9 @@ namespace Forge.SolidWorks
                 }
             }
             catch { }
-            // Server died: fail everything outstanding. Snapshot keys first so a
-            // concurrent restart's new ids (added after the death) are not stolen.
+            // Server died: fail everything outstanding. If a restart already swapped
+            // in a new Proc, the new reader owns the current ids — don't steal them.
+            lock (Gate) { if (!object.ReferenceEquals(Proc, proc)) return; }
             int[] dead;
             try { dead = new System.Collections.Generic.List<int>(Pending.Keys).ToArray(); }
             catch { dead = new int[0]; }
@@ -267,7 +305,8 @@ namespace Forge.SolidWorks
             string m = ex != null ? (ex.Message ?? "") : "";
             return m.IndexOf("not running", StringComparison.OrdinalIgnoreCase) >= 0
                 || m.IndexOf("exited", StringComparison.OrdinalIgnoreCase) >= 0
-                || m.IndexOf("stopped", StringComparison.OrdinalIgnoreCase) >= 0;
+                || m.IndexOf("stopped", StringComparison.OrdinalIgnoreCase) >= 0
+                || m.IndexOf("write failed", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static string Trunc(string s, int max)
@@ -285,20 +324,18 @@ namespace Forge.SolidWorks
             var msg = new JObject { ["jsonrpc"] = "2.0", ["id"] = id, ["method"] = method };
             if (p != null) msg["params"] = p;
             var tcs = new TaskCompletionSource<string>();
-            Pending[id] = tcs;
             lock (Gate)
             {
                 if (Stdin == null || (Proc != null && Proc.HasExited))
-                {
-                    TaskCompletionSource<string> dropped;
-                    Pending.TryRemove(id, out dropped);
                     throw new McpException("MCP server is not running (is SolidWorks still open?).");
-                }
+                Pending[id] = tcs;
                 try { Stdin.WriteLine(msg.ToString(Newtonsoft.Json.Formatting.None)); }
                 catch (Exception ex)
                 {
                     TaskCompletionSource<string> dropped;
                     Pending.TryRemove(id, out dropped);
+                    try { tcs.TrySetException(new McpException("MCP write failed: " + ex.Message)); } catch { }
+                    ObserveFault(tcs.Task);
                     throw new McpException("MCP write failed: " + ex.Message);
                 }
             }
@@ -318,6 +355,7 @@ namespace Forge.SolidWorks
             {
                 TaskCompletionSource<string> dropped;
                 Pending.TryRemove(id, out dropped);
+                try { tcs.TrySetException(new OperationCanceledException(ct)); } catch { }
                 ObserveFault(tcs.Task); // a racing StopLocked must not surface as UnobservedTaskException
                 throw new OperationCanceledException(ct);
             }
@@ -325,6 +363,7 @@ namespace Forge.SolidWorks
             {
                 TaskCompletionSource<string> dropped;
                 Pending.TryRemove(id, out dropped);
+                try { tcs.TrySetException(new McpException("MCP `" + method + "` timed out.")); } catch { }
                 ObserveFault(tcs.Task); // late reply / racing death-fail must have no unobserved waiter
                 throw new McpException("MCP `" + method + "` timed out after " + (timeoutMs / 1000) + "s.");
             }
@@ -362,9 +401,10 @@ namespace Forge.SolidWorks
             public string Text = "";
         }
 
-        /// <summary>Call one MCP tool. The server reports failures as {ok:false,...} text — surfaced, never thrown.</summary>
-        public static async Task<ToolResult> CallToolAsync(string name, JObject args, int timeoutMs = 300000, CancellationToken ct = default(CancellationToken))
+        /// <summary>Call one MCP tool. The server reports failures as {ok:false,...} text — surfaced, never thrown. timeoutMs&lt;=0 uses the configured default.</summary>
+        public static async Task<ToolResult> CallToolAsync(string name, JObject args, int timeoutMs = 0, CancellationToken ct = default(CancellationToken))
         {
+            if (timeoutMs <= 0) { try { timeoutMs = LoadConfig().TimeoutMs; } catch { timeoutMs = 300000; } if (timeoutMs < 30000) timeoutMs = 30000; }
             var p = new JObject { ["name"] = name };
             p["arguments"] = args ?? new JObject();
             JObject res;

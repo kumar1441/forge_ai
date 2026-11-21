@@ -478,21 +478,53 @@ namespace Forge.SolidWorks
                 {
                     try
                     {
-                        string cmd, args;
-                        McpBridge.Describe(out cmd, out args);
+                        string cmd, args; bool enabled; int tmo;
+                        McpBridge.DescribeFull(out cmd, out args, out enabled, out tmo);
                         bool running = false;
                         try { running = McpBridge.IsRunning; } catch { }
-                        Send(new { type = "answer", answer = "MCP server: " + (running ? "running" : "not running (starts on first multi-part build)") + " — `" + (cmd + " " + args).Trim() + "`. Override in %APPDATA%\\Forge\\mcp.json." });
+                        Send(new { type = "answer", answer = "MCP server: " + (running ? "running" : (enabled ? "not running (starts on first multi-part build)" : "disabled in Settings")) + " — `" + (cmd + " " + args).Trim() + "` (" + (tmo / 1000) + "s timeout). Toggle + timeout live under Settings → MCP server." });
                     }
-                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't read MCP status (" + BoundDetail(ex.Message, 200) + ") — check %APPDATA%\\Forge\\mcp.json and try again." }); }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't read MCP status (" + BoundDetail(ex.Message, 200) + ") — check Settings → MCP server, then try again." }); }
+                }
+                else if (action == "mcpConfig")
+                {
+                    try
+                    {
+                        string cmd, args; bool enabled; int tmo;
+                        McpBridge.DescribeFull(out cmd, out args, out enabled, out tmo);
+                        bool running = false;
+                        try { running = McpBridge.IsRunning; } catch { }
+                        Send(new { type = "mcpConfig", enabled = enabled, timeoutMs = tmo, command = cmd, args = args, running = running });
+                    }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't read MCP config (" + BoundDetail(ex.Message, 200) + ") — check Settings → MCP server, then try again." }); }
+                }
+                else if (action == "mcpSet")
+                {
+                    try
+                    {
+                        bool enabled = true; bool hasEnabled = false;
+                        try { object eo = msg.enabled; if (eo != null) { enabled = Convert.ToBoolean(eo); hasEnabled = true; } } catch { }
+                        int tmo = 0;
+                        try { tmo = Convert.ToInt32(msg.timeoutMs); } catch { }
+                        McpBridge.SaveConfig(hasEnabled ? (bool?)enabled : (bool?)null, tmo);
+                        string cmd, args; bool en2; int t2;
+                        McpBridge.DescribeFull(out cmd, out args, out en2, out t2);
+                        Send(new { type = "mcpConfig", enabled = en2, timeoutMs = t2, command = cmd, args = args, running = McpBridge.IsRunning });
+                        Send(new { type = "answer", answer = "MCP server " + (en2 ? "enabled" : "disabled") + " (" + (t2 / 1000) + "s timeout). Change takes effect on the next build." });
+                    }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't save MCP settings (" + BoundDetail(ex.Message, 200) + ") — check Settings → MCP server, then try again." }); }
                 }
                 else if (action == "reset")   // rehearsal/recording: wipe the panel + every pending thread for a clean take
                 {
                     try { if (_runCts != null) _runCts.Cancel(); } catch { }
                     try { if (_enhanceCts != null) _enhanceCts.Cancel(); } catch { }
+                    _currentRunId = null; // superseded runs go silent: late answers + think deltas must not land in the clean take
                     _pendingIntent = null; _attachedFile = null; _pendingConfirm = null;
+                    _pendingIncoming = null; _lastBoardChange = null; _lastRelayedClarify = null;
+                    lock (_mentionedFiles) { _mentionedFiles.Clear(); }
                     _lastImpactTarget = null; _lastImpactPrimary = null; _lastImpactDependents = null;
                     try { McpBuild.ClearHistory(); } catch { } // fresh agent conversation (+ fails orphaned approval gates)
+                    try { McpBuild.CardSender = null; } catch { } // drop the dead run's card sender with its approvals
                     Send(new { type = "attachCleared" });
                 }
                 else if (action == "highlight") HighlightByName(msg);
@@ -1075,6 +1107,7 @@ namespace Forge.SolidWorks
             _enhanceCts = new System.Threading.CancellationTokenSource();
             var ect = _enhanceCts.Token;
             int myE = ++_enhanceSeq; // a newer Enhance owns the panel: stay silent when stale
+            System.Diagnostics.Stopwatch watch = null; // hoisted: catch blocks below report elapsed time
             // Small model for rewrites: cheap + fast, falls back to the picked model
             // when no known-cheap model exists for this provider. Temp 0.7: rewrites
             // want a little variance, not determinism.
@@ -1092,9 +1125,9 @@ namespace Forge.SolidWorks
                 // Stream the chain-of-thought live (Kilo-style) instead of a dead timer: reasoning
                 // deltas print into a thinking block as they arrive; the cleaned result still lands
                 // in the composer for review. Marshalled to the UI thread — the stream runs on IO threads.
-                // picked is the run's Resolve snapshot: a picker switch mid-stream can't mix models.
-                var ui = System.Threading.SynchronizationContext.Current;
-                var watch = System.Diagnostics.Stopwatch.StartNew();
+                    // picked is the run's Resolve snapshot: a picker switch mid-stream can't mix models.
+                    var ui = System.Threading.SynchronizationContext.Current;
+                    try { watch = System.Diagnostics.Stopwatch.StartNew(); } catch { }
                 Send(new { type = "thinkStart", model = useModel, label = "Enhancing" });
                 // Temp 0.7 only when the model accepts custom temperatures (Kilo enhance-prompt.ts);
                 // reasoning variants get the provider default instead of a rejected param.
@@ -1111,7 +1144,7 @@ namespace Forge.SolidWorks
                             if (myE != _enhanceSeq) return; // superseded: don't interleave the new Enhance's block
                             try
                             {
-                                if (ui != null) ui.Post(_ => { try { Send(new { type = "think", text = delta }); } catch { } }, null);
+                                if (ui != null) ui.Post(_ => { try { if (myE != _enhanceSeq) return; Send(new { type = "think", text = delta }); } catch { } }, null);
                                 else Send(new { type = "think", text = delta });
                             }
                             catch { }
@@ -1141,6 +1174,7 @@ namespace Forge.SolidWorks
             catch (Exception ex)
             {
                 if (myE != _enhanceSeq) return; // superseded: the new Enhance owns the panel
+                try { Send(new { type = "thinkEnd", seconds = watch != null ? (int)watch.Elapsed.TotalSeconds : 0, interrupted = true }); } catch { }
                 string detail = BoundDetail(ex.Message, 300);
                 if ((detail ?? "").Contains("timed out"))
                     detail = "TIMED OUT after 10 minutes — the model is overloaded or thinking too long; try again or switch to a faster model in the picker";
