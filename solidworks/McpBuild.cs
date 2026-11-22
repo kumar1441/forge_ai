@@ -978,9 +978,24 @@ namespace Forge.SolidWorks
                 // Prune old session files (keep newest 30).
                 try
                 {
-                    var files = new DirectoryInfo(AgentDir()).GetFiles("*.json");
-                    Array.Sort(files, (a, b) => b.LastWriteTimeUtc.CompareTo(a.LastWriteTimeUtc));
-                    for (int i = 30; i < files.Length; i++) { try { files[i].Delete(); } catch { } }
+                    // Count/prune only sid.json files — *.ctx.json are per-session sidecars, not
+                    // separate sessions, and counting them halves capacity and splits sid/ctx pairs.
+                    var all = new DirectoryInfo(AgentDir()).GetFiles("*.json");
+                    var files = new System.Collections.Generic.List<FileInfo>();
+                    foreach (var f in all)
+                        if (!f.Name.EndsWith(".ctx.json", System.StringComparison.OrdinalIgnoreCase)) files.Add(f);
+                    files.Sort((a, b) => b.LastWriteTimeUtc.CompareTo(a.LastWriteTimeUtc));
+                    for (int i = 30; i < files.Count; i++)
+                    {
+                        var oldFile = files[i];
+                        try { oldFile.Delete(); } catch { }
+                        try
+                        {
+                            string ctx = oldFile.FullName.Substring(0, oldFile.FullName.Length - ".json".Length) + ".ctx.json";
+                            if (File.Exists(ctx)) File.Delete(ctx);
+                        }
+                        catch { }
+                    }
                 }
                 catch { }
             }
@@ -990,12 +1005,13 @@ namespace Forge.SolidWorks
         public static void ClearHistory()
         {
             lock (Sessions) { Sessions.Clear(); CurrentSid = null; AgentMsgCount = 0; }
-            // A full clear is a new conversation everywhere: drop context totals too.
+            // A full clear resets the in-memory conversation, but the on-disk pair is kept together:
+            // {sid}.json is the transcript the panel's history/restore reloads via EnsureSession, and
+            // {sid}.ctx.json is its context stats. Deleting only the sidecar left the restored pill at
+            // 0%; LoadCtx repopulates the cleared tables from the preserved sidecar on the next restore.
             try
             {
                 lock (CtxLock) { CtxCur.Clear(); CtxOutSum.Clear(); CtxTurns.Clear(); }
-                foreach (var f in new DirectoryInfo(AgentDir()).GetFiles("*.ctx.json"))
-                    try { f.Delete(); } catch { }
             }
             catch { }
             // Fail pending approval gates instead of orphaning them: the panel is gone and no

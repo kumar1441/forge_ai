@@ -35,6 +35,10 @@ namespace Forge.Providers
             try { provider = (string)cfg["provider"]; } catch { provider = null; }
             if (string.IsNullOrWhiteSpace(provider)) return null;
             try { baseUrl = (string)cfg["baseUrl"]; } catch { baseUrl = null; }
+            // Slug-only configs (provider "opencode" with no baseUrl) fall back to the zen
+            // gateway instead of silently drifting to api.openai.com.
+            if (string.Equals((provider ?? "").Trim(), "opencode", StringComparison.OrdinalIgnoreCase)
+                && string.IsNullOrWhiteSpace(baseUrl)) baseUrl = "https://opencode.ai/zen/v1";
             try { model = (string)cfg["model"]; } catch { model = null; }
             if (model != null) model = model.Trim();
             if (model != null && model.Length == 0) model = null;
@@ -50,6 +54,13 @@ namespace Forge.Providers
             {
                 try { apiKey = Environment.GetEnvironmentVariable("FORGE_PROVIDER_KEY"); } catch { }
             }
+            // OpenCode Zen (Kilo parity): no key anywhere -> literal bearer token "public";
+            // the gateway then serves only zero-cost models. Never applied to other slugs.
+            if (string.IsNullOrEmpty(apiKey)
+                && string.Equals(slug, "opencode", System.StringComparison.OrdinalIgnoreCase))
+            {
+                apiKey = "public";
+            }
 
             switch (provider.Trim().ToLowerInvariant())
             {
@@ -62,6 +73,7 @@ namespace Forge.Providers
                 case "openrouter":
                 case "nvidia":
                 case "ollama":
+                case "opencode":
                     return new OpenAiCompatibleClient(apiKey, baseUrl, model);
                 case "anthropic":
                     return new AnthropicClient(apiKey, baseUrl, model);
@@ -100,11 +112,21 @@ namespace Forge.Providers
         /// </summary>
         public static bool SupportsTemperature(string model)
         {
-            if (string.IsNullOrWhiteSpace(model)) return true;
+            return !IsReasoningModel(model);
+        }
+
+        /// <summary>
+        /// True for the reasoning family (o-series, GPT-5/6, codex, thinking/reasoning variants) that
+        /// rejects custom temperature AND requires max_completion_tokens instead of max_tokens.
+        /// Single source of truth for both capability gates; never throws.
+        /// </summary>
+        public static bool IsReasoningModel(string model)
+        {
+            if (string.IsNullOrWhiteSpace(model)) return false;
             string m = model.Trim().ToLowerInvariant();
-            if (System.Text.RegularExpressions.Regex.IsMatch(m, @"(^|[^a-z0-9])(o[1-9]|gpt-[56]|codex)([^a-z0-9]|$)")) return false;
-            if (System.Text.RegularExpressions.Regex.IsMatch(m, @"(^|[^a-z0-9])(think|thinking|reason|reasoning|reasoner)([^a-z0-9]|$)")) return false;
-            return true;
+            if (System.Text.RegularExpressions.Regex.IsMatch(m, @"(^|[^a-z0-9])(o[1-9]|gpt-[56]|codex)([^a-z0-9]|$)")) return true;
+            if (System.Text.RegularExpressions.Regex.IsMatch(m, @"(^|[^a-z0-9])(think|thinking|reason|reasoning|reasoner)([^a-z0-9]|$)")) return true;
+            return false;
         }
 
         /// <summary>
@@ -181,6 +203,7 @@ namespace Forge.Providers
                 case "openai": return "OpenAI";
                 case "anthropic": return "Anthropic";
                 case "ollama": return "Ollama";
+                case "opencode": return "OpenCode Zen";
                 default: return "the provider";
             }
         }
@@ -293,6 +316,7 @@ namespace Forge.Providers
             if (p == "ollama") return "ollama";
             if (bu.Contains("integrate.api.nvidia.com")) return "nvidia";
             if (bu.Contains("openrouter.ai")) return "openrouter";
+            if (bu.Contains("opencode.ai")) return "opencode";
             if (bu.Contains("api.deepseek.com")) return "deepseek";
             if (bu.Contains("api.openai.com")) return "openai";
             if (bu.Contains("localhost") || bu.Contains("127.0.0.1") || bu.Contains("::1")) return "ollama";
@@ -324,6 +348,17 @@ namespace Forge.Providers
                     {
                         string es = EnvSlug(s);
                         var k = es == null ? null : Environment.GetEnvironmentVariable("FORGE_PROVIDER_KEY_" + es);
+                        if (!string.IsNullOrWhiteSpace(k)) return k;
+                    }
+                    catch { }
+                }
+                // Kilo parity for OpenCode Zen: OPENCODE_API_KEY is read in addition to
+                // FORGE_PROVIDER_KEY_OPENCODE (slug env above) and the per-slug key file.
+                if (string.Equals(s, "opencode", System.StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        var k = Environment.GetEnvironmentVariable("OPENCODE_API_KEY");
                         if (!string.IsNullOrWhiteSpace(k)) return k;
                     }
                     catch { }

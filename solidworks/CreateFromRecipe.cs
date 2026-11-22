@@ -85,6 +85,7 @@ namespace Forge.SolidWorks
             ISldWorks app, string intent, Func<string, string, string, string, Task> emit, System.Threading.CancellationToken ct)
         {
             var outcome = new RecipeCreateOutcome();
+            var ui = SynchronizationContext.Current; // UI/STA context — live COM (app) must never be touched off it
             if (!IsRecipeCreate(intent)) return outcome;
 
             IProviderClient client;
@@ -136,12 +137,40 @@ namespace Forge.SolidWorks
             try
             {
                 await emit("Builder", "building " + ((string)recipeJson["name"] ?? "the part") + " feature by feature", "run", null);
-                res = await Task.Run(() => RecipeExecutor.Execute(app, Recipe.FromJObject(recipeJson), Path.GetTempPath(), true), ct);
+                // RecipeExecutor.Execute touches the live ISldWorks COM object: it MUST run on the
+                // UI/STA thread. Task.Run here would access COM from a threadpool thread and risk an
+                // access violation that takes SolidWorks down. Marshal through the context captured
+                // at entry and await the real completion (no abandoned build running in the background).
+                ct.ThrowIfCancellationRequested();
+                if (ui != null)
+                {
+                    var tcs = new TaskCompletionSource<RecipeResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    ui.Post(_ =>
+                    {
+                        try { tcs.TrySetResult(RecipeExecutor.Execute(app, Recipe.FromJObject(recipeJson), Path.GetTempPath(), true)); }
+                        catch (OperationCanceledException) { tcs.TrySetCanceled(); }
+                        catch (Exception ex) { tcs.TrySetException(ex); }
+                    }, null);
+                    res = await tcs.Task;
+                }
+                else
+                {
+                    res = RecipeExecutor.Execute(app, Recipe.FromJObject(recipeJson), Path.GetTempPath(), true);
+                }
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 outcome.Error = "The build failed before it started (" + ex.GetType().Name + ": " + ex.Message + ").";
+                return outcome;
+            }
+
+            // Stop pressed after Execute began cannot abort COM feature creation: features may already
+            // exist in the open model. Report that honestly instead of the caller's "nothing was built"
+            // (which stays accurate only when the ThrowIfCancellationRequested above rethrows first).
+            if (ct.IsCancellationRequested)
+            {
+                outcome.Error = "Interrupted — partial features may exist in the open model; review it (↩ revert or edit and resend).";
                 return outcome;
             }
 

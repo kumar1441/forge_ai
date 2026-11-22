@@ -476,6 +476,7 @@
           <option value="nvidia">NVIDIA NIM — free models API</option>
           <option value="openai">OpenAI</option>
           <option value="anthropic">Anthropic</option>
+          <option value="opencode">OpenCode Zen — no key = free models only (public)</option>
           <option value="ollama">Ollama — local, no key needed</option>
         </select>
       </div>
@@ -622,7 +623,7 @@
   const needBridgeMsg = (what) => `${what} needs SolidWorks — you're in preview mode, so nothing was sent. Your draft is kept. Open SolidWorks to use it for real.`;
   let lastHasKey = null; // set by provider messages; null = unknown yet
   let lastNoKeyPrompt = null; // slug last guided to Settings, so the no-key card shows once per provider
-  const needsKey = () => curSlug && curSlug !== "ollama" && lastHasKey === false;
+  const needsKey = () => curSlug && curSlug !== "ollama" && curSlug !== "opencode" && lastHasKey === false;
   const $ = (id) => document.getElementById(id);
   const transcript = $("transcript");
   const intent = $("intent");
@@ -896,7 +897,6 @@
       let atn = at === null ? 60 : parseInt(at, 10); if (isNaN(atn) || atn < 10 || atn > 95) atn = 60;
       post({ action: "setCompact", on: on === null ? true : on === "1", at: atn });
     } catch (e2) {}
-    try { post({ action: "telemetry", on: safeGet("forge_telm") === "1" }); } catch (e3) {}
     renderCtx();
   }
   window.addEventListener("DOMContentLoaded", refresh);
@@ -1072,7 +1072,7 @@
   let customKinds = {};
   const normCustomProv = (a) => (Array.isArray(a) ? a : []).filter(x => x && String(x.slug || "").trim() && String(x.baseUrl || "").trim())
     .map(x => ({ slug: String(x.slug).trim().toLowerCase(), label: String(x.label || "").trim() || null, kind: String(x.kind || "").trim().toLowerCase(), baseUrl: String(x.baseUrl).trim() }));
-  const isListableProv = (slug) => ["deepseek", "openrouter", "nvidia", "openai"].indexOf(slug) >= 0 || customKinds[slug] === "openai-compatible";
+  const isListableProv = (slug) => ["deepseek", "openrouter", "nvidia", "openai", "opencode"].indexOf(slug) >= 0 || customKinds[slug] === "openai-compatible";
   // Rebuild the custom <option>s in the Settings dropdown (built-ins are static markup).
   // Selection is preserved; options carry the label + kind so customs read like built-ins.
   function syncCustomProvOptions() {
@@ -1132,9 +1132,12 @@
     curSlug = known || m.slug || sel.value; // keep custom slugs: no dropdown option, but pill/ctx/key-state must stay on the host's provider
     lastHasKey = (curSlug === "ollama") ? true : !!m.hasKey;
     const isOllama = curSlug === "ollama";
+    const isOpencode = curSlug === "opencode";
     const needKeyRow = !isOllama && !m.hasKey;
     if (row) row.style.display = needKeyRow ? "" : "none";
-    if (sub) sub.textContent = (m.baseUrl || "") + (m.model ? " · " + m.model : "") + (isOllama ? " · local, no key needed" : (m.hasKey ? " · key saved ✓" : " · no key"));
+    const keyInput = $("setkey");
+    if (keyInput) keyInput.placeholder = isOpencode ? "optional — no key = free models only (public)" : "paste key";
+    if (sub) sub.textContent = (m.baseUrl || "") + (m.model ? " · " + m.model : "") + (isOllama ? " · local, no key needed" : (m.hasKey ? " · key saved ✓" : isOpencode ? " · no key = free models only (public)" : " · no key"));
     // Custom models ride the provider payload (like renderSettings): store + paint the list.
     try { if (m.customModels !== undefined) customModels = normCustom(m.customModels); } catch (ecm) {}
     renderCustomList();
@@ -1342,6 +1345,13 @@
   });
 
   let working = false;
+  // ✨ Enhance is a single-shot composer helper: block it while a run owns the turn.
+  function syncEnhanceBtn() {
+    const eb = $("enhance"); if (!eb) return;
+    eb.style.pointerEvents = working ? "none" : "";
+    eb.style.opacity = working ? "0.5" : "";
+    eb.title = working ? "Finish or stop the current run first" : "";
+  }
 
   // ---- @-mention files (Kilo-style): @ triggers a host file search, pick to attach ----
   let menOpen = false, menItems = [], menIdx = 0, menTimer = null, menStart = -1, menSentQ = null;
@@ -1595,7 +1605,7 @@
     if (text.startsWith("/")) { intent.value = ""; grow(); slashRun(text); return; }
     if (working) return;
     closeOthers(); clearFind();
-    working = true;
+    working = true; syncEnhanceBtn();
     if (thinkEl) { // previous run never sent thinkEnd (killed): close it interrupted so the new run starts clean
       try { const phd = thinkEl.querySelector(".thead"); if (phd && /live/.test(phd.textContent)) phd.textContent = "Interrupted — partial thinking kept (click to expand)"; if (!thinkEl._manual) thinkEl.classList.remove("collapsed"); } catch (e) {}
       thinkEl = null; clearThinkTimeout();
@@ -1645,7 +1655,7 @@
   }
 
   // ---- slash commands (Kilo-style: local, instant, no LLM round-trip) ----
-  const SLASH_HELP = "/compact — summarize older turns into an expandable block (aliases: /summarize, /smol, /condense)\n/settings — open Settings\n/clear, /new — start a fresh chat\n/regen, /regenerate — re-run the last prompt\n/model, /models — open the model picker\n/provider [slug] — switch provider (deepseek|openrouter|nvidia|openai|anthropic|ollama) or open settings\n/connect — open provider settings (Kilo-style connect)\n/allow <tool> — always allow one tool going forward\n/deny <tool> — block one tool outright · /undeny <tool> — unblock it\n/auto-approve [on|off] — master switch for unattended tool runs (aliases: /autoapprove /approve-all /approveall)\n/mcps — list servers · /mcps enable|disable|start|stop <name> · /mcps timeout <name> <secs>\n/history, /sessions — open chat history · /resume, /continue — same list\n/rename <title> — rename the current chat\n/status — show usage details\n/undo — revert the last turn · /redo — restore it · /copy — copy last answer · /copy-session — copy whole chat · /export — save transcript as markdown (rendered turns only) · /about — panel/provider info (no diagnostics copy) · /review — design review of the active model (ignores extra args) · /thinking, /toggle-thinking — toggle thinking blocks\n/help — this list\n/unrevert — restore the last reverted turns\nNotifications — Settings toggle for approval + done + teammate OS toasts";
+  const SLASH_HELP = "/compact — summarize older turns into an expandable block (aliases: /summarize, /smol, /condense)\n/settings — open Settings\n/clear, /new — start a fresh chat\n/regen, /regenerate — re-run the last prompt\n/model, /models — open the model picker\n/provider [slug] — switch provider (deepseek|openrouter|nvidia|openai|anthropic|opencode|ollama) or open settings\n/connect — open provider settings (Kilo-style connect)\n/allow <tool> — always allow one tool going forward\n/deny <tool> — block one tool outright · /undeny <tool> — unblock it\n/auto-approve [on|off] — master switch for unattended tool runs (aliases: /autoapprove /approve-all /approveall)\n/mcps — list servers · /mcps enable|disable|start|stop <name> · /mcps timeout <name> <secs>\n/history, /sessions — open chat history · /resume, /continue — same list\n/rename <title> — rename the current chat\n/status — show usage details\n/undo — revert the last turn · /redo — restore it · /copy — copy last answer · /copy-session — copy whole chat · /export — save transcript as markdown (rendered turns only) · /about — panel/provider info (no diagnostics copy) · /review — design review of the active model (ignores extra args) · /thinking, /toggle-thinking — toggle thinking blocks\n/help — this list\n/unrevert — restore the last reverted turns\nNotifications — Settings toggle for approval + done + teammate OS toasts";
   function fallbackCopy(text) {
     try {
       const ta = document.createElement("textarea");
@@ -2003,7 +2013,7 @@
     }
     if (wasTurn) recordTurn(html);
     try { if ($("findbar") && $("findbar").style.display !== "none" && $("findinput").value) runFind(); } catch (e) {}
-    working = false; turn = null;
+    working = false; turn = null; syncEnhanceBtn();
     scroll(); renderCtx();
     // Host gate is context-% (Kilo parity); the panel mirrors it — % when usage is known,
     // legacy turn-count fallback before the first usage report lands. Mirrors the host gate.
@@ -2248,7 +2258,7 @@
       if (m.error === "nokey") {
         if ($("mcount")) $("mcount").textContent = "Needs a key — see Settings.";
         if ($("mcount")) $("mcount").title = "Paste a key in Settings → API key, hit Save, then Refresh.";
-        if (!document.querySelector("#obmodel") && curSlug !== "ollama") { if ($("setkeyrow")) $("setkeyrow").style.display = ""; if ($("setsub")) $("setsub").textContent = (curSlug || "") + " · no key"; }
+        if (!document.querySelector("#obmodel") && curSlug !== "ollama") { if ($("setkeyrow")) $("setkeyrow").style.display = ""; if ($("setsub")) $("setsub").textContent = (curSlug || "") + (curSlug === "opencode" ? " · no key = free models only (public)" : " · no key"); }
       } else if (m.error) {
         if ($("mcount")) $("mcount").textContent = "Couldn't load models.";
         if ($("mcount")) $("mcount").title = `${m.error} — check the key, then hit Refresh.`;
@@ -2307,7 +2317,7 @@
         try { chatModels = unionCustomFirst(chatModels); renderModelList($("msearch") ? $("msearch").value : ""); } catch (ecm2) {}
         renderCtx();
         $("mrefresh").style.display = curDynamic ? "" : "none";
-        if (!m.hasKey && m.slug && m.slug !== "ollama" && lastNoKeyPrompt !== m.slug && !document.getElementById("onboard")) { lastNoKeyPrompt = m.slug; systemCard(`No key saved for <b>${m.slug}</b> — paste it in Settings → API key, hit Save, then pick a model.`); }
+        if (!m.hasKey && m.slug && m.slug !== "ollama" && m.slug !== "opencode" && lastNoKeyPrompt !== m.slug && !document.getElementById("onboard")) { lastNoKeyPrompt = m.slug; systemCard(`No key saved for <b>${m.slug}</b> — paste it in Settings → API key, hit Save, then pick a model.`); }
         if (m.hasKey) lastNoKeyPrompt = null; // key present again: a later no-key episode re-warns once
         // Late provider reply for a configured host while untouched onboarding shows: dismiss it —
         // firstrun can win the race, but a stored provider means this user is configured, never fresh.
@@ -2318,7 +2328,7 @@
         chatModels = []; renderModelList($("msearch") ? $("msearch").value : "");
         if ($("mcount")) { $("mcount").textContent = "Needs a key — see Settings."; $("mcount").title = "Paste a key in Settings → API key, hit Save, then Refresh."; }
         if ($("setkeyrow") && curSlug !== "ollama") $("setkeyrow").style.display = "";
-        if ($("setsub") && curSlug) $("setsub").textContent = curSlug + " · no key";
+        if ($("setsub") && curSlug) $("setsub").textContent = curSlug + (curSlug === "opencode" ? " · no key = free models only (public)" : " · no key");
         renderCtx();
       }
     }
@@ -2456,6 +2466,7 @@
         <option value="nvidia">NVIDIA NIM — free models API</option>
         <option value="openai">OpenAI</option>
         <option value="anthropic">Anthropic</option>
+        <option value="opencode">OpenCode Zen — no key = free models only (public)</option>
         <option value="ollama">Ollama — local, no key needed</option>
       </select>
       <input class="obkey" id="obkey" aria-label="Provider key" placeholder="Paste a provider key (optional) — or get a free one" />
@@ -2535,7 +2546,7 @@
         const pr = o.querySelector("#obprov"), kv = o.querySelector("#obkey"), st = o.querySelector("#obmstat");
         const md = o.querySelector("#obmodel");
         if (!pr || !isListableProv(pr.value) || !kv) return;
-        if (!kv.value.trim()) {
+        if (!kv.value.trim() && pr.value !== "opencode") {
           if (st) st.textContent = "Paste a key to load live models, or Continue with the default.";
           return;
         }
@@ -2747,7 +2758,7 @@
     else lastReverted = null;
     preEnhance = null; $("enhanceUndo").style.display = "none";
     mentionPaths.length = 0; renderChips(); menClose(); // restored text re-resolves host-side; drop stale chips
-    turn = null; thinkEl = null; working = false; stopWords(); clearThinkTimeout();
+    turn = null; thinkEl = null; working = false; syncEnhanceBtn(); stopWords(); clearThinkTimeout();
     clearFind(); closeOthers(); try { if ($("findbar") && $("findbar").style.display !== "none" && $("findinput").value) runFind(); } catch (e) {} renderCtx();
     pinned = true; try { $("scrolldown").style.display = "none"; } catch (e) {}
     intent.focus(); scroll(true);
@@ -2762,6 +2773,7 @@
     enhanceActive = false; enhanceDraft = "";
     if (enhanceTimer) { clearInterval(enhanceTimer); enhanceTimer = null; }
     eb.classList.remove("busy"); eb.style.minWidth = ""; eb.disabled = false; eb.textContent = "✨ Enhance";
+    syncEnhanceBtn();
   };
   const ebTick = () => {
     const eb = $("enhance");
@@ -2769,6 +2781,7 @@
     eb.innerHTML = `✨ <span class="wdot">●</span> <span class="wdot">●</span> <span class="wdot">●</span> ${s}s`;
   };
   $("enhance").addEventListener("click", () => {
+    if (working) { systemCard("Still working — wait for this run (or Esc to stop it), then ✨ Enhance."); return; }
     if (enhanceActive) { // second Enhance supersedes the first: the host drops the stale run, the latest draft wins
       const draft2 = intent.value.trim();
       if (!draft2) return;
@@ -2941,7 +2954,7 @@
           }
           pushRecent(id);
           curModel = id; renderPill(); renderCtx(); // optimistic: pill follows the click, host confirms
-          if ($("setsub")) $("setsub").textContent = (lastBaseUrl ? lastBaseUrl + " · " : "") + id + (lastHasKey === true ? " · key saved ✓" : lastHasKey === false ? " · no key" : "");
+          if ($("setsub")) $("setsub").textContent = (lastBaseUrl ? lastBaseUrl + " · " : "") + id + (lastHasKey === true ? " · key saved ✓" : lastHasKey === false ? (curSlug === "opencode" ? " · no key = free models only (public)" : " · no key") : "");
           post({ action: "setModel", model: id });
           closeModels();
         });
@@ -2987,7 +3000,7 @@
     else if (e.key === "Enter") {
       e.preventDefault();
       const pick = (i >= 0 ? rows[i] : null) || rows.find(r => r.classList.contains("active")) || rows[0];
-      if (pick) { const id = pick.getAttribute("data-id"); pushRecent(id); curModel = id; renderPill(); renderCtx(); if ($("setsub")) $("setsub").textContent = (lastBaseUrl ? lastBaseUrl + " · " : "") + id + (curSlug === "ollama" ? " · local, no key needed" : lastHasKey === true ? " · key saved ✓" : lastHasKey === false ? " · no key" : ""); post({ action: "setModel", model: id }); closeModels(); }
+      if (pick) { const id = pick.getAttribute("data-id"); pushRecent(id); curModel = id; renderPill(); renderCtx(); if ($("setsub")) $("setsub").textContent = (lastBaseUrl ? lastBaseUrl + " · " : "") + id + (curSlug === "ollama" ? " · local, no key needed" : curSlug === "opencode" && lastHasKey === false ? " · no key = free models only (public)" : lastHasKey === true ? " · key saved ✓" : lastHasKey === false ? " · no key" : ""); post({ action: "setModel", model: id }); closeModels(); }
     }
   });
   $("mrefresh").addEventListener("click", (e) => {

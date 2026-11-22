@@ -97,6 +97,8 @@ namespace Forge.SolidWorks
         private int _enhanceSeq;              // Enhance supersede guard: only the newest Enhance may write
         private static System.Threading.CancellationTokenSource _runCts;     // current Generate run (Esc/stop cancels it)
         private static System.Threading.CancellationTokenSource _enhanceCts; // current Enhance call (Esc/stop cancels it)
+        private static System.Threading.CancellationTokenSource _compactCts; // current Compact call: own token, linked to the run's cancel, never cancels the run
+        private static int _activeRuns;                                    // >0 while a Generate await chain is in flight (loadHistory guard)
 
         // Central post-run logging for EVERY live handler: masked event -> the data spine (fills the telemetry store +
         // Layer-3 replay + crash-recovery close), plus correction capture (rephrase pairing + arms undo).
@@ -237,13 +239,18 @@ namespace Forge.SolidWorks
                     try { gIntent = (string)msg.intent; } catch { }
                     try { gSid = (string)msg.sid; } catch { }
                     try { gPaths = msg.paths as Newtonsoft.Json.Linq.JArray; } catch { }
-                    await Generate(gIntent, gSid, gPaths);
+                    // Track the in-flight await chain so loadHistory can't retarget CurrentSid mid-run
+                    // (the panel's stop is cooperative: messages can be processed while Generate is suspended).
+                    System.Threading.Interlocked.Increment(ref _activeRuns);
+                    try { await Generate(gIntent, gSid, gPaths); }
+                    finally { System.Threading.Interlocked.Decrement(ref _activeRuns); }
                 }
                 else if (action == "enhance") await EnhancePrompt((string)msg.text);
                 // Transcript compaction (Kilo parity): summarize older turns so long sessions stay readable.
                 // Unary call is fine — summaries are short and fast. Plain-text summary, fences stripped.
                 else if (action == "compact")
                 {
+                    string myRun = _currentRunId; // a newer run/clear supersedes this compact: stay silent when stale
                     string text = null;
                     try { text = (string)msg.text; } catch { }
                     if (string.IsNullOrWhiteSpace(text))
@@ -265,6 +272,14 @@ namespace Forge.SolidWorks
                     }
                     try
                     {
+                        // Dedicated token: stop() cancels _compactCts, and it follows the active run's
+                        // cancellation, but none of this ever cancels the run itself (compact is host-invoked).
+                        try { if (_compactCts != null) _compactCts.Cancel(); } catch { }
+                        try { if (_compactCts != null) _compactCts.Dispose(); } catch { }
+                        System.Threading.CancellationToken runLink = System.Threading.CancellationToken.None;
+                        try { if (_runCts != null) runLink = _runCts.Token; } catch { }
+                        _compactCts = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(runLink);
+                        var compactCt = _compactCts.Token;
                         // A hostile/pasted transcript must not become a token blowup: summarize the
                         // recent tail (older turns matter less than what was just built).
                         string compactText = text.Trim();
@@ -276,18 +291,26 @@ namespace Forge.SolidWorks
                         };
                         var res = await c2.CompleteAsync(msgs,
                             new ProviderOptions { MaxTokens = 1000, Model = ProviderFactory.SmallModelForCurrentConfig() ?? compactModel },
-                            System.Threading.CancellationToken.None);
+                            compactCt);
+                        if (myRun != _currentRunId) return; // superseded while awaiting: the new run owns the panel
                         string s = res != null ? res.Text : null;
                         try { if (res != null) { IntentRate.Note(res.TokIn, res.TokOut); McpBuild.NoteCtxCurrent(res.TokIn, res.TokOut); } } catch { }
                         if (!string.IsNullOrWhiteSpace(s))
                         {
                             s = System.Text.RegularExpressions.Regex.Replace(s.Trim(), @"^```\w*\n?|```$", "").Trim();
+                            if (myRun != _currentRunId) return; // skip a stale compact result
                             Send(new { type = "compacted", summary = s });
                         }
-                        else Send(new { type = "error", message = "Compaction came back empty — keeping full history; try again.", localCompact = true });
+                        else { if (myRun != _currentRunId) return; Send(new { type = "error", message = "Compaction came back empty — keeping full history; try again.", localCompact = true }); }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // stop()/supersede killed this compact; the panel's fallback keeps the titles.
+                        return;
                     }
                     catch (Exception ex)
                     {
+                        if (myRun != _currentRunId) return; // skip a stale failure card
                         Send(new { type = "error", message = "Compaction failed (" + BoundDetail(ex.Message, 200) + ") — keeping full history; try again.", localCompact = true });
                     }
                 }
@@ -459,10 +482,11 @@ namespace Forge.SolidWorks
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "File search failed (" + BoundDetail(ex.Message, 200) + ") — try again or type the file name." }); }
                 }
-                else if (action == "stop")   // Kilo-style interrupt: cancel the in-flight run/enhance; partial CoT stays
+                else if (action == "stop")   // Kilo-style interrupt: cancel the in-flight run/enhance/compact; partial CoT stays
                 {
                     try { if (_runCts != null) _runCts.Cancel(); } catch { }
                     try { if (_enhanceCts != null) _enhanceCts.Cancel(); } catch { }
+                    try { if (_compactCts != null) _compactCts.Cancel(); } catch { }
                 }
                 else if (action == "revert")   // Kilo-style revert: drop the pending thread + truncate the agent chat so the resent prompt starts clean
                 {
@@ -501,6 +525,13 @@ namespace Forge.SolidWorks
                 }
                 else if (action == "loadHistory")   // restore a chat: load its persisted agent conversation
                 {
+                    // EnsureSessionPublic flips CurrentSid; doing that mid-run makes NoteCtxCurrent (and the
+                    // pill) credit the loaded chat instead of the one still executing. Refuse until it ends.
+                    if (System.Threading.Volatile.Read(ref _activeRuns) > 0)
+                    {
+                        Send(new { type = "error", message = "Finish or stop the current run first, then load a chat — history is untouched." });
+                        return;
+                    }
                     try
                     {
                         string lsid = null;
@@ -704,6 +735,7 @@ namespace Forge.SolidWorks
                 {
                     try { if (_runCts != null) _runCts.Cancel(); } catch { }
                     try { if (_enhanceCts != null) _enhanceCts.Cancel(); } catch { }
+                    try { if (_compactCts != null) _compactCts.Cancel(); } catch { }
                     _currentRunId = null; // superseded runs go silent: late answers + think deltas must not land in the clean take
                     _pendingIntent = null; _attachedFile = null; _pendingConfirm = null;
                     _pendingIncoming = null; _lastBoardChange = null; _lastRelayedClarify = null;
@@ -789,12 +821,15 @@ namespace Forge.SolidWorks
                     // OpenAI-style Bearer /models list — fail fast with guidance instead of a raw HTTP error.
                     if (string.Equals(preset.Provider, "anthropic", StringComparison.OrdinalIgnoreCase))
                     { Send(new { type = "models", models = new string[0], error = "This endpoint has no OpenAI-style model list — add the model id under Custom models instead." }); return; }
-                    // Ollama serves /models with no key (same exemption as refreshModels): only
-                    // keyed providers fail closed here.
-                    bool flocal = string.Equals(fslug, "ollama", StringComparison.OrdinalIgnoreCase);
+                    // Ollama and OpenCode Zen serve /models with no key (same exemption as
+                    // refreshModels): only keyed providers fail closed here. OpenCode's keyless
+                    // GET /models uses the literal bearer token "public" (free models only).
+                    bool flocal = string.Equals(fslug, "ollama", StringComparison.OrdinalIgnoreCase)
+                               || string.Equals(fslug, "opencode", StringComparison.OrdinalIgnoreCase);
                     if (string.IsNullOrWhiteSpace(key)) key = StoredProviderKeyForSlug(fslug, preset.Provider);
                     if (string.IsNullOrWhiteSpace(key) && !flocal)
                     { Send(new { type = "models", models = new string[0], error = "nokey" }); return; }
+                    if (string.Equals(fslug, "opencode", StringComparison.OrdinalIgnoreCase) && string.IsNullOrWhiteSpace(key)) key = "public";
                     try
                     {
                         var ids = await FetchServableModels(preset.BaseUrl, (key ?? "").Trim());
@@ -874,7 +909,10 @@ namespace Forge.SolidWorks
                         try { rslug = PresetSlugFor(p, baseUrl); } catch { rslug = null; }
                         bool rlocal = !string.IsNullOrWhiteSpace(rslug) && string.Equals(rslug.Trim(), "ollama", StringComparison.OrdinalIgnoreCase);
                         string key = StoredProviderKeyForSlug(PresetSlugFor(p, baseUrl), p);
-                        if (string.IsNullOrWhiteSpace(key) && !rlocal) throw new Exception("No key saved for " + (rslug ?? p) + " — save one in Settings → API key (or set " + (Forge.Providers.ProviderFactory.EnvSlug(rslug) == null ? "FORGE_PROVIDER_KEY" : "FORGE_PROVIDER_KEY_" + Forge.Providers.ProviderFactory.EnvSlug(rslug)) + "), then Refresh.");
+                        // OpenCode Zen keyless path: GET /models also uses "public" (free models).
+                        bool ropencode = string.Equals(rslug, "opencode", StringComparison.OrdinalIgnoreCase);
+                        if (ropencode && string.IsNullOrWhiteSpace(key)) key = "public";
+                        if (string.IsNullOrWhiteSpace(key) && !rlocal && !ropencode) throw new Exception("No key saved for " + (rslug ?? p) + " — save one in Settings → API key (or set " + (Forge.Providers.ProviderFactory.EnvSlug(rslug) == null ? "FORGE_PROVIDER_KEY" : "FORGE_PROVIDER_KEY_" + Forge.Providers.ProviderFactory.EnvSlug(rslug)) + "), then Refresh.");
                         var ids = await FetchServableModels(baseUrl, (key ?? "").Trim());
                         Send(new { type = "models", models = ids, selected = (string)cfg["model"] });
                     }
@@ -1005,7 +1043,6 @@ namespace Forge.SolidWorks
                     bool on = false;
                     try { on = (bool)msg.on; } catch { }
                     Telemetry.Enabled = on;
-                    Send(new { type = "answer", answer = "Anonymous usage sharing is now " + (on ? "ON" : "OFF") + "." });
                 }
 
                 // Settings notifications toggle (OS toasts: approval + done + teammate). Host = source of
@@ -1311,7 +1348,7 @@ namespace Forge.SolidWorks
         //      {provider, baseUrl, model} â€” the API key is NEVER in the file â€” and stores the key via
         //      KeyStore (DPAPI, current-user). Presets match the README's student instructions exactly so
         //      the onboarding key box configures a real, working provider. ----
-        private static readonly string[] KnownSlugs = { "deepseek", "openrouter", "nvidia", "openai", "anthropic", "ollama" };
+        private static readonly string[] KnownSlugs = { "deepseek", "openrouter", "nvidia", "openai", "anthropic", "ollama", "opencode" };
 
         private static void SaveProviderKey(string provider, string key, string model = null)
         {
@@ -1554,7 +1591,7 @@ namespace Forge.SolidWorks
         // (the ProviderPresetFor default), matching existing fallback behavior. The reserved
         // set also blocks "openai-compatible" so a custom slug can never collide with the
         // client-id fallback in PresetSlugFor.
-        private static readonly string[] ReservedSlugs = { "deepseek", "openrouter", "nvidia", "openai", "anthropic", "ollama", "openai-compatible" };
+        private static readonly string[] ReservedSlugs = { "deepseek", "openrouter", "nvidia", "openai", "anthropic", "ollama", "opencode", "openai-compatible" };
         private static readonly string[] CustomKinds = { "openai-compatible", "anthropic" };
 
         private static string SanitizeCustomSlug(string slug)
@@ -1709,7 +1746,7 @@ namespace Forge.SolidWorks
             }
             try
             {
-                foreach (var b in new string[] { "deepseek", "openrouter", "nvidia", "openai", "anthropic", "ollama" })
+                foreach (var b in new string[] { "deepseek", "openrouter", "nvidia", "openai", "anthropic", "ollama", "opencode" })
                 {
                     string pb = null;
                     try { var preset = ProviderPresetFor(b); if (preset != null) pb = NormCustomBaseUrl(preset.BaseUrl); }
@@ -1742,11 +1779,11 @@ namespace Forge.SolidWorks
             var n = new JObject { ["slug"] = s, ["kind"] = k, ["baseUrl"] = bu };
             string lab = (label ?? "").Trim();
             // Label impersonation guard: a custom label matching a built-in provider display name
-            // (ProviderFactory.DisplayNameFor: DeepSeek/OpenRouter/NVIDIA/OpenAI/Anthropic/Ollama)
+            // (ProviderFactory.DisplayNameFor: DeepSeek/OpenRouter/NVIDIA/OpenAI/Anthropic/Ollama/OpenCode Zen)
             // would masquerade in the picker. Reject case-insensitively like the other validations.
             if (!string.IsNullOrWhiteSpace(lab))
             {
-                foreach (var b in new string[] { "DeepSeek", "OpenRouter", "NVIDIA", "OpenAI", "Anthropic", "Ollama" })
+                foreach (var b in new string[] { "DeepSeek", "OpenRouter", "NVIDIA", "OpenAI", "Anthropic", "Ollama", "OpenCode Zen" })
                     if (string.Equals(lab, b, StringComparison.OrdinalIgnoreCase)) throw new Exception("'" + lab + "' is a built-in provider name — pick a different label.");
             }
             if (!string.IsNullOrWhiteSpace(lab)) n["label"] = lab.Length > 60 ? lab.Substring(0, 60) : lab;
@@ -1843,6 +1880,7 @@ namespace Forge.SolidWorks
             if (bu.Contains("localhost") || bu.Contains("127.0.0.1") || bu.Contains("::1")) return "ollama";
             if (bu.Contains("integrate.api.nvidia.com")) return "nvidia";
             if (bu.Contains("openrouter.ai")) return "openrouter";
+            if (bu.Contains("opencode.ai")) return "opencode";
             if (bu.Contains("api.deepseek.com")) return "deepseek";
             if (bu.Contains("api.openai.com")) return "openai";
             if (p == "openai-compatible") return "openai-compatible";
@@ -1884,6 +1922,16 @@ namespace Forge.SolidWorks
                     {
                         string eslug = Forge.Providers.ProviderFactory.EnvSlug(s);
                         var k = eslug == null ? null : System.Environment.GetEnvironmentVariable("FORGE_PROVIDER_KEY_" + eslug);
+                        if (!string.IsNullOrWhiteSpace(k)) return k;
+                    }
+                    catch { }
+                }
+                // Kilo parity: OPENCODE_API_KEY is accepted alongside FORGE_PROVIDER_KEY_OPENCODE.
+                if (string.Equals(s, "opencode", StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        var k = System.Environment.GetEnvironmentVariable("OPENCODE_API_KEY");
                         if (!string.IsNullOrWhiteSpace(k)) return k;
                     }
                     catch { }
@@ -1988,6 +2036,7 @@ namespace Forge.SolidWorks
             switch (slug)
             {
                 case "openrouter": return new ProviderPreset("openai-compatible", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini");
+                case "opencode":   return new ProviderPreset("openai-compatible", "https://opencode.ai/zen/v1", "glm-5.3-flash");
                 case "nvidia":     return new ProviderPreset("openai-compatible", "https://integrate.api.nvidia.com/v1", "moonshotai/kimi-k3.1-pro");
                 case "openai":     return new ProviderPreset("openai-compatible", "https://api.openai.com/v1", "gpt-6-luna"); // gpt-4o-mini snapshot shuts down 2027-01-14
                 case "anthropic":  return new ProviderPreset("anthropic", "https://api.anthropic.com/v1", "claude-3-5-sonnet-20241022");
@@ -2186,6 +2235,10 @@ namespace Forge.SolidWorks
             try { if (_runCts != null) _runCts.Dispose(); } catch { }
             _runCts = new System.Threading.CancellationTokenSource();
             var runCt = _runCts.Token;
+            // A run supersedes any in-flight Enhance: cancel its call and invalidate its visuals so a
+            // late "enhanced"/think delta can't clobber the composer after this run starts.
+            try { if (_enhanceCts != null) _enhanceCts.Cancel(); } catch { }
+            _enhanceSeq++;
             _currentRunId = Guid.NewGuid().ToString("N").Substring(0, 12);   // tags this run for thumbs feedback + correction capture
             string myRun = _currentRunId; // a newer send supersedes this run: abandon silently when stale
 

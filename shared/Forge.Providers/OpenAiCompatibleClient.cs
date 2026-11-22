@@ -115,6 +115,25 @@ namespace Forge.Providers
             return root + "/chat/completions";
         }
 
+        // Callers pass large output caps (16k/32k) for planning, but a model's context window bounds
+        // what it can actually emit. Clamp to min(requested, window/2) with a 4096 floor so small-window
+        // models (e.g. gpt-3.5 at 16k -> 8k) don't 400 on an output cap larger than their context.
+        private static int ClampOutputTokens(string model, int requested)
+        {
+            int window = 128000;
+            try { var cw = ProviderFactory.ContextWindowFor(model); if (cw != null && cw.Item1 > 0) window = cw.Item1; } catch { }
+            int budget = System.Math.Max(4096, window / 2);
+            return requested > 0 ? System.Math.Min(requested, budget) : budget;
+        }
+
+        private static void ApplyMaxOutputTokens(JObject j, ProviderOptions opts, string model)
+        {
+            if (opts == null || !opts.MaxTokens.HasValue) return;
+            // Reasoning models reject max_tokens and require max_completion_tokens instead.
+            string field = ProviderFactory.IsReasoningModel(model) ? "max_completion_tokens" : "max_tokens";
+            j[field] = ClampOutputTokens(model, opts.MaxTokens.Value);
+        }
+
         private static string BuildBody(IReadOnlyList<ChatMessage> messages, ProviderOptions opts, string model, bool stream = false)
         {
             var j = new JObject();
@@ -130,7 +149,7 @@ namespace Forge.Providers
 
             if (opts != null)
             {
-                if (opts.MaxTokens.HasValue) j["max_tokens"] = opts.MaxTokens.Value;
+                ApplyMaxOutputTokens(j, opts, model);
                 // Central gate (callers with hardcoded Temperature=0 still omit it here): reasoning
                 // variants reject custom temperatures, so unsupported models send no field at all.
                 if (opts.Temperature.HasValue && ProviderFactory.SupportsTemperature(model)) j["temperature"] = opts.Temperature.Value;
@@ -206,7 +225,7 @@ namespace Forge.Providers
             var j = new JObject { ["model"] = model, ["messages"] = messages };
             if (opts != null)
             {
-                if (opts.MaxTokens.HasValue) j["max_tokens"] = opts.MaxTokens.Value;
+                ApplyMaxOutputTokens(j, opts, model);
                 // Central gate (callers with hardcoded Temperature=0 still omit it here): reasoning
                 // variants reject custom temperatures, so unsupported models send no field at all.
                 if (opts.Temperature.HasValue && ProviderFactory.SupportsTemperature(model)) j["temperature"] = opts.Temperature.Value;
