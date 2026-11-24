@@ -4,6 +4,8 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -21,6 +23,20 @@ namespace Forge.SolidWorks
     /// </summary>
     public static class McpBridge
     {
+        public const int ServerLogTailChars = 8000;
+        private const int CatalogPerServerTimeoutMs = 20000;
+        private const int DefaultStdioTimeoutMs = 30000;
+        private const int DefaultHttpTimeoutMs = 15000;
+        private const int MinConfiguredTimeoutMs = 1000;
+        private const int WatchPollMs = 2000;
+
+        private static string _projectKey = "";
+        public static string ProjectKey
+        {
+            get { return _projectKey ?? ""; }
+            set { _projectKey = value ?? ""; }
+        }
+
         private static readonly object Gate = new object();
         private static readonly Dictionary<string, McpConn> Conns =
             new Dictionary<string, McpConn>(StringComparer.OrdinalIgnoreCase);
@@ -29,28 +45,43 @@ namespace Forge.SolidWorks
         // start a server, the second kills the first's process, and both handshakes fail.
         private static readonly SemaphoreSlim StartGate = new SemaphoreSlim(1, 1);
 
+        public static Action<string> ServerToolsChanged;
+
         public class McpException : Exception
         {
             public McpException(string message) : base(message) { }
         }
 
-        /// <summary>One MCP server entry. No url/header/oauth fields — stdio command/args only.</summary>
+        /// <summary>One MCP server entry. stdio command/args/env/cwd or http url/headers.</summary>
         public class McpServerConfig
         {
             public string Name = "default";
             public string Command = "uvx";
             public string[] Args = new[] { "solidworks-mcp" };
-            public int StartTimeoutMs; // 0/<30s = follow TimeoutMs
+            public int StartTimeoutMs; // 0/<1000 = follow TimeoutMs
             public bool Enabled = true;
-            public int TimeoutMs = 300000;
+            public int TimeoutMs = DefaultStdioTimeoutMs;
+            public string Type = "stdio";
+            public string Url = "";
+            public Dictionary<string, string> Headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            public Dictionary<string, string> Env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            public string Cwd = "";
+            public string[] WatchPaths = new string[0];
+            public string[] AlwaysAllow = new string[0];
+            public string[] DisabledTools = new string[0];
+
+            public bool IsHttp
+            {
+                get { return string.Equals(Type, "http", StringComparison.OrdinalIgnoreCase); }
+            }
 
             public int EffectiveStartTimeoutMs
             {
                 get
                 {
-                    if (StartTimeoutMs >= 30000) return StartTimeoutMs;
-                    if (TimeoutMs >= 30000) return TimeoutMs;
-                    return 300000;
+                    if (StartTimeoutMs >= MinConfiguredTimeoutMs) return StartTimeoutMs;
+                    if (TimeoutMs >= MinConfiguredTimeoutMs) return TimeoutMs;
+                    return DefaultStdioTimeoutMs;
                 }
             }
         }
@@ -60,6 +91,7 @@ namespace Forge.SolidWorks
         {
             public JArray Tools = new JArray();
             public string Winner;
+            public string Instructions = "";
         }
 
         private class McpConn
@@ -71,6 +103,21 @@ namespace Forge.SolidWorks
             public readonly ConcurrentDictionary<int, TaskCompletionSource<string>> Pending =
                 new ConcurrentDictionary<int, TaskCompletionSource<string>>();
             public JArray CachedTools;
+            public JArray CachedResources;
+            public JArray CachedResourceTemplates;
+            public Timer WatchTimer;
+            public string[] WatchPaths;
+            public readonly Dictionary<string, DateTime> WatchStamps = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+            public int WatchBusy;
+            public string Instructions = "";
+            public bool IsHttp;
+            public string Url;
+            public Dictionary<string, string> Headers;
+            public HttpClient Http;
+            public string SessionId;
+            public bool HttpReady;
+            public bool HttpFailed;
+            public readonly StringBuilder StderrTail = new StringBuilder();
         }
 
         private class ReaderState
@@ -80,13 +127,25 @@ namespace Forge.SolidWorks
             public Process Proc;
         }
 
+        private class DrainState
+        {
+            public string Name;
+            public McpConn Conn;
+            public StreamReader Reader;
+        }
+
+        private class WatchState
+        {
+            public string Name;
+        }
+
         private class McpConfig
         {
             public string Command = "uvx";
             public string[] Args = new[] { "solidworks-mcp" };
-            public int StartTimeoutMs = 300000;
+            public int StartTimeoutMs;
             public bool Enabled = true;
-            public int TimeoutMs = 300000;
+            public int TimeoutMs = DefaultStdioTimeoutMs;
         }
 
         private static McpServerConfig DefaultServerConfig()
@@ -96,9 +155,9 @@ namespace Forge.SolidWorks
                 Name = "default",
                 Command = "uvx",
                 Args = new[] { "solidworks-mcp" },
-                StartTimeoutMs = 300000,
+                StartTimeoutMs = 0,
                 Enabled = true,
-                TimeoutMs = 300000
+                TimeoutMs = DefaultStdioTimeoutMs
             };
         }
 
@@ -107,13 +166,101 @@ namespace Forge.SolidWorks
             return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Forge", "mcp.json");
         }
 
-        /// <summary>
-        /// Read all servers. NEW form: {"servers":[{name,command,args,enabled,timeoutMs,startTimeoutMs?}]}.
-        /// LEGACY form (no `servers`, flat command/args/enabled/timeoutMs/startTimeoutMs) migrates
-        /// in-memory to servers[0]={name:"default",...}. Never writes back here — the `servers`
-        /// form is written only on the next SaveServers/SaveConfig/SaveServer call. Missing/corrupt
-        /// files fall back to a single default server; never throws.
-        /// </summary>
+        public static string ProjectKeyForAssembly(string assemblyPath)
+        {
+            try
+            {
+                string k = (assemblyPath ?? "").Trim();
+                if (k.Length == 0) return "";
+                return k.Replace('/', '\\').TrimEnd('\\').ToLowerInvariant();
+            }
+            catch { return ""; }
+        }
+
+        private static string ProjectConfigPath(string projectKey)
+        {
+            string key = (projectKey ?? "").Trim().Replace('/', '\\').TrimEnd('\\').ToLowerInvariant();
+            byte[] hash;
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+                hash = sha.ComputeHash(Encoding.UTF8.GetBytes(key));
+            var name = new StringBuilder();
+            for (int i = 0; i < 12; i++) name.Append(hash[i].ToString("x2", System.Globalization.CultureInfo.InvariantCulture));
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Forge", "mcp-projects", name.ToString() + ".json");
+        }
+
+        public static List<McpServerConfig> LoadServersForProject(string projectKey)
+        {
+            var global = LoadServers();
+            if (string.IsNullOrWhiteSpace(projectKey)) return global;
+            try
+            {
+                string p = ProjectConfigPath(projectKey);
+                if (!File.Exists(p)) return global;
+                JObject j;
+                try { j = JObject.Parse(File.ReadAllText(p)); }
+                catch { return global; }
+                if (j == null) return global;
+                var project = ParseServersObject(j);
+                return MergeProjectServersOverGlobalByServerName(global, project);
+            }
+            catch { return global; }
+        }
+
+        private static List<McpServerConfig> MergeProjectServersOverGlobalByServerName(List<McpServerConfig> global, List<McpServerConfig> project)
+        {
+            var merged = new List<McpServerConfig>();
+            var gs = global ?? new List<McpServerConfig>();
+            var ps = project ?? new List<McpServerConfig>();
+            foreach (var g in gs)
+            {
+                if (g == null) continue;
+                McpServerConfig overrideEntry = null;
+                foreach (var p in ps)
+                {
+                    if (p != null && string.Equals(g.Name, p.Name, StringComparison.OrdinalIgnoreCase)) { overrideEntry = p; break; }
+                }
+                merged.Add(overrideEntry ?? g);
+            }
+            foreach (var p in ps)
+            {
+                if (p == null) continue;
+                bool exists = false;
+                foreach (var g in gs)
+                {
+                    if (g != null && string.Equals(g.Name, p.Name, StringComparison.OrdinalIgnoreCase)) { exists = true; break; }
+                }
+                if (!exists) merged.Add(p);
+            }
+            return merged;
+        }
+
+        public static void SaveServersForProject(string projectKey, List<McpServerConfig> servers)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(projectKey)) return;
+                string p = ProjectConfigPath(projectKey);
+                try { Directory.CreateDirectory(Path.GetDirectoryName(p)); } catch { }
+                File.WriteAllText(p, SerializeServers(servers).ToString(Newtonsoft.Json.Formatting.None));
+            }
+            catch { }
+        }
+
+        public static List<McpServerConfig> LoadEffectiveServers()
+        {
+            return LoadServersForProject(ProjectKey);
+        }
+
+        public static McpServerConfig ConfigForServer(string serverName)
+        {
+            string target = ResolveName(serverName);
+            var list = LoadEffectiveServers();
+            if (list != null)
+                foreach (var s in list)
+                    if (s != null && string.Equals(s.Name, target, StringComparison.OrdinalIgnoreCase)) return s;
+            return null;
+        }
+
         public static List<McpServerConfig> LoadServers()
         {
             var fallback = new List<McpServerConfig> { DefaultServerConfig() };
@@ -125,6 +272,16 @@ namespace Forge.SolidWorks
                 try { j = JObject.Parse(File.ReadAllText(p)); }
                 catch { return fallback; }
                 if (j == null) return fallback;
+                return ParseServersObject(j);
+            }
+            catch { return fallback; }
+        }
+
+        private static List<McpServerConfig> ParseServersObject(JObject j)
+        {
+            var fallback = new List<McpServerConfig> { DefaultServerConfig() };
+            try
+            {
                 var arr = j["servers"] as JArray;
                 if (arr != null)
                 {
@@ -138,7 +295,7 @@ namespace Forge.SolidWorks
                             if (o == null) continue;
                             string name = ((string)o["name"] ?? "").Trim();
                             if (name.Length == 0) name = "default";
-                            if (!seen.Add(name)) continue; // first wins on duplicates
+                            if (!seen.Add(name)) continue;
                             var s = DefaultServerConfig();
                             s.Name = name;
                             string cmd = ((string)o["command"] ?? "").Trim();
@@ -152,7 +309,6 @@ namespace Forge.SolidWorks
                             }
                             else
                             {
-                                // Tolerate a single space-joined string (panel form may send this).
                                 string astr = (string)o["args"];
                                 if (!string.IsNullOrWhiteSpace(astr))
                                 {
@@ -160,12 +316,30 @@ namespace Forge.SolidWorks
                                     if (parts.Length > 0) s.Args = parts;
                                 }
                             }
+                            string type = ((string)o["type"] ?? "").Trim();
+                            s.Type = string.Equals(type, "http", StringComparison.OrdinalIgnoreCase) ? "http" : "stdio";
+                            if (s.IsHttp)
+                            {
+                                string url = ((string)o["url"] ?? "").Trim();
+                                if (url.Length > 0) s.Url = url;
+                                s.Headers = ParseStringMap(o["headers"]);
+                            }
+                            else
+                            {
+                                s.Env = ParseStringMap(o["env"]);
+                                string cwd = ((string)o["cwd"] ?? "").Trim();
+                                if (cwd.Length > 0) s.Cwd = cwd;
+                            }
                             if (o["enabled"] != null) { try { s.Enabled = (bool)o["enabled"]; } catch { s.Enabled = true; } }
-                            int tmo = (int?)o["timeoutMs"] ?? 0;
-                            s.TimeoutMs = tmo >= 30000 ? tmo : 300000;
+                            int? tmo = (int?)o["timeoutMs"];
+                            s.TimeoutMs = (tmo.HasValue && tmo.Value >= MinConfiguredTimeoutMs)
+                                ? tmo.Value
+                                : (s.IsHttp ? DefaultHttpTimeoutMs : DefaultStdioTimeoutMs);
                             int stmo = (int?)o["startTimeoutMs"] ?? 0;
-                            // Per-server startTimeoutMs honored if present, else = timeoutMs.
-                            s.StartTimeoutMs = stmo >= 30000 ? stmo : 0;
+                            s.StartTimeoutMs = stmo >= MinConfiguredTimeoutMs ? stmo : 0;
+                            s.WatchPaths = ParseStringArray(o["watchPaths"]);
+                            s.AlwaysAllow = ParseStringArray(o["alwaysAllow"]);
+                            s.DisabledTools = ParseStringArray(o["disabledTools"]);
                             list.Add(s);
                         }
                         catch { }
@@ -173,7 +347,6 @@ namespace Forge.SolidWorks
                     if (list.Count == 0) return fallback;
                     return list;
                 }
-                // LEGACY form: flat keys, no `servers`.
                 var one = DefaultServerConfig();
                 try
                 {
@@ -185,20 +358,41 @@ namespace Forge.SolidWorks
                         foreach (var t in a) { string s = (string)t; if (!string.IsNullOrWhiteSpace(s)) list.Add(s); }
                         if (list.Count > 0) one.Args = list.ToArray();
                     }
-                    int tmo = (int?)j["startTimeoutMs"] ?? 0;
-                    if (tmo >= 30000) one.StartTimeoutMs = tmo;
+                    int stmo = (int?)j["startTimeoutMs"] ?? 0;
+                    if (stmo >= MinConfiguredTimeoutMs) one.StartTimeoutMs = stmo;
                     if (j["enabled"] != null) { try { one.Enabled = (bool)j["enabled"]; } catch { one.Enabled = true; } }
-                    int ptmo = (int?)j["timeoutMs"] ?? 0;
-                    if (ptmo >= 30000) one.TimeoutMs = ptmo;
-                    if (one.StartTimeoutMs < 30000) one.StartTimeoutMs = 0; // legacy without startTimeoutMs follows timeoutMs
-                    else if ((int?)j["startTimeoutMs"] == null) one.StartTimeoutMs = 0;
+                    int? ptmo = (int?)j["timeoutMs"];
+                    one.TimeoutMs = (ptmo.HasValue && ptmo.Value >= MinConfiguredTimeoutMs) ? ptmo.Value : DefaultStdioTimeoutMs;
+                    if ((int?)j["startTimeoutMs"] == null) one.StartTimeoutMs = 0;
                 }
                 catch { }
-                // Legacy files that carried no startTimeoutMs must follow timeoutMs.
                 try { if ((int?)j["startTimeoutMs"] == null) one.StartTimeoutMs = 0; } catch { }
+                one.WatchPaths = ParseStringArray(j["watchPaths"]);
+                one.AlwaysAllow = ParseStringArray(j["alwaysAllow"]);
+                one.DisabledTools = ParseStringArray(j["disabledTools"]);
                 return new List<McpServerConfig> { one };
             }
             catch { return fallback; }
+        }
+
+        private static string[] ParseStringArray(JToken tok)
+        {
+            var list = new List<string>();
+            try
+            {
+                var ja = tok as JArray;
+                if (ja != null)
+                {
+                    foreach (var a in ja) { string s = (string)a; if (!string.IsNullOrWhiteSpace(s)) list.Add(s.Trim()); }
+                    return list.ToArray();
+                }
+                string one = (string)tok;
+                if (!string.IsNullOrWhiteSpace(one))
+                    foreach (var s in one.Split(new[] { ',', ';', '\n', '\r', ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries))
+                        if (!string.IsNullOrWhiteSpace(s)) list.Add(s.Trim());
+            }
+            catch { }
+            return list.ToArray();
         }
 
         // Quote-aware splitter for a space-joined args string ("a \"b c\" d" -> 3 parts).
@@ -221,53 +415,116 @@ namespace Forge.SolidWorks
             catch { return new string[0]; }
         }
 
-        /// <summary>Persist the full server list in NEW `servers` form (legacy flat keys are dropped).</summary>
+        private static Dictionary<string, string> ParseStringMap(JToken tok)
+        {
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                var o = tok as JObject;
+                if (o == null) return map;
+                foreach (var p in o.Properties())
+                {
+                    try
+                    {
+                        if (string.IsNullOrWhiteSpace(p.Name) || p.Value == null) continue;
+                        if (p.Value.Type == JTokenType.Null) continue;
+                        string v = p.Value.Type == JTokenType.String ? (string)p.Value : p.Value.ToString(Newtonsoft.Json.Formatting.None);
+                        if (!string.IsNullOrEmpty(v)) map[p.Name.Trim()] = v;
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return map;
+        }
+
+        private static JObject StringMapJson(Dictionary<string, string> map)
+        {
+            var o = new JObject();
+            if (map != null)
+                foreach (var kv in map)
+                {
+                    try { if (!string.IsNullOrEmpty(kv.Key) && kv.Value != null) o[kv.Key] = kv.Value; }
+                    catch { }
+                }
+            return o;
+        }
+
+        private static JArray StringArrayJson(string[] values)
+        {
+            var ja = new JArray();
+            if (values != null)
+                foreach (var v in values) if (!string.IsNullOrWhiteSpace(v)) ja.Add(v.Trim());
+            return ja;
+        }
+
+        private static JObject SerializeServers(List<McpServerConfig> servers)
+        {
+            var arr = new JArray();
+            if (servers != null)
+                foreach (var s in servers)
+                {
+                    try
+                    {
+                        if (s == null || string.IsNullOrWhiteSpace(s.Name)) continue;
+                        string cmd = string.IsNullOrWhiteSpace(s.Command) ? "uvx" : s.Command.Trim();
+                        var ja = new JArray();
+                        if (s.Args != null)
+                            foreach (var a in s.Args) if (!string.IsNullOrWhiteSpace(a)) ja.Add(a);
+                        if (ja.Count == 0) ja.Add("solidworks-mcp");
+                        int tmo = s.TimeoutMs >= MinConfiguredTimeoutMs
+                            ? s.TimeoutMs
+                            : (s.IsHttp ? DefaultHttpTimeoutMs : DefaultStdioTimeoutMs);
+                        var o = new JObject
+                        {
+                            ["name"] = s.Name.Trim(),
+                            ["command"] = cmd,
+                            ["args"] = ja,
+                            ["enabled"] = s.Enabled,
+                            ["timeoutMs"] = tmo
+                        };
+                        if (s.StartTimeoutMs >= MinConfiguredTimeoutMs && s.StartTimeoutMs != tmo)
+                            o["startTimeoutMs"] = s.StartTimeoutMs;
+                        if (s.IsHttp)
+                        {
+                            o["type"] = "http";
+                            o["url"] = s.Url ?? "";
+                            if (s.Headers != null && s.Headers.Count > 0) o["headers"] = StringMapJson(s.Headers);
+                        }
+                        else
+                        {
+                            if (s.Env != null && s.Env.Count > 0) o["env"] = StringMapJson(s.Env);
+                            if (!string.IsNullOrWhiteSpace(s.Cwd)) o["cwd"] = s.Cwd.Trim();
+                        }
+                        if (s.WatchPaths != null && s.WatchPaths.Length > 0) o["watchPaths"] = StringArrayJson(s.WatchPaths);
+                        if (s.AlwaysAllow != null && s.AlwaysAllow.Length > 0) o["alwaysAllow"] = StringArrayJson(s.AlwaysAllow);
+                        if (s.DisabledTools != null && s.DisabledTools.Length > 0) o["disabledTools"] = StringArrayJson(s.DisabledTools);
+                        arr.Add(o);
+                    }
+                    catch { }
+                }
+            if (arr.Count == 0)
+            {
+                var d = DefaultServerConfig();
+                arr.Add(new JObject
+                {
+                    ["name"] = d.Name,
+                    ["command"] = d.Command,
+                    ["args"] = new JArray(d.Args),
+                    ["enabled"] = d.Enabled,
+                    ["timeoutMs"] = d.TimeoutMs
+                });
+            }
+            return new JObject { ["servers"] = arr };
+        }
+
         public static void SaveServers(List<McpServerConfig> servers)
         {
             try
             {
-                var arr = new JArray();
-                if (servers != null)
-                    foreach (var s in servers)
-                    {
-                        try
-                        {
-                            if (s == null || string.IsNullOrWhiteSpace(s.Name)) continue;
-                            string cmd = string.IsNullOrWhiteSpace(s.Command) ? "uvx" : s.Command.Trim();
-                            var ja = new JArray();
-                            if (s.Args != null)
-                                foreach (var a in s.Args) if (!string.IsNullOrWhiteSpace(a)) ja.Add(a);
-                            if (ja.Count == 0) ja.Add("solidworks-mcp");
-                            int tmo = s.TimeoutMs >= 30000 ? s.TimeoutMs : 300000;
-                            var o = new JObject
-                            {
-                                ["name"] = s.Name.Trim(),
-                                ["command"] = cmd,
-                                ["args"] = ja,
-                                ["enabled"] = s.Enabled,
-                                ["timeoutMs"] = tmo
-                            };
-                            if (s.StartTimeoutMs >= 30000 && s.StartTimeoutMs != tmo)
-                                o["startTimeoutMs"] = s.StartTimeoutMs;
-                            arr.Add(o);
-                        }
-                        catch { }
-                    }
-                if (arr.Count == 0)
-                {
-                    var d = DefaultServerConfig();
-                    arr.Add(new JObject
-                    {
-                        ["name"] = d.Name,
-                        ["command"] = d.Command,
-                        ["args"] = new JArray(d.Args),
-                        ["enabled"] = d.Enabled,
-                        ["timeoutMs"] = d.TimeoutMs
-                    });
-                }
                 string p = ConfigPath();
                 try { Directory.CreateDirectory(Path.GetDirectoryName(p)); } catch { }
-                File.WriteAllText(p, new JObject { ["servers"] = arr }.ToString(Newtonsoft.Json.Formatting.None));
+                File.WriteAllText(p, SerializeServers(servers).ToString(Newtonsoft.Json.Formatting.None));
             }
             catch { }
         }
@@ -287,7 +544,7 @@ namespace Forge.SolidWorks
                     if (string.Equals(s.Name, name.Trim(), StringComparison.OrdinalIgnoreCase)) { cur = s; break; }
                 if (cur == null) { cur = DefaultServerConfig(); cur.Name = name.Trim(); cur.StartTimeoutMs = 0; list.Add(cur); }
                 if (enabled.HasValue) cur.Enabled = enabled.Value;
-                if (timeoutMs.HasValue && timeoutMs.Value >= 30000) cur.TimeoutMs = timeoutMs.Value;
+                if (timeoutMs.HasValue && timeoutMs.Value >= MinConfiguredTimeoutMs) cur.TimeoutMs = timeoutMs.Value;
                 if (!string.IsNullOrWhiteSpace(command)) cur.Command = command.Trim();
                 if (args != null && args.Length > 0)
                 {
@@ -296,7 +553,7 @@ namespace Forge.SolidWorks
                     if (kept.Count > 0) cur.Args = kept.ToArray();
                 }
                 if (startTimeoutMs.HasValue)
-                    cur.StartTimeoutMs = startTimeoutMs.Value >= 30000 ? startTimeoutMs.Value : 0;
+                    cur.StartTimeoutMs = startTimeoutMs.Value >= MinConfiguredTimeoutMs ? startTimeoutMs.Value : 0;
                 SaveServers(list);
             }
             catch { }
@@ -329,7 +586,7 @@ namespace Forge.SolidWorks
                 cfg.Args = (s.Args != null && s.Args.Length > 0) ? s.Args : new[] { "solidworks-mcp" };
                 cfg.StartTimeoutMs = s.EffectiveStartTimeoutMs;
                 cfg.Enabled = s.Enabled;
-                cfg.TimeoutMs = s.TimeoutMs >= 30000 ? s.TimeoutMs : 300000;
+                cfg.TimeoutMs = s.TimeoutMs >= MinConfiguredTimeoutMs ? s.TimeoutMs : DefaultStdioTimeoutMs;
             }
             catch { }
             return cfg;
@@ -344,7 +601,7 @@ namespace Forge.SolidWorks
                 if (list == null || list.Count == 0) list = new List<McpServerConfig> { DefaultServerConfig() };
                 var first = list[0];
                 if (enabled.HasValue) first.Enabled = enabled.Value;
-                if (timeoutMs >= 30000) first.TimeoutMs = timeoutMs;
+                if (timeoutMs >= MinConfiguredTimeoutMs) first.TimeoutMs = timeoutMs;
                 SaveServers(list);
             }
             catch { }
@@ -356,7 +613,7 @@ namespace Forge.SolidWorks
             {
                 string n = (serverName ?? "").Trim();
                 if (n.Length > 0) return n;
-                var list = LoadServers();
+                var list = LoadEffectiveServers();
                 if (list != null && list.Count > 0 && list[0] != null && !string.IsNullOrWhiteSpace(list[0].Name))
                     return list[0].Name.Trim();
             }
@@ -368,7 +625,7 @@ namespace Forge.SolidWorks
         {
             try
             {
-                var list = LoadServers();
+                var list = LoadEffectiveServers();
                 if (list != null)
                     foreach (var s in list)
                         if (s != null && string.Equals(s.Name, name, StringComparison.OrdinalIgnoreCase))
@@ -376,6 +633,86 @@ namespace Forge.SolidWorks
             }
             catch { }
             return null;
+        }
+
+        private static List<string> ConfiguredServerNames()
+        {
+            var names = new List<string>();
+            try
+            {
+                var list = LoadEffectiveServers();
+                if (list != null)
+                    foreach (var s in list)
+                        if (s != null && !string.IsNullOrWhiteSpace(s.Name)) names.Add(s.Name.Trim());
+            }
+            catch { }
+            return names;
+        }
+
+        private static bool IsHttpServer(string name)
+        {
+            var cfg = FindServer(name);
+            return cfg != null && cfg.IsHttp;
+        }
+
+        public static bool TrySplitQualified(string qualified, IEnumerable<string> serverNames, out string server, out string tool)
+        {
+            server = null;
+            tool = null;
+            if (string.IsNullOrWhiteSpace(qualified) || serverNames == null) return false;
+            string q = qualified.Trim();
+            string best = null;
+            foreach (var raw in serverNames)
+            {
+                if (string.IsNullOrWhiteSpace(raw)) continue;
+                string s = raw.Trim();
+                if (s.Length == 0 || q.Length <= s.Length + 1) continue;
+                if (q[s.Length] != '_') continue;
+                if (!string.Equals(q.Substring(0, s.Length), s, StringComparison.OrdinalIgnoreCase)) continue;
+                if (best == null || s.Length > best.Length) best = s;
+            }
+            if (best == null) return false;
+            string remainder = q.Substring(best.Length + 1);
+            if (remainder.Length == 0) return false;
+            JArray cached = null;
+            try
+            {
+                lock (Gate)
+                {
+                    McpConn conn;
+                    if (Conns.TryGetValue(best, out conn) && conn != null && conn.CachedTools != null && conn.CachedTools.Count > 0)
+                        cached = conn.CachedTools;
+                }
+            }
+            catch { }
+            if (cached != null)
+            {
+                bool found = false;
+                foreach (var t in cached)
+                {
+                    try
+                    {
+                        string tn = t is JObject ? (string)((JObject)t)["name"] : (string)t;
+                        if (string.Equals(tn, remainder, StringComparison.OrdinalIgnoreCase)) { found = true; break; }
+                    }
+                    catch { }
+                }
+                if (!found) return false;
+            }
+            server = best;
+            tool = remainder;
+            return true;
+        }
+
+        public static string ServerForTool(string qualifiedOrRaw, IEnumerable<string> serverNames)
+        {
+            string s, t;
+            return TrySplitQualified(qualifiedOrRaw, serverNames, out s, out t) ? s : null;
+        }
+
+        public static string ServerForTool(string qualifiedOrRaw)
+        {
+            return ServerForTool(qualifiedOrRaw, ConfiguredServerNames());
         }
 
         private static McpConn GetConnLocked(string name)
@@ -387,6 +724,80 @@ namespace Forge.SolidWorks
                 Conns[name] = c;
             }
             return c;
+        }
+
+        private static void OnToolsListChanged(string name, McpConn conn)
+        {
+            string target = ResolveName(name);
+            try
+            {
+                lock (Gate)
+                {
+                    if (conn != null) { conn.CachedTools = null; conn.CachedResources = null; conn.CachedResourceTemplates = null; }
+                    McpConn cur;
+                    if (Conns.TryGetValue(target, out cur) && cur != null) { cur.CachedTools = null; cur.CachedResources = null; cur.CachedResourceTemplates = null; }
+                }
+            }
+            catch { }
+            var hook = ServerToolsChanged;
+            if (hook != null)
+            {
+                try { hook(target); } catch { }
+            }
+        }
+
+        private static bool HandleNotification(string serverName, JObject o)
+        {
+            try
+            {
+                if (o == null) return false;
+                var jt = o["id"];
+                if (jt != null && jt.Type != JTokenType.Null) return false;
+                string m = (string)o["method"];
+                if (string.IsNullOrEmpty(m)) return false;
+                if (string.Equals(m, "notifications/tools/list_changed", StringComparison.Ordinal) ||
+                    string.Equals(m, "notifications/resources/list_changed", StringComparison.Ordinal) ||
+                    string.Equals(m, "notifications/resources/updated", StringComparison.Ordinal))
+                {
+                    string target = ResolveName(serverName);
+                    McpConn conn = null;
+                    try { lock (Gate) { Conns.TryGetValue(target, out conn); } } catch { }
+                    OnToolsListChanged(target, conn);
+                    return true;
+                }
+                return true;
+            }
+            catch { }
+            return false;
+        }
+
+        private static void StoreInstructions(string name, JObject initResult)
+        {
+            string instr = "";
+            try
+            {
+                if (initResult != null)
+                {
+                    var tok = initResult["instructions"];
+                    if (tok != null && tok.Type != JTokenType.Null) instr = (string)tok ?? "";
+                }
+                if (instr.Length > 4000) instr = instr.Substring(0, 4000);
+            }
+            catch { instr = ""; }
+            try { lock (Gate) { GetConnLocked(name).Instructions = instr; } } catch { }
+        }
+
+        private static string GetInstructions(string name)
+        {
+            try
+            {
+                lock (Gate)
+                {
+                    McpConn c;
+                    return Conns.TryGetValue(name, out c) && c != null ? (c.Instructions ?? "") : "";
+                }
+            }
+            catch { return ""; }
         }
 
         public static bool IsRunning
@@ -407,7 +818,9 @@ namespace Forge.SolidWorks
                 lock (Gate)
                 {
                     McpConn c;
-                    if (!Conns.TryGetValue(name, out c) || c == null || c.Proc == null) return false;
+                    if (!Conns.TryGetValue(name, out c) || c == null) return false;
+                    if (c.IsHttp) return c.HttpReady && !c.HttpFailed;
+                    if (c.Proc == null) return false;
                     try { return !c.Proc.HasExited; } catch { return false; }
                 }
             }
@@ -420,7 +833,7 @@ namespace Forge.SolidWorks
             var arr = new JArray();
             try
             {
-                var list = LoadServers();
+                var list = LoadEffectiveServers();
                 if (list == null || list.Count == 0) list = new List<McpServerConfig> { DefaultServerConfig() };
                 foreach (var s in list)
                 {
@@ -435,8 +848,13 @@ namespace Forge.SolidWorks
                             ["command"] = s.Command ?? "uvx",
                             ["args"] = s.Args != null ? string.Join(" ", s.Args) : "",
                             ["enabled"] = s.Enabled,
-                            ["timeoutMs"] = s.TimeoutMs >= 30000 ? s.TimeoutMs : 300000,
-                            ["running"] = running
+                            ["timeoutMs"] = s.TimeoutMs >= MinConfiguredTimeoutMs ? s.TimeoutMs : (s.IsHttp ? DefaultHttpTimeoutMs : DefaultStdioTimeoutMs),
+                            ["type"] = s.IsHttp ? "http" : "stdio",
+                            ["url"] = s.IsHttp ? (s.Url ?? "") : "",
+                            ["running"] = running,
+                            ["watchPaths"] = StringArrayJson(s.WatchPaths),
+                            ["alwaysAllow"] = StringArrayJson(s.AlwaysAllow),
+                            ["disabledTools"] = StringArrayJson(s.DisabledTools)
                         });
                     }
                     catch { }
@@ -473,7 +891,7 @@ namespace Forge.SolidWorks
         public static async Task<RouteResult> RouteAsync(CancellationToken ct = default(CancellationToken))
         {
             List<McpServerConfig> servers = null;
-            try { servers = LoadServers(); } catch { servers = null; }
+            try { servers = LoadEffectiveServers(); } catch { servers = null; }
             if (servers == null || servers.Count == 0)
                 servers = new List<McpServerConfig> { DefaultServerConfig() };
             var enabled = new List<McpServerConfig>();
@@ -488,11 +906,27 @@ namespace Forge.SolidWorks
                     await EnsureStartedAsync(s.Name, 0, ct).ConfigureAwait(false);
                     JArray tools = await ListToolsAsync(s.Name, ct).ConfigureAwait(false);
                     if (tools != null && tools.Count > 0)
-                        return new RouteResult { Tools = tools, Winner = s.Name };
+                        return new RouteResult { Tools = tools, Winner = s.Name, Instructions = GetInstructions(s.Name) };
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception) { /* next server */ }
             }
+            return new RouteResult { Tools = new JArray(), Winner = null };
+        }
+
+        public static async Task<RouteResult> RouteAsync(string qualified, CancellationToken ct = default(CancellationToken))
+        {
+            string server, tool;
+            if (!TrySplitQualified(qualified, ConfiguredServerNames(), out server, out tool))
+                return await RouteAsync(ct).ConfigureAwait(false);
+            var cfg = FindServer(server);
+            if (cfg == null || !cfg.Enabled)
+                throw new McpException("MCP server " + server + " is disabled/unavailable for tool " + tool + " (disabled).");
+            try { await EnsureStartedOnAsync(server, 0, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception) { throw new McpException("MCP server " + server + " is disabled/unavailable for tool " + tool + " (unavailable)."); }
+            JArray tools = await ListToolsAsync(server, ct).ConfigureAwait(false);
+            if (tools != null && tools.Count > 0) return new RouteResult { Tools = tools, Winner = server, Instructions = GetInstructions(server) };
             return new RouteResult { Tools = new JArray(), Winner = null };
         }
 
@@ -531,37 +965,226 @@ namespace Forge.SolidWorks
             acquired = true;
             try
             {
-                lock (Gate)
+                int want = timeoutMs > 0 ? timeoutMs : cfg.EffectiveStartTimeoutMs;
+                if (want < 30000) want = 60000;
+                initTimeout = want;
+                var init = new JObject
                 {
-                    var conn = GetConnLocked(name);
-                    if (conn.Proc != null) { try { if (!conn.Proc.HasExited) return; } catch { } }
-                    int want = timeoutMs > 0 ? timeoutMs : cfg.EffectiveStartTimeoutMs;
-                    if (want < 30000) want = 60000; // StartLocked ignores <30s; handshake must still bound itself
-                    initTimeout = want;
-                    StartLocked(name, conn, cfg);
-                }
-                // Handshake outside the process lock but inside the start gate (IO).
-                try
-                {
-                    var init = new JObject
+                    ["protocolVersion"] = "2024-11-05",
+                    ["capabilities"] = new JObject
                     {
-                        ["protocolVersion"] = "2024-11-05",
-                        ["capabilities"] = new JObject(),
-                        ["clientInfo"] = new JObject { ["name"] = "Forge", ["version"] = "1.0" }
-                    };
-                    JObject res = await RpcOnServerAsync(name, "initialize", init, initTimeout, ct).ConfigureAwait(false);
-                    if (res == null) throw new McpException("MCP initialize returned nothing.");
-                    await NotifyOnServerAsync(name, "notifications/initialized", new JObject());
-                }
-                catch (OperationCanceledException) { Stop(name); throw; } // stop wins: never rewrap cancel as a handshake error
-                catch (Exception ex)
+                        ["tools"] = new JObject { ["listChanged"] = true },
+                        ["resources"] = new JObject { ["subscribe"] = false, ["listChanged"] = true }
+                    },
+                    ["clientInfo"] = new JObject { ["name"] = "Forge", ["version"] = "1.0" }
+                };
+                if (cfg.IsHttp)
                 {
-                    Stop(name);
-                    if (ex is McpException) throw;
-                    throw new McpException("MCP handshake failed: " + ex.Message + " — run `uvx solidworks-mcp --selftest` with SolidWorks open and retry.");
+                    bool alreadyReady;
+                    lock (Gate)
+                    {
+                        var conn = GetConnLocked(name);
+                        alreadyReady = conn.HttpReady && !conn.HttpFailed;
+                        if (!alreadyReady)
+                        {
+                            conn.IsHttp = true;
+                            conn.Url = cfg.Url;
+                            conn.Headers = cfg.Headers;
+                            EnsureHttpClientLocked(conn);
+                        }
+                    }
+                    if (alreadyReady) { RegisterWatch(name); return; }
+                    // Handshake outside the process lock but inside the start gate (IO).
+                    try
+                    {
+                        JObject res = await RpcOnServerAsync(name, "initialize", init, initTimeout, ct).ConfigureAwait(false);
+                        if (res == null) throw new McpException("MCP server '" + name + "' returned an empty initialize response — check the server URL and retry.");
+                        StoreInstructions(name, res);
+                        await NotifyOnServerAsync(name, "notifications/initialized", new JObject()).ConfigureAwait(false);
+                        bool notifyFailed;
+                        lock (Gate) { var c = GetConnLocked(name); notifyFailed = c.HttpFailed; if (!notifyFailed) c.HttpReady = true; }
+                        if (notifyFailed)
+                            throw new McpException("MCP server '" + name + "' failed to confirm initialization — check the URL/headers and the server logs, then retry.");
+                        RegisterWatch(name);
+                    }
+                    catch (OperationCanceledException) { Stop(name); throw; }
+                    catch (Exception ex)
+                    {
+                        Stop(name);
+                        if (ex is McpException) throw;
+                        throw new McpException("MCP server '" + name + "' handshake failed: " + ex.Message + " — check the MCP server URL and retry.");
+                    }
+                }
+                else
+                {
+                    bool alreadyRunning = false;
+                    lock (Gate)
+                    {
+                        var conn = GetConnLocked(name);
+                        if (conn.Proc != null) { try { if (!conn.Proc.HasExited) alreadyRunning = true; } catch { } }
+                        if (!alreadyRunning) StartLocked(name, conn, cfg);
+                    }
+                    if (alreadyRunning) { RegisterWatch(name); return; }
+                    // Handshake outside the process lock but inside the start gate (IO).
+                    try
+                    {
+                        JObject res = await RpcOnServerAsync(name, "initialize", init, initTimeout, ct).ConfigureAwait(false);
+                        if (res == null) throw new McpException("MCP server '" + name + "' returned an empty initialize response — run `uvx solidworks-mcp --selftest` with SolidWorks open and retry.");
+                        StoreInstructions(name, res);
+                        await NotifyOnServerAsync(name, "notifications/initialized", new JObject()).ConfigureAwait(false);
+                        RegisterWatch(name);
+                    }
+                    catch (OperationCanceledException) { Stop(name); throw; } // stop wins: never rewrap cancel as a handshake error
+                    catch (Exception ex)
+                    {
+                        Stop(name);
+                        if (ex is McpException) throw;
+                        throw new McpException("MCP server '" + name + "' handshake failed: " + ex.Message + " — run `uvx solidworks-mcp --selftest` with SolidWorks open and retry.");
+                    }
                 }
             }
             finally { if (acquired) { try { StartGate.Release(); } catch { } } }
+        }
+
+        private static void RegisterWatch(string name)
+        {
+            try
+            {
+                var cfg = FindServer(name);
+                lock (Gate) { StartWatchLocked(name, GetConnLocked(name), cfg); }
+            }
+            catch { }
+        }
+
+        private static void StartWatchLocked(string name, McpConn conn, McpServerConfig cfg)
+        {
+            try { if (conn.WatchTimer != null) conn.WatchTimer.Dispose(); } catch { }
+            conn.WatchTimer = null;
+            conn.WatchPaths = null;
+            try { conn.WatchStamps.Clear(); } catch { }
+            conn.WatchBusy = 0;
+            if (cfg == null || !cfg.Enabled || cfg.WatchPaths == null || cfg.WatchPaths.Length == 0) return;
+            var paths = new List<string>();
+            foreach (var raw in cfg.WatchPaths)
+            {
+                try
+                {
+                    string p = (raw ?? "").Trim();
+                    if (p.Length == 0) continue;
+                    p = Environment.ExpandEnvironmentVariables(p);
+                    if (!Path.IsPathRooted(p)) p = Path.GetFullPath(p);
+                    paths.Add(p);
+                }
+                catch { }
+            }
+            if (paths.Count == 0) return;
+            conn.WatchPaths = paths.ToArray();
+            RefreshWatchStampsLocked(conn);
+            conn.WatchTimer = new Timer(WatchTick, new WatchState { Name = name }, WatchPollMs, WatchPollMs);
+        }
+
+        private static void RefreshWatchStampsLocked(McpConn conn)
+        {
+            try
+            {
+                try { conn.WatchStamps.Clear(); } catch { }
+                foreach (string p in conn.WatchPaths ?? new string[0])
+                {
+                    try { conn.WatchStamps[p] = WatchStampFor(p); }
+                    catch { try { conn.WatchStamps[p] = DateTime.MinValue; } catch { } }
+                }
+            }
+            catch { }
+        }
+
+        private static DateTime WatchStampFor(string path)
+        {
+            try
+            {
+                if (File.Exists(path)) return File.GetLastWriteTimeUtc(path);
+                if (Directory.Exists(path)) return Directory.GetLastWriteTimeUtc(path);
+            }
+            catch { }
+            return DateTime.MinValue;
+        }
+
+        private static void WatchTick(object state)
+        {
+            var ws = state as WatchState;
+            if (ws == null) return;
+            string name = ws.Name;
+            McpConn conn;
+            string[] paths;
+            var stamps = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                lock (Gate)
+                {
+                    if (!Conns.TryGetValue(name, out conn) || conn == null || conn.WatchTimer == null ||
+                        conn.WatchPaths == null || conn.WatchPaths.Length == 0 || conn.WatchBusy != 0) return;
+                    paths = conn.WatchPaths;
+                    foreach (var kv in conn.WatchStamps) stamps[kv.Key] = kv.Value;
+                }
+            }
+            catch { return; }
+            bool changed = false;
+            foreach (string p in paths)
+            {
+                try
+                {
+                    DateTime now = WatchStampFor(p);
+                    DateTime prev;
+                    if (!stamps.TryGetValue(p, out prev) || prev != now) changed = true;
+                    stamps[p] = now;
+                }
+                catch { }
+            }
+            if (!changed) return;
+            try
+            {
+                lock (Gate)
+                {
+                    if (!Conns.TryGetValue(name, out conn) || conn == null || conn.WatchTimer == null) return;
+                    if (System.Threading.Interlocked.CompareExchange(ref conn.WatchBusy, 1, 0) != 0) return;
+                    foreach (var kv in stamps) conn.WatchStamps[kv.Key] = kv.Value;
+                }
+            }
+            catch { return; }
+            var task = RestartWatchedAsync(name);
+            ObserveFault(task);
+        }
+
+        private static async Task RestartWatchedAsync(string name)
+        {
+            McpConn conn = null;
+            try
+            {
+                bool wasRunning = IsRunningServer(name);
+                try { Stop(name); } catch { }
+                if (!wasRunning) return;
+                var cfg = FindServer(name);
+                if (cfg == null || !cfg.Enabled) return;
+                await EnsureStartedAsync(name, 0, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch { }
+            finally
+            {
+                bool needRegister = false;
+                try
+                {
+                    lock (Gate)
+                    {
+                        if (Conns.TryGetValue(name, out conn) && conn != null)
+                        {
+                            conn.WatchBusy = 0;
+                            RefreshWatchStampsLocked(conn);
+                            needRegister = conn.WatchTimer == null;
+                        }
+                    }
+                }
+                catch { }
+                if (needRegister) { try { RegisterWatch(name); } catch { } }
+            }
         }
 
         private static void StartLocked(string name, McpConn conn, McpServerConfig cfg)
@@ -580,6 +1203,12 @@ namespace Forge.SolidWorks
                 StandardErrorEncoding = Encoding.UTF8,
                 CreateNoWindow = true
             };
+            if (cfg.Env != null)
+                foreach (var kv in cfg.Env)
+                    if (!string.IsNullOrEmpty(kv.Key) && !string.IsNullOrEmpty(kv.Value))
+                        psi.EnvironmentVariables[kv.Key] = kv.Value;
+            if (!string.IsNullOrWhiteSpace(cfg.Cwd) && Directory.Exists(cfg.Cwd))
+                psi.WorkingDirectory = cfg.Cwd;
             try
             {
                 conn.Proc = Process.Start(psi);
@@ -596,7 +1225,7 @@ namespace Forge.SolidWorks
             conn.ReaderThread = new Thread(ReaderLoop) { IsBackground = true, Name = "forge-mcp-reader" };
             conn.ReaderThread.Start(new ReaderState { Name = name, Conn = conn, Proc = conn.Proc });
             conn.DrainThread = new Thread(DrainLoop) { IsBackground = true, Name = "forge-mcp-stderr" };
-            conn.DrainThread.Start(conn.Proc.StandardError);
+            conn.DrainThread.Start(new DrainState { Name = name, Conn = conn, Reader = conn.Proc.StandardError });
         }
 
         private static void ReaderLoop(object state)
@@ -619,7 +1248,19 @@ namespace Forge.SolidWorks
                     {
                         var msg = JObject.Parse(line);
                         var jt = msg["id"];
-                        if (jt == null || jt.Type == JTokenType.Null) continue; // notification from server: ignore
+                        if (jt == null || jt.Type == JTokenType.Null)
+                        {
+                            try
+                            {
+                                string m = (string)msg["method"];
+                                    if (string.Equals(m, "notifications/tools/list_changed", StringComparison.Ordinal) ||
+                                        string.Equals(m, "notifications/resources/list_changed", StringComparison.Ordinal) ||
+                                        string.Equals(m, "notifications/resources/updated", StringComparison.Ordinal))
+                                        OnToolsListChanged(rs.Name, conn);
+                            }
+                            catch { }
+                            continue;
+                        }
                         // Servers may echo string ids ("12"): never drop a reply on a cast.
                         if (jt.Type == JTokenType.Integer) id = jt.Value<int>();
                         else if (jt.Type == JTokenType.String) { if (!int.TryParse((string)jt, out id)) continue; }
@@ -631,6 +1272,7 @@ namespace Forge.SolidWorks
                 }
             }
             catch { }
+            AppendServerLog(rs.Name, "[forge] MCP server process exited");
             // Server died: fail this conn's outstanding calls only. If a restart already swapped
             // in a new proc, the new reader owns the current ids — don't steal them.
             lock (Gate)
@@ -650,9 +1292,52 @@ namespace Forge.SolidWorks
             }
         }
 
-        private static void DrainLoop(object err)
+        private static void AppendServerLog(string name, string line)
         {
-            try { var r = err as StreamReader; if (r == null) return; while (r.ReadLine() != null) { } }
+            try
+            {
+                if (line == null) return;
+                string target = ResolveName(name);
+                lock (Gate)
+                {
+                    var c = GetConnLocked(target);
+                    if (line.Length > 4000) line = line.Substring(0, 4000) + "…";
+                    if (c.StderrTail.Length > 0) c.StderrTail.Append('\n');
+                    c.StderrTail.Append(line);
+                    if (c.StderrTail.Length > ServerLogTailChars)
+                    {
+                        string s = c.StderrTail.ToString();
+                        c.StderrTail.Clear();
+                        c.StderrTail.Append(s.Substring(s.Length - ServerLogTailChars));
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public static string ServerLog(string serverName = null)
+        {
+            try
+            {
+                string name = ResolveName(serverName);
+                lock (Gate)
+                {
+                    McpConn c;
+                    return Conns.TryGetValue(name, out c) && c != null ? c.StderrTail.ToString() : "";
+                }
+            }
+            catch { return ""; }
+        }
+
+        private static void DrainLoop(object state)
+        {
+            var ds = state as DrainState;
+            if (ds == null || ds.Reader == null) return;
+            try
+            {
+                string line;
+                while ((line = ds.Reader.ReadLine()) != null) AppendServerLog(ds.Name, line);
+            }
             catch { }
         }
 
@@ -679,7 +1364,23 @@ namespace Forge.SolidWorks
         private static void StopLocked(McpConn conn)
         {
             if (conn == null) return;
+            try { if (conn.WatchTimer != null) conn.WatchTimer.Dispose(); } catch { }
+            conn.WatchTimer = null;
+            conn.WatchPaths = null;
+            try { conn.WatchStamps.Clear(); } catch { }
+            conn.WatchBusy = 0;
             conn.CachedTools = null; // invalidate: a restarted server may serve a different tool set
+            conn.CachedResources = null;
+            conn.CachedResourceTemplates = null;
+            conn.Instructions = "";
+            conn.HttpReady = false;
+            conn.HttpFailed = false;
+            conn.SessionId = null;
+            conn.IsHttp = false;
+            conn.Url = null;
+            conn.Headers = null;
+            try { if (conn.Http != null) conn.Http.Dispose(); } catch { }
+            conn.Http = null;
             foreach (var kv in conn.Pending)
             {
                 TaskCompletionSource<string> tcs;
@@ -710,6 +1411,7 @@ namespace Forge.SolidWorks
         private static Task NotifyOnServerAsync(string serverName, string method, JObject p)
         {
             string name = ResolveName(serverName);
+            if (IsHttpServer(name)) return HttpNotifyAsync(name, method, p);
             var msg = new JObject { ["jsonrpc"] = "2.0", ["method"] = method };
             if (p != null) msg["params"] = p;
             lock (Gate)
@@ -735,6 +1437,7 @@ namespace Forge.SolidWorks
             return m.IndexOf("not running", StringComparison.OrdinalIgnoreCase) >= 0
                 || m.IndexOf("exited", StringComparison.OrdinalIgnoreCase) >= 0
                 || m.IndexOf("stopped", StringComparison.OrdinalIgnoreCase) >= 0
+                || m.IndexOf("unavailable", StringComparison.OrdinalIgnoreCase) >= 0
                 || m.IndexOf("write failed", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
@@ -750,12 +1453,36 @@ namespace Forge.SolidWorks
             return RpcOnServerAsync(null, method, p, timeoutMs, ct);
         }
 
+        public static async Task<bool> PingAsync(string name, CancellationToken ct = default(CancellationToken))
+        {
+            try
+            {
+                string target = ResolveName(name);
+                var cfg = FindServer(target);
+                if (cfg == null || !cfg.Enabled) return false;
+                if (ct.IsCancellationRequested) return false;
+                int tmo = cfg.TimeoutMs >= MinConfiguredTimeoutMs ? cfg.TimeoutMs : 60000;
+                if (tmo > 10000) tmo = 10000;
+                await RpcOnServerAsync(target, "ping", null, tmo, ct).ConfigureAwait(false);
+                return true;
+            }
+            catch { return false; }
+        }
+
         /// <summary>Raw JSON-RPC call on one server. Returns the `result` object (throws on error member / timeout).</summary>
         public static async Task<JObject> RpcOnServerAsync(string serverName, string method, JObject p, int timeoutMs, CancellationToken ct = default(CancellationToken))
         {
             string name = ResolveName(serverName);
             if (timeoutMs <= 0) timeoutMs = 60000; // Task.Delay throws on 0/negative: bound it instead
             if (string.IsNullOrWhiteSpace(method)) throw new McpException("MCP method must not be empty.");
+            bool http;
+            lock (Gate)
+            {
+                McpConn existing;
+                http = Conns.TryGetValue(name, out existing) && existing != null && existing.IsHttp;
+            }
+            if (!http) http = IsHttpServer(name);
+            if (http) return await HttpRpcAsync(name, method, p, timeoutMs, ct).ConfigureAwait(false);
             int id = Interlocked.Increment(ref NextId);
             var msg = new JObject { ["jsonrpc"] = "2.0", ["id"] = id, ["method"] = method };
             if (p != null) msg["params"] = p;
@@ -764,16 +1491,16 @@ namespace Forge.SolidWorks
             {
                 var conn = GetConnLocked(name);
                 if (conn.Stdin == null || (conn.Proc != null && conn.Proc.HasExited))
-                    throw new McpException("MCP server is not running (is SolidWorks still open?).");
+                    throw new McpException("MCP server '" + name + "' is not running (is SolidWorks still open?) — start it in Settings → MCP servers, then retry.");
                 conn.Pending[id] = tcs;
                 try { conn.Stdin.WriteLine(msg.ToString(Newtonsoft.Json.Formatting.None)); }
                 catch (Exception ex)
                 {
                     TaskCompletionSource<string> dropped;
                     conn.Pending.TryRemove(id, out dropped);
-                    try { tcs.TrySetException(new McpException("MCP write failed: " + ex.Message)); } catch { }
+                    try { tcs.TrySetException(new McpException("MCP write failed on server '" + name + "': " + ex.Message)); } catch { }
                     ObserveFault(tcs.Task);
-                    throw new McpException("MCP write failed: " + ex.Message);
+                    throw new McpException("MCP write failed on server '" + name + "': " + ex.Message + " — restart the server and retry.");
                 }
             }
             // Cancellable delay: a bare Task.Delay(timeoutMs) leaves a Timer queued for the
@@ -802,23 +1529,240 @@ namespace Forge.SolidWorks
             {
                 TaskCompletionSource<string> dropped;
                 wconn.Pending.TryRemove(id, out dropped);
-                try { tcs.TrySetException(new McpException("MCP `" + method + "` timed out.")); } catch { }
+                try { tcs.TrySetException(new McpException("MCP server '" + name + "' timed out on `" + method + "`.")); } catch { }
                 ObserveFault(tcs.Task); // late reply / racing death-fail must have no unobserved waiter
-                throw new McpException("MCP `" + method + "` timed out after " + (timeoutMs / 1000) + "s.");
+                throw new McpException("MCP server '" + name + "' timed out on `" + method + "` after " + (timeoutMs / 1000) + "s — check the server process/logs and retry.");
             }
             string line = await tcs.Task.ConfigureAwait(false);
             JObject resp;
             try { resp = JObject.Parse(line); }
-            catch { throw new McpException("MCP returned non-JSON text (" + (line != null ? line.Length : 0) + " chars): " + Trunc(line, 200)); }
+            catch { throw new McpException("MCP server '" + name + "' returned non-JSON text for `" + method + "` (" + (line != null ? line.Length : 0) + " chars): " + Trunc(line, 200) + " — check the server logs and retry."); }
             var err = resp["error"];
             if (err != null)
             {
                 string em = null;
                 try { em = (string)err["message"]; } catch { }
                 if (string.IsNullOrEmpty(em)) { try { em = err.ToString(); } catch { em = "unknown error"; } }
-                throw new McpException("MCP error: " + Trunc(em, 500));
+                throw new McpException("MCP server '" + name + "' rejected `" + method + "`: " + Trunc(em, 500) + " — check the tool name/arguments and the server logs, then retry.");
             }
             return resp["result"] as JObject;
+        }
+
+        private static void EnsureHttpClientLocked(McpConn conn)
+        {
+            if (conn.Http == null)
+            {
+                conn.Http = new HttpClient();
+                try { conn.Http.Timeout = Timeout.InfiniteTimeSpan; } catch { }
+            }
+        }
+
+        private static void MarkHttpFailed(McpConn conn)
+        {
+            try { lock (Gate) { conn.HttpFailed = true; conn.SessionId = null; } } catch { }
+        }
+
+        private static JObject TryParseRpcData(string data, string serverName)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(data) || data.Trim() == "[DONE]") return null;
+                JObject o = JObject.Parse(data.Trim());
+                if (o != null)
+                {
+                    if (HandleNotification(serverName, o)) return null;
+                    if (o["result"] != null || o["error"] != null || o["jsonrpc"] != null) return o;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static JObject ParseRpcResponse(string text, string serverName)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(text)) return null;
+                string s = text.Trim();
+                if (s.StartsWith("{"))
+                {
+                    JObject direct = null;
+                    try { direct = JObject.Parse(s); } catch { }
+                    if (direct != null)
+                    {
+                        if (HandleNotification(serverName, direct)) return null;
+                        if (direct["result"] != null || direct["error"] != null || direct["jsonrpc"] != null) return direct;
+                    }
+                }
+                JObject found = null;
+                string data = null;
+                using (var sr = new StringReader(s))
+                {
+                    string line;
+                    while ((line = sr.ReadLine()) != null)
+                    {
+                        if (line.StartsWith("data:", StringComparison.Ordinal))
+                        {
+                            string d = line.Substring(5);
+                            if (d.StartsWith(" ")) d = d.Substring(1);
+                            data = data == null ? d : data + "\n" + d;
+                        }
+                        else if (line.Length == 0)
+                        {
+                            found = TryParseRpcData(data, serverName);
+                            data = null;
+                            if (found != null) return found;
+                        }
+                    }
+                }
+                return found != null ? found : TryParseRpcData(data, serverName);
+            }
+            catch { return null; }
+        }
+
+        private static async Task<JObject> HttpPostAsync(string name, string method, string body, int timeoutMs, CancellationToken ct)
+        {
+            McpConn conn;
+            lock (Gate) { conn = GetConnLocked(name); EnsureHttpClientLocked(conn); }
+            string url = conn.Url;
+            string sid;
+            Dictionary<string, string> hdrs;
+            lock (Gate) { sid = conn.SessionId; hdrs = conn.Headers; }
+            if (string.IsNullOrWhiteSpace(url)) throw new McpException("MCP server '" + name + "' has no URL configured — add a URL in Settings → MCP servers, then retry.");
+            bool isNotification = method != null && method.StartsWith("notifications/", StringComparison.Ordinal);
+            using (var timeoutCts = new CancellationTokenSource(timeoutMs))
+            using (var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token))
+            {
+                HttpResponseMessage respMsg = null;
+                try
+                {
+                    using (var req = new HttpRequestMessage(HttpMethod.Post, url))
+                    {
+                        req.Content = new StringContent(body, Encoding.UTF8);
+                        req.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+                        req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+                        req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+                        if (hdrs != null)
+                            foreach (var kv in hdrs)
+                            {
+                                if (string.IsNullOrEmpty(kv.Key) || kv.Value == null) continue;
+                                if (!req.Headers.TryAddWithoutValidation(kv.Key, kv.Value))
+                                    req.Content.Headers.TryAddWithoutValidation(kv.Key, kv.Value);
+                            }
+                        if (!string.IsNullOrEmpty(sid)) req.Headers.TryAddWithoutValidation("Mcp-Session-Id", sid);
+                        respMsg = await conn.Http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, linked.Token).ConfigureAwait(false);
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
+                    MarkHttpFailed(conn);
+                    throw new McpException("MCP server '" + name + "' timed out on `" + method + "` after " + (timeoutMs / 1000) + "s — check its URL/logs, then retry.");
+                }
+                catch (Exception ex)
+                {
+                    MarkHttpFailed(conn);
+                    throw new McpException("MCP server '" + name + "' unavailable (" + ex.Message + ") — check its URL/command and retry.");
+                }
+                using (respMsg)
+                {
+                    try
+                    {
+                        IEnumerable<string> vals;
+                        if (respMsg.Headers.TryGetValues("Mcp-Session-Id", out vals))
+                        {
+                            var got = vals.FirstOrDefault();
+                            if (!string.IsNullOrEmpty(got)) lock (Gate) { conn.SessionId = got; }
+                        }
+                    }
+                    catch { }
+                    string text;
+                    try
+                    {
+                        using (var stream = await respMsg.Content.ReadAsStreamAsync().ConfigureAwait(false))
+                        using (var reader = new StreamReader(stream, Encoding.UTF8, true))
+                        {
+                            var sb = new StringBuilder();
+                            char[] buf = new char[8192];
+                            int n;
+                            while ((n = await reader.ReadAsync(buf, 0, buf.Length).ConfigureAwait(false)) > 0)
+                            {
+                                linked.Token.ThrowIfCancellationRequested();
+                                if (sb.Length + n > 16 * 1024 * 1024) break;
+                                sb.Append(buf, 0, n);
+                            }
+                            text = sb.ToString();
+                        }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
+                        MarkHttpFailed(conn);
+                        throw new McpException("MCP server '" + name + "' timed out on `" + method + "` after " + (timeoutMs / 1000) + "s — check its URL/logs, then retry.");
+                    }
+                    catch (Exception ex)
+                    {
+                        MarkHttpFailed(conn);
+                        throw new McpException("MCP server '" + name + "' unavailable (" + ex.Message + ") — check its URL/command and retry.");
+                    }
+                    if (!respMsg.IsSuccessStatusCode)
+                    {
+                        MarkHttpFailed(conn);
+                        string why = respMsg.ReasonPhrase ?? "";
+                        throw new McpException("MCP server '" + name + "' returned HTTP " + (int)respMsg.StatusCode + (string.IsNullOrEmpty(why) ? "" : " " + why) + " for `" + method + "`" + (string.IsNullOrEmpty(text) ? "" : ": " + Trunc(text, 200)) + " — check the URL/headers and the server logs, then retry.");
+                    }
+                    JObject parsed = ParseRpcResponse(text, name);
+                    if (parsed == null)
+                    {
+                        if (isNotification) { lock (Gate) { conn.HttpFailed = false; } return new JObject(); }
+                        MarkHttpFailed(conn);
+                        throw new McpException("MCP server '" + name + "' returned an unreadable response to `" + method + "` (" + (text != null ? text.Length : 0) + " chars): " + Trunc(text, 200) + " — check the server logs and retry.");
+                    }
+                    lock (Gate) { conn.HttpFailed = false; }
+                    return parsed;
+                }
+            }
+        }
+
+        private static async Task<JObject> HttpRpcAsync(string name, string method, JObject p, int timeoutMs, CancellationToken ct)
+        {
+            if (timeoutMs <= 0) timeoutMs = 60000;
+            int id = Interlocked.Increment(ref NextId);
+            var msg = new JObject { ["jsonrpc"] = "2.0", ["id"] = id, ["method"] = method };
+            if (p != null) msg["params"] = p;
+            JObject resp = await HttpPostAsync(name, method, msg.ToString(Newtonsoft.Json.Formatting.None), timeoutMs, ct).ConfigureAwait(false);
+            var err = resp["error"];
+            if (err != null)
+            {
+                string em = null;
+                try { em = (string)err["message"]; } catch { }
+                if (string.IsNullOrEmpty(em)) { try { em = err.ToString(); } catch { em = "unknown error"; } }
+                throw new McpException("MCP server '" + name + "' rejected `" + method + "`: " + Trunc(em, 500) + " — check the tool name/arguments and the server logs, then retry.");
+            }
+            JToken rid = resp["id"];
+            if (rid != null && rid.Type != JTokenType.Null)
+            {
+                string got;
+                try { got = rid.Type == JTokenType.String ? (string)rid : rid.ToString(Newtonsoft.Json.Formatting.None); }
+                catch { got = ""; }
+                if (!string.Equals(got.Trim('"'), id.ToString(System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal))
+                {
+                    lock (Gate) { MarkHttpFailed(GetConnLocked(name)); }
+                    throw new McpException("MCP server '" + name + "' returned a reply for id " + Trunc(got, 40) + " while waiting on " + id + " (concurrent calls on one server) — the connection was reset; retry the call.");
+                }
+            }
+            return resp["result"] as JObject;
+        }
+
+        private static async Task HttpNotifyAsync(string name, string method, JObject p)
+        {
+            try
+            {
+                var msg = new JObject { ["jsonrpc"] = "2.0", ["method"] = method };
+                if (p != null) msg["params"] = p;
+                await HttpPostAsync(name, method, msg.ToString(Newtonsoft.Json.Formatting.None), 60000, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch { }
         }
 
         public static Task<JArray> ListToolsAsync(CancellationToken ct = default(CancellationToken), string serverName = null)
@@ -857,7 +1801,7 @@ namespace Forge.SolidWorks
             try
             {
                 List<McpServerConfig> servers = null;
-                try { servers = LoadServers(); } catch { servers = null; }
+                try { servers = LoadEffectiveServers(); } catch { servers = null; }
                 if (servers == null || servers.Count == 0) return out_;
                 var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 foreach (var s in servers)
@@ -866,10 +1810,26 @@ namespace Forge.SolidWorks
                     {
                         if (s == null || !s.Enabled) continue;
                         if (ct.IsCancellationRequested) break;
+                        int budget = CatalogPerServerTimeoutMs;
+                        try
+                        {
+                            int configured = s.TimeoutMs >= MinConfiguredTimeoutMs ? s.TimeoutMs : int.MaxValue;
+                            budget = Math.Min(budget, Math.Min(configured, s.EffectiveStartTimeoutMs));
+                            if (budget < 5000) budget = 5000;
+                        }
+                        catch { budget = CatalogPerServerTimeoutMs; }
                         JArray tools = null;
-                        try { tools = await ListToolsAsync(s.Name, ct).ConfigureAwait(false); }
-                        catch (OperationCanceledException) { break; }
-                        catch { continue; }
+                        using (var perServer = CancellationTokenSource.CreateLinkedTokenSource(ct))
+                        {
+                            try { perServer.CancelAfter(budget); } catch { }
+                            try { tools = await ListToolsAsync(s.Name, perServer.Token).ConfigureAwait(false); }
+                            catch (OperationCanceledException)
+                            {
+                                if (ct.IsCancellationRequested) break;
+                                continue;
+                            }
+                            catch { continue; }
+                        }
                         if (tools == null) continue;
                         foreach (var t in tools)
                         {
@@ -879,8 +1839,15 @@ namespace Forge.SolidWorks
                                 string n = o != null ? (string)o["name"] : (string)t;
                                 if (string.IsNullOrWhiteSpace(n)) continue;
                                 n = n.Trim();
-                                if (!seen.Add(n)) continue;
-                                out_.Add(o != null ? (JToken)o.DeepClone() : new JValue(n));
+                                string qualified = (s.Name ?? "default").Trim() + "_" + n;
+                                if (!seen.Add(qualified)) continue;
+                                if (o != null)
+                                {
+                                    var clone = (JObject)o.DeepClone();
+                                    clone["name"] = qualified;
+                                    out_.Add(clone);
+                                }
+                                else out_.Add(new JValue(qualified));
                             }
                             catch { }
                         }
@@ -890,6 +1857,108 @@ namespace Forge.SolidWorks
             }
             catch { }
             return out_;
+        }
+
+        public static void RefreshResourceCache(string serverName = null)
+        {
+            try
+            {
+                string target = ResolveName(serverName);
+                lock (Gate)
+                {
+                    McpConn c;
+                    if (Conns.TryGetValue(target, out c) && c != null)
+                    {
+                        c.CachedResources = null;
+                        c.CachedResourceTemplates = null;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public static Task<JArray> ListResourcesAsync(CancellationToken ct = default(CancellationToken), string serverName = null)
+        {
+            return ListResourcesOnAsync(ResolveName(serverName), ct);
+        }
+
+        public static Task<JArray> ListResourcesAsync(string serverName, CancellationToken ct)
+        {
+            return ListResourcesOnAsync(ResolveName(serverName), ct);
+        }
+
+        private static async Task<JArray> ListResourcesOnAsync(string name, CancellationToken ct)
+        {
+            await EnsureStartedOnAsync(name, 0, ct).ConfigureAwait(false);
+            McpConn conn;
+            lock (Gate) { conn = GetConnLocked(name); if (conn.CachedResources != null) return conn.CachedResources; }
+            JObject res = await RpcOnServerAsync(name, "resources/list", new JObject(), 60000, ct).ConfigureAwait(false);
+            var resources = res != null ? (res["resources"] as JArray ?? res["items"] as JArray) : null;
+            if (resources == null || resources.Count == 0) return new JArray();
+            lock (Gate) { conn.CachedResources = resources; }
+            return resources;
+        }
+
+        public static Task<JArray> ListResourceTemplatesAsync(CancellationToken ct = default(CancellationToken), string serverName = null)
+        {
+            return ListResourceTemplatesOnAsync(ResolveName(serverName), ct);
+        }
+
+        public static Task<JArray> ListResourceTemplatesAsync(string serverName, CancellationToken ct)
+        {
+            return ListResourceTemplatesOnAsync(ResolveName(serverName), ct);
+        }
+
+        private static async Task<JArray> ListResourceTemplatesOnAsync(string name, CancellationToken ct)
+        {
+            await EnsureStartedOnAsync(name, 0, ct).ConfigureAwait(false);
+            McpConn conn;
+            lock (Gate) { conn = GetConnLocked(name); if (conn.CachedResourceTemplates != null) return conn.CachedResourceTemplates; }
+            JObject res = await RpcOnServerAsync(name, "resources/templates/list", new JObject(), 60000, ct).ConfigureAwait(false);
+            var templates = res != null ? (res["resourceTemplates"] as JArray ?? res["templates"] as JArray) : null;
+            if (templates == null || templates.Count == 0) return new JArray();
+            lock (Gate) { conn.CachedResourceTemplates = templates; }
+            return templates;
+        }
+
+        public static Task<string> ReadResourceAsync(string uri, CancellationToken ct = default(CancellationToken), string serverName = null)
+        {
+            return ReadResourceOnAsync(ResolveName(serverName), uri, ct);
+        }
+
+        public static Task<string> ReadResourceAsync(string serverName, string uri, CancellationToken ct)
+        {
+            return ReadResourceOnAsync(ResolveName(serverName), uri, ct);
+        }
+
+        private static async Task<string> ReadResourceOnAsync(string name, string uri, CancellationToken ct)
+        {
+            if (string.IsNullOrWhiteSpace(uri)) throw new McpException("A resource uri is required — pass the uri returned by list_mcp_resources.");
+            await EnsureStartedOnAsync(name, 0, ct).ConfigureAwait(false);
+            int tmo;
+            try { var cfg = FindServer(name); tmo = cfg != null && cfg.TimeoutMs >= MinConfiguredTimeoutMs ? cfg.TimeoutMs : DefaultStdioTimeoutMs; }
+            catch { tmo = DefaultStdioTimeoutMs; }
+            var p = new JObject { ["uri"] = uri };
+            JObject res = await RpcOnServerAsync(name, "resources/read", p, tmo, ct).ConfigureAwait(false);
+            var contents = res != null ? res["contents"] as JArray : null;
+            var sb = new StringBuilder();
+            if (contents != null)
+                foreach (var c in contents)
+                {
+                    try
+                    {
+                        var o = c as JObject;
+                        if (o == null) continue;
+                        string text = (string)o["text"];
+                        if (string.IsNullOrEmpty(text)) text = (string)o["blob"];
+                        if (string.IsNullOrEmpty(text)) text = (string)o["uri"] ?? o.ToString(Newtonsoft.Json.Formatting.None);
+                        if (sb.Length > 0) sb.Append('\n');
+                        sb.Append(text);
+                    }
+                    catch { }
+                }
+            string s = sb.ToString();
+            return s.Length > 8000 ? s.Substring(0, 8000) + "…(truncated)" : s;
         }
 
         public class ToolResult
@@ -912,21 +1981,43 @@ namespace Forge.SolidWorks
 
         private static async Task<ToolResult> CallToolOnServerAsync(string name, string tool, JObject args, int timeoutMs, CancellationToken ct)
         {
+            bool qualified = false;
+            string rawTool = tool;
+            try
+            {
+                string srv, tl;
+                if (TrySplitQualified(tool, ConfiguredServerNames(), out srv, out tl))
+                {
+                    qualified = true;
+                    name = srv;
+                    rawTool = tl;
+                }
+            }
+            catch { }
+            if (qualified)
+            {
+                var target = FindServer(name);
+                if (target == null || !target.Enabled)
+                    throw new McpException("MCP server " + name + " is disabled/unavailable for tool " + rawTool + " (disabled).");
+                try { await EnsureStartedOnAsync(name, 0, ct).ConfigureAwait(false); }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception) { throw new McpException("MCP server " + name + " is disabled/unavailable for tool " + rawTool + " (unavailable)."); }
+            }
             if (timeoutMs <= 0)
             {
                 try
                 {
                     var scfg = FindServer(name);
-                    timeoutMs = scfg != null ? scfg.TimeoutMs : 300000;
+                    timeoutMs = scfg != null ? scfg.TimeoutMs : DefaultStdioTimeoutMs;
                 }
-                catch { timeoutMs = 300000; }
-                if (timeoutMs < 30000) timeoutMs = 30000;
+                catch { timeoutMs = DefaultStdioTimeoutMs; }
+                if (timeoutMs < MinConfiguredTimeoutMs) timeoutMs = MinConfiguredTimeoutMs;
             }
-            var p = new JObject { ["name"] = tool };
+            var p = new JObject { ["name"] = rawTool };
             p["arguments"] = args ?? new JObject();
             JObject res;
             try { res = await RpcOnServerAsync(name, "tools/call", p, timeoutMs, ct).ConfigureAwait(false); }
-            catch (McpException mex) when (IsDeadServer(mex) && !ct.IsCancellationRequested)
+            catch (McpException mex) when (IsDeadServer(mex) && !qualified && !ct.IsCancellationRequested)
             {
                 // Server died mid-run (process killed / SW closed took it down): restart once and
                 // retry so the next tool call heals instead of failing every later step until the cap.
@@ -934,7 +2025,7 @@ namespace Forge.SolidWorks
                 res = await RpcOnServerAsync(name, "tools/call", p, timeoutMs, ct).ConfigureAwait(false);
             }
             // A null result is a broken server reply: fail loudly, not Ok=true with empty text.
-            if (res == null) throw new McpException("MCP `tools/call` returned an empty result.");
+            if (res == null) throw new McpException("MCP server '" + name + "' returned an empty result for tool '" + rawTool + "' — check the server logs and retry the step.");
             var out_ = new ToolResult();
             try
             {

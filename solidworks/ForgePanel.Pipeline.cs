@@ -5756,23 +5756,32 @@ namespace Forge.SolidWorks
             // a superseded run's late card can't hijack the new run's approval flow.
             var mySender = new Action<JObject>(card => { if (myId == _currentRunId) Send(card); });
             McpBuild.CardSender = mySender;
-            try { mc = await McpBuild.RunAgent(intent, emitM, ct, relay.OnDelta, sid, mySender, () => myId == _currentRunId); relay.End(false); }
+            try { mc = await McpBuild.RunAgent(intent, emitM, ct, relay.OnDelta, sid, mySender, () => myId == _currentRunId); relay.End(mc == null || mc.Error == "INTERRUPTED"); }
             catch (OperationCanceledException)
             {
                 relay.End(true);
                 if (myId == _currentRunId)
                 {
-                    Send(new { type = "answer", answer = "Interrupted — partial thinking is kept above. ↩ revert a turn, or edit and resend.", runId = _currentRunId, handler = "mcp_build" });
-                    try { NotifyToast("Forge done", "Run interrupted — partial thinking is kept above."); } catch { }
+                    if (!ct.IsCancellationRequested)
+                    {
+                        Send(new { type = "answer", answer = "Timed out after 10 minutes of thinking", runId = _currentRunId, handler = "mcp_build" });
+                        try { NotifyToast("Forge timed out", "Timed out after 10 minutes of thinking"); } catch { }
+                    }
+                    else
+                    {
+                        Send(new { type = "answer", answer = "Interrupted — partial thinking is kept above. ↩ revert a turn, or edit and resend.", runId = _currentRunId, handler = "mcp_build" });
+                        try { NotifyToast("Forge done", "Run interrupted — partial thinking is kept above."); } catch { }
+                    }
                 }
                 return true;
             }
                 catch (Exception ex)
                 {
-                    try { relay.End(true); } catch { }
+                    try { relay.End(false); } catch { }
+                    string answer = "Build failed (" + BoundDetail(ex.Message, 300) + ") — what built so far stays open; edit and resend.";
                     if (myId == _currentRunId)
                     {
-                        Send(new { type = "answer", answer = "Build failed (" + BoundDetail(ex.Message, 300) + ") — what built so far stays open; edit and resend.", runId = _currentRunId, handler = "mcp_build" });
+                        Send(new { type = "answer", answer = answer, runId = _currentRunId, handler = "mcp_build" });
                         try { NotifyToast("Forge failed", "Build failed (" + BoundDetail(ex.Message, 300) + ")"); } catch { }
                     }
                     return true;

@@ -50,7 +50,27 @@ namespace Forge.SolidWorks
         {
             _web = new WebView2 { Dock = DockStyle.Fill };
             Controls.Add(_web);
+            OpenAiCompatibleClient.SessionIdProvider = CurrentChatSid;
             _ = InitAsync();
+        }
+
+        // OpenCode Go (zen/go) requires a stable x-opencode-session per conversation. Read
+        // McpBuild's current chat sid under its own Sessions lock; any reflection-shape change
+        // or failure degrades to null (the client then falls back to its per-process GUID).
+        private static string CurrentChatSid()
+        {
+            try
+            {
+                var t = typeof(McpBuild);
+                const BindingFlags bf = BindingFlags.NonPublic | BindingFlags.Static;
+                var fSessions = t.GetField("Sessions", bf);
+                var fCurSid = t.GetField("CurrentSid", bf);
+                if (fSessions == null || fCurSid == null) return null;
+                object sessions = fSessions.GetValue(null);
+                if (sessions == null) return null;
+                lock (sessions) { return fCurSid.GetValue(null) as string; }
+            }
+            catch { return null; }
         }
 
         private async Task InitAsync()
@@ -86,6 +106,8 @@ namespace Forge.SolidWorks
             // OS desktop toasts (approval arrival, run completion, teammate updates). Best-effort:
             // a missing icon or torn-down handle must never break the panel.
             InitNotify();
+            LoadAutoApprove();
+            LoadHostPreferences();
             try { McpBuild.NotifyHook = (tool, args) => { try { NotifyToast("Forge approval needed", tool); } catch { } }; } catch { }
         }
 
@@ -99,6 +121,28 @@ namespace Forge.SolidWorks
         private static System.Threading.CancellationTokenSource _enhanceCts; // current Enhance call (Esc/stop cancels it)
         private static System.Threading.CancellationTokenSource _compactCts; // current Compact call: own token, linked to the run's cancel, never cancels the run
         private static int _activeRuns;                                    // >0 while a Generate await chain is in flight (loadHistory guard)
+
+        private class QueuedFollowUp
+        {
+            public string id;
+            public string intent;
+            public string paths;
+            public long createdAt;
+        }
+        private class SidQueue
+        {
+            public bool paused;
+            public readonly List<QueuedFollowUp> items = new List<QueuedFollowUp>();
+        }
+        private static readonly object QueueLock = new object();
+        private static readonly Dictionary<string, SidQueue> Queues = new Dictionary<string, SidQueue>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, bool> Dispatching = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, string> LastIntentBySid = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, bool> InterruptedBySid = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        private static string _lastRunSid;
+        private static int CompactReservedTokens = 16000;
+        private static int CompactTailTurns = 2;
+        private const int McpMinTimeoutMs = 1000;
 
         // Central post-run logging for EVERY live handler: masked event -> the data spine (fills the telemetry store +
         // Layer-3 replay + crash-recovery close), plus correction capture (rephrase pairing + arms undo).
@@ -145,6 +189,7 @@ namespace Forge.SolidWorks
                 // claim the request so we run it exactly once
                 string claimed = Path.Combine(dir, "request.running.json");
                 try { if (File.Exists(claimed)) File.Delete(claimed); File.Move(req, claimed); } catch { _harnessBusy = false; return; }
+                SyncMcpProjectScope();
                 if (SwAddin.SwApp != null) await Harness.RunFromRequest(SwAddin.SwApp, claimed);
                 try { File.Delete(claimed); } catch { }
             }
@@ -157,6 +202,45 @@ namespace Forge.SolidWorks
         {
             string p = model?.GetPathName();
             return string.IsNullOrEmpty(p) ? null : Path.GetFileNameWithoutExtension(p);
+        }
+
+        private static string ActiveAssemblyPath()
+        {
+            try
+            {
+                var app = SwAddin.SwApp;
+                var doc = app != null ? app.ActiveDoc as IModelDoc2 : null;
+                return doc == null ? null : doc.GetPathName();
+            }
+            catch { return null; }
+        }
+
+        private static void SyncMcpProjectScope()
+        {
+            try { McpBridge.ProjectKey = McpBridge.ProjectKeyForAssembly(ActiveAssemblyPath()); }
+            catch { McpBridge.ProjectKey = ""; }
+        }
+
+        private static string ConfiguredReasoningEffort(string model = null)
+        {
+            try
+            {
+                var cfg = ReadForgeConfig();
+                if (!string.IsNullOrWhiteSpace(model))
+                {
+                    string per = (string)cfg["reasoningEffort_" + ModelKey(model)];
+                    if (!string.IsNullOrWhiteSpace(per)) return per.Trim().ToLowerInvariant();
+                }
+                string global = (string)cfg["reasoningEffort"];
+                if (!string.IsNullOrWhiteSpace(global)) return global.Trim().ToLowerInvariant();
+            }
+            catch { }
+            return null;
+        }
+
+        public static string ConfiguredReasoningEffortFor(string model)
+        {
+            return ConfiguredReasoningEffort(model);
         }
 
         private async void BifrostTick(object sender, EventArgs e)
@@ -225,6 +309,7 @@ namespace Forge.SolidWorks
             try { action = (string)msg.action; }
             catch { return; }
             if (string.IsNullOrEmpty(action)) return;
+            SyncMcpProjectScope();
             try { PanelCapture.Log("in", new { action, raw }); } catch { }
             try
             {
@@ -239,11 +324,136 @@ namespace Forge.SolidWorks
                     try { gIntent = (string)msg.intent; } catch { }
                     try { gSid = (string)msg.sid; } catch { }
                     try { gPaths = msg.paths as Newtonsoft.Json.Linq.JArray; } catch { }
-                    // Track the in-flight await chain so loadHistory can't retarget CurrentSid mid-run
-                    // (the panel's stop is cooperative: messages can be processed while Generate is suspended).
-                    System.Threading.Interlocked.Increment(ref _activeRuns);
-                    try { await Generate(gIntent, gSid, gPaths); }
-                    finally { System.Threading.Interlocked.Decrement(ref _activeRuns); }
+                    await RunGenerateTracked(gIntent, gSid, gPaths, null, false, false, true);
+                }
+                else if (action == "queue")
+                {
+                    string qIntent = null, qSid = null;
+                    Newtonsoft.Json.Linq.JArray qPaths = null;
+                    try { qIntent = (string)msg.intent; } catch { }
+                    try { qSid = (string)msg.sid; } catch { }
+                    try { qPaths = msg.paths as Newtonsoft.Json.Linq.JArray; } catch { }
+                    if (string.IsNullOrWhiteSpace(qIntent))
+                    { Send(new { type = "error", message = "Nothing to queue — type the follow-up you want to send after this run." }); return; }
+                    if (string.IsNullOrWhiteSpace(qSid)) qSid = QueueActiveSid();
+                    QueueAdd(qSid, qIntent.Trim(), qPaths);
+                }
+                else if (action == "queueEdit")
+                {
+                    string eid = null, eIntent = null;
+                    try { eid = (string)msg.id; } catch { }
+                    try { eIntent = (string)msg.intent; } catch { }
+                    if (string.IsNullOrWhiteSpace(eid) || string.IsNullOrWhiteSpace(eIntent))
+                    { Send(new { type = "error", message = "A queued item needs its id and a replacement intent." }); return; }
+                    string esid = QueueSidForItem(eid);
+                    if (esid == null) { Send(new { type = "error", message = "Queued item not found — it may already have been sent." }); return; }
+                    QueueEdit(esid, eid.Trim(), eIntent.Trim());
+                }
+                else if (action == "queueDelete")
+                {
+                    string did = null;
+                    try { did = (string)msg.id; } catch { }
+                    string dsid = QueueSidForItem(did);
+                    if (dsid == null) { Send(new { type = "error", message = "Queued item not found — nothing to remove." }); return; }
+                    QueueRemove(dsid, did.Trim());
+                }
+                else if (action == "queueMove")
+                {
+                    string mid = null; int index = -1;
+                    try { mid = (string)msg.id; } catch { }
+                    try { var iv = msg.index; if (iv != null) index = Convert.ToInt32((object)iv); } catch { }
+                    string msid = QueueSidForItem(mid);
+                    if (msid == null || index < 0) { Send(new { type = "error", message = "Couldn't reorder — give a queued item id and a target index." }); return; }
+                    QueueMove(msid, mid.Trim(), index);
+                }
+                else if (action == "queueSendNow")
+                {
+                    string nid = null;
+                    try { nid = (string)msg.id; } catch { }
+                    string nsid = QueueSidForItem(nid);
+                    if (nsid == null) { Send(new { type = "error", message = "Queued item not found — nothing to send." }); return; }
+                    QueuedFollowUp item = null;
+                    lock (QueueLock)
+                    {
+                        SidQueue q;
+                        if (Queues.TryGetValue(nsid, out q))
+                        {
+                            for (int i = 0; i < q.items.Count; i++)
+                                if (string.Equals(q.items[i].id, nid, StringComparison.OrdinalIgnoreCase)) { item = q.items[i]; q.items.RemoveAt(i); break; }
+                        }
+                    }
+                    if (item == null) { Send(new { type = "error", message = "Queued item not found — nothing to send." }); return; }
+                    SendQueued(nsid);
+                    Newtonsoft.Json.Linq.JArray npaths = null;
+                    try { if (!string.IsNullOrWhiteSpace(item.paths)) npaths = Newtonsoft.Json.Linq.JArray.Parse(item.paths); } catch { }
+                    await RunGenerateTracked(item.intent, nsid, npaths, item.id, false, false, true, true);
+                }
+                else if (action == "queuePause")
+                {
+                    bool paused = false;
+                    try { paused = (bool)msg.paused; } catch { }
+                    string psid = null;
+                    try { psid = (string)msg.sid; } catch { }
+                    if (string.IsNullOrWhiteSpace(psid)) psid = QueueActiveSid();
+                    lock (QueueLock) { QueueFor(psid).paused = paused; }
+                    PersistQueue(psid);
+                    SendQueueState(psid);
+                    SendQueued(psid);
+                }
+                else if (action == "continue")
+                {
+                    if (System.Threading.Volatile.Read(ref _activeRuns) > 0)
+                    { Send(new { type = "error", code = "busy", message = "Finish or stop the current run first, then continue — history is untouched." }); return; }
+                    string csid = null;
+                    try { csid = (string)msg.sid; } catch { }
+                    if (string.IsNullOrWhiteSpace(csid)) csid = QueueActiveSid();
+                    string last = LastIntent(csid);
+                    if (string.IsNullOrWhiteSpace(last))
+                    { Send(new { type = "error", message = "Nothing to continue in this chat — send a prompt first." }); return; }
+                    bool interrupted;
+                    lock (InterruptedBySid) { interrupted = InterruptedBySid.ContainsKey(csid) && InterruptedBySid[csid]; }
+                    bool agentTurn = false;
+                    try { agentTurn = McpBuild.IsMcpCreate(last); } catch { }
+                    if (interrupted && agentTurn)
+                    {
+                        try { McpBuild.StripLastUserTurn(csid); }
+                        catch { try { McpBuildRemoveLastUserTurnByReflection(csid); } catch { } }
+                    }
+                    lock (InterruptedBySid) { InterruptedBySid[csid] = false; }
+                    Send(new { type = "continued", sid = csid, interrupted });
+                    await RunGenerateTracked(last, csid, null, null, false, true, true);
+                }
+                else if (action == "fork")
+                {
+                    string fsid = null; int fTurn = -1;
+                    try { fsid = (string)msg.sid; } catch { }
+                    try { var tv = msg.turnIndex; if (tv != null) fTurn = Convert.ToInt32((object)tv); } catch { }
+                    if (string.IsNullOrWhiteSpace(fsid)) fsid = QueueActiveSid();
+                    string newSid;
+                    try { newSid = ForkSession(fsid, fTurn >= 0 ? (int?)fTurn : null); }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't fork that chat (" + BoundDetail(ex.Message, 200) + ") — try again." }); return; }
+                    Send(new { type = "forked", sid = newSid, sourceSid = fsid });
+                }
+                else if (action == "share")
+                {
+                    string ssid = null;
+                    try { ssid = (string)msg.sid; } catch { }
+                    if (string.IsNullOrWhiteSpace(ssid)) ssid = QueueActiveSid();
+                    DoShareTranscript(ssid);
+                }
+                else if (action == "diff")
+                {
+                    string dsid = null;
+                    try { dsid = (string)msg.sid; } catch { }
+                    if (string.IsNullOrWhiteSpace(dsid)) dsid = QueueActiveSid();
+                    Send(new { type = "diff", sid = dsid, lines = DiffLastAnswers(dsid) });
+                }
+                else if (action == "timeline")
+                {
+                    string tsid = null;
+                    try { tsid = (string)msg.sid; } catch { }
+                    if (string.IsNullOrWhiteSpace(tsid)) tsid = QueueActiveSid();
+                    Send(new { type = "timeline", sid = tsid, events = BuildTimeline(tsid) });
                 }
                 else if (action == "enhance") await EnhancePrompt((string)msg.text);
                 // Transcript compaction (Kilo parity): summarize older turns so long sessions stay readable.
@@ -289,8 +499,10 @@ namespace Forge.SolidWorks
                             new ChatMessage { Role = "system", Content = "Summarize this CAD assistant chat into 5-10 short bullets: what was built or changed, key dims and models, open issues. Plain text, no fences, no commentary." },
                             new ChatMessage { Role = "user", Content = compactText }
                         };
+                        string compactUseModel = ProviderFactory.SmallModelForCurrentConfig() ?? compactModel;
+                        try { McpBuild.ReasoningEffort = ConfiguredReasoningEffortFor(compactUseModel); } catch { }
                         var res = await c2.CompleteAsync(msgs,
-                            new ProviderOptions { MaxTokens = 1000, Model = ProviderFactory.SmallModelForCurrentConfig() ?? compactModel },
+                            new ProviderOptions { MaxTokens = 1000, Model = compactUseModel, ReasoningEffort = ConfiguredReasoningEffort(compactUseModel) },
                             compactCt);
                         if (myRun != _currentRunId) return; // superseded while awaiting: the new run owns the panel
                         string s = res != null ? res.Text : null;
@@ -318,19 +530,29 @@ namespace Forge.SolidWorks
                 {
                     SendUsage();
                 }
-                else if (action == "setCompact")   // Kilo-style auto-compaction controls from the settings cog
+                else if (action == "setCompact")
                 {
-                    // CompactAt is a PERCENT of the model's context window (10-95, default 60),
-                    // not a message count. The forge_compact_at storage key is unchanged, so an
-                    // existing value of 60 (old message-count semantics) carries over as 60%.
                     try
                     {
                         bool on = true; int at = 60;
                         try { on = (bool)msg.on; } catch { }
-                        try { at = (int)msg.at; } catch { }
-                        if (at < 10) at = 10; if (at > 95) at = 95;
-                        McpBuild.CompactOn = on;
-                        McpBuild.CompactAt = at;
+                        try { at = Convert.ToInt32((object)msg.at); } catch { }
+                        if (at < 1) at = 1; if (at > 100) at = 100;
+                        int reserve = CompactReservedTokens, tail = CompactTailTurns;
+                        try { var rv = msg.reservedTokens; if (rv != null) reserve = Convert.ToInt32((object)rv); } catch { }
+                        try { var tv = msg.tailTurns; if (tv != null) tail = Convert.ToInt32((object)tv); } catch { }
+                        if (reserve < 0) reserve = 0;
+                        if (tail < 0) tail = 0; if (tail > 10) tail = 10;
+                        McpBuild.ConfigureCompaction(on, at, reserve, tail);
+                        CompactReservedTokens = reserve;
+                        CompactTailTurns = tail;
+                        var cfg = ReadForgeConfig();
+                        cfg["compactOn"] = on;
+                        cfg["compactThresholdPct"] = at;
+                        cfg["compactReservedTokens"] = reserve;
+                        cfg["compactTailTurns"] = tail;
+                        WriteForgeConfigAtomic(cfg);
+                        Send(new { type = "compactConfig", on, thresholdPct = at, reservedTokens = reserve, tailTurns = tail });
                     }
                     catch { }
                 }
@@ -344,6 +566,76 @@ namespace Forge.SolidWorks
                         try { McpBuild.ApproveDestructive = (bool)msg.destructive; } catch { }
                     }
                     catch { }
+                    try
+                    {
+                        string dir = Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData), "Forge");
+                        Directory.CreateDirectory(dir);
+                        string cfgPath = Path.Combine(dir, "config.json");
+                        JObject cfg;
+                        try { cfg = JObject.Parse(File.ReadAllText(cfgPath)); } catch { cfg = new JObject(); }
+                        cfg["autoApprove"] = new JObject
+                        {
+                            { "master", McpBuild.ApproveMaster },
+                            { "read", McpBuild.ApproveRead },
+                            { "build", McpBuild.ApproveBuild },
+                            { "destructive", McpBuild.ApproveDestructive }
+                        };
+                        string cfgTmp = cfgPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                        try
+                        {
+                            File.WriteAllText(cfgTmp, cfg.ToString());
+                            if (File.Exists(cfgPath)) File.Replace(cfgTmp, cfgPath, null);
+                            else File.Move(cfgTmp, cfgPath);
+                        }
+                        catch
+                        {
+                            try { File.Delete(cfgTmp); } catch { }
+                            throw;
+                        }
+                    }
+                    catch { }
+                }
+                else if (action == "setWorkStyle")
+                {
+                    string style = null;
+                    try { style = (string)msg.style; } catch { }
+                    style = (style ?? "").Trim().ToLowerInvariant();
+                    string styleNorm = style.Replace("-", "").Replace("_", "").Replace(" ", "");
+                    if (styleNorm == "review" || styleNorm == "reviewfirst") style = "review-first";
+                    else if (styleNorm == "autonomy" || styleNorm == "autonomous" || styleNorm == "highautonomy" || styleNorm == "auto") style = "high-autonomy";
+                    if (style != "review-first" && style != "high-autonomy")
+                    { Send(new { type = "error", message = "Unknown work style — use review-first or high-autonomy." }); return; }
+                    try
+                    {
+                        var cfg = ReadForgeConfig();
+                        cfg["workStyle"] = style;
+                        WriteForgeConfigAtomic(cfg);
+                        ApplyWorkStyle(style);
+                        Send(new { type = "workStyle", style });
+                        SendProviderSnapshot();
+                    }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't save work style (" + BoundDetail(ex.Message, 200) + ") — try again." }); }
+                }
+                else if (action == "setReasoningEffort")
+                {
+                    string effort = null, model = null;
+                    try { effort = (string)msg.effort; } catch { }
+                    try { model = (string)msg.model; } catch { }
+                    effort = (effort ?? "").Trim().ToLowerInvariant();
+                    string[] efforts = { "none", "low", "medium", "high", "xhigh", "max" };
+                    if (Array.IndexOf(efforts, effort) < 0)
+                    { Send(new { type = "error", message = "Unknown reasoning effort — use none, low, medium, high, xhigh, or max." }); return; }
+                    try
+                    {
+                        var cfg = ReadForgeConfig();
+                        cfg["reasoningEffort"] = effort;
+                        string em = (model ?? "").Trim();
+                        if (em.Length > 0) cfg["reasoningEffort_" + ModelKey(em)] = effort;
+                        WriteForgeConfigAtomic(cfg);
+                        Send(new { type = "reasoningEffort", effort, model = em.Length > 0 ? em : null });
+                        SendProviderSnapshot();
+                    }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't save reasoning effort (" + BoundDetail(ex.Message, 200) + ") — try again." }); }
                 }
                 else if (action == "approveReply")   // verdict on a paused approval card: approve / always / reject
                 {
@@ -406,6 +698,12 @@ namespace Forge.SolidWorks
                     catch { }
                 }
                 else if (action == "attach") DoAttach();
+                else if (action == "pasteAttach")
+                {
+                    try { ApplyPasteAttach(msg.files as JArray); }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't attach pasted files (" + BoundDetail(ex.Message, 200) + ") — try again." }); }
+                }
+                else if (action == "initContext") { DoInitContext(msg); }
                 else if (action == "clearAttach") { _attachedFile = null; lock (_mentionedFiles) { _mentionedFiles.Clear(); } Send(new { type = "attachCleared" }); }
                 else if (action == "revokeShare")   // no server revoke route exists in this client: be honest, links auto-expire
                 {
@@ -487,6 +785,8 @@ namespace Forge.SolidWorks
                     try { if (_runCts != null) _runCts.Cancel(); } catch { }
                     try { if (_enhanceCts != null) _enhanceCts.Cancel(); } catch { }
                     try { if (_compactCts != null) _compactCts.Cancel(); } catch { }
+                    try { if (!string.IsNullOrWhiteSpace(_lastRunSid)) lock (InterruptedBySid) { InterruptedBySid[_lastRunSid] = true; } } catch { }
+                    _pendingIntent = null; _pendingConfirm = null; _attachedFile = null;
                 }
                 else if (action == "revert")   // Kilo-style revert: drop the pending thread + truncate the agent chat so the resent prompt starts clean
                 {
@@ -529,7 +829,7 @@ namespace Forge.SolidWorks
                     // pill) credit the loaded chat instead of the one still executing. Refuse until it ends.
                     if (System.Threading.Volatile.Read(ref _activeRuns) > 0)
                     {
-                        Send(new { type = "error", message = "Finish or stop the current run first, then load a chat — history is untouched." });
+                        Send(new { type = "error", code = "busy", message = "Finish or stop the current run first, then load a chat — history is untouched." });
                         return;
                     }
                     try
@@ -539,7 +839,8 @@ namespace Forge.SolidWorks
                         if (!string.IsNullOrWhiteSpace(lsid))
                         {
                             McpBuild.EnsureSessionPublic(lsid);
-                            Send(new { type = "historyLoaded", turns = McpBuild.HistoryCount() });
+                            var turnsData = BuildHostTurns(lsid);
+                            Send(new { type = "historyLoaded", turns = McpBuild.HistoryCount(), sid = lsid, turns_data = turnsData });
                         }
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't load chat history (" + BoundDetail(ex.Message, 200) + ") — try again." }); }
@@ -562,12 +863,17 @@ namespace Forge.SolidWorks
                                     string nm = (string)o["name"] ?? "default";
                                     bool en = false; try { en = (bool)o["enabled"]; } catch { en = true; }
                                     bool rn = false; try { rn = (bool)o["running"]; } catch { }
+                                    string ty = (string)o["type"]; if (string.IsNullOrWhiteSpace(ty)) ty = "stdio";
+                                    string url = (string)o["url"] ?? "";
                                     string cc = (string)o["command"] ?? "uvx";
                                     string aa = (string)o["args"] ?? "";
                                     int tm = 300000; try { tm = (int)o["timeoutMs"]; } catch { }
-                                    if (tm < 30000) tm = 300000;
+                                    if (tm < McpMinTimeoutMs) tm = 300000;
+                                    string target = ty == "http" ? url : (cc + " " + aa).Trim();
+                                    if (string.IsNullOrWhiteSpace(target)) target = "(no command/url)";
+                                    string extra = !string.IsNullOrWhiteSpace(url) && ty != "http" ? " url=" + url : "";
                                     string state = rn ? "running" : (en ? "not running (starts on next build)" : "disabled in Settings");
-                                    lines.Add(nm + ": " + state + " — `" + (cc + " " + aa).Trim() + "` (" + (tm / 1000) + "s timeout)");
+                                    lines.Add(nm + " [" + ty + "]: " + state + " — `" + target + "`" + extra + " (" + (tm / 1000) + "s timeout)");
                                 }
                                 catch { }
                             }
@@ -596,12 +902,12 @@ namespace Forge.SolidWorks
                 {
                     try
                     {
-                        bool enabled = true; bool hasEnabled = false;
-                        try { object eo = msg.enabled; if (eo != null) { enabled = Convert.ToBoolean(eo); hasEnabled = true; } } catch { }
+                        bool hasEnabled = false;
+                        try { hasEnabled = msg.enabled != null; } catch { }
                         int tmo = 0; bool hasTmo = false;
                         try { object to = msg.timeoutMs; if (to != null) { tmo = Convert.ToInt32(to); hasTmo = true; } } catch { }
-                        if (hasTmo && tmo < 30000)
-                        { Send(new { type = "error", message = "Timeout must be \u226530 seconds — e.g. /mcps timeout <name> 300." }); }
+                        if (hasTmo && tmo < McpMinTimeoutMs)
+                        { Send(new { type = "error", message = "Timeout must be \u22651 second (1000 ms) — e.g. /mcps timeout <name> 10." }); }
                         else
                         {
                             string setName = null;
@@ -611,16 +917,22 @@ namespace Forge.SolidWorks
                             { Send(new { type = "error", message = rerr + " Change takes effect on the next build." }); }
                             else
                             {
-                                McpBridge.SaveServer(resolved, hasEnabled ? (bool?)enabled : (bool?)null, hasTmo && tmo >= 30000 ? (int?)tmo : (int?)null, null, null);
-                                SendMcpConfig();
-                                bool en2 = enabled; int t2 = tmo;
-                                try
+                                string canonical;
+                                string werr = McpWriteServer(msg, resolved, false, out canonical);
+                                if (werr != null) Send(new { type = "error", message = werr });
+                                else
                                 {
-                                    foreach (var s in McpBridge.LoadServers())
-                                        if (s != null && string.Equals(s.Name, resolved, System.StringComparison.OrdinalIgnoreCase)) { en2 = s.Enabled; t2 = s.TimeoutMs; break; }
+                                    SendMcpConfig();
+                                    bool en2 = true; int t2 = tmo;
+                                    try
+                                    {
+                                        foreach (var s in McpBridge.LoadEffectiveServers())
+                                            if (s != null && string.Equals(s.Name, resolved, System.StringComparison.OrdinalIgnoreCase)) { en2 = s.Enabled; t2 = s.TimeoutMs; break; }
+                                    }
+                                    catch { }
+                                    string word = hasEnabled ? (en2 ? "enabled" : "disabled") + " " : "updated ";
+                                    Send(new { type = "answer", answer = "MCP server '" + canonical + "' " + word + "(" + (t2 / 1000) + "s timeout). Change takes effect on the next build." });
                                 }
-                                catch { }
-                                Send(new { type = "answer", answer = "MCP server '" + resolved + "' " + (hasEnabled ? (en2 ? "enabled" : "disabled") + " " : "updated ") + "(" + (t2 / 1000) + "s timeout). Change takes effect on the next build." });
                             }
                         }
                     }
@@ -630,22 +942,15 @@ namespace Forge.SolidWorks
                 {
                     try
                     {
-                        string addName = null, addCmd = null;
+                        string addName = null;
                         try { addName = (string)msg.name; } catch { }
-                        try { addCmd = (string)msg.command; } catch { }
-                        string[] addArgs = ParseMcpArgs(msg);
-                        bool addEnabled = true;
-                        try { object eo = msg.enabled; if (eo != null) addEnabled = Convert.ToBoolean(eo); } catch { }
-                        int addTmo = 0;
-                        try { addTmo = Convert.ToInt32(msg.timeoutMs); } catch { }
-                        if (string.IsNullOrWhiteSpace(addName))
-                        { Send(new { type = "error", message = "Couldn't add the MCP server — give it a name first." }); }
+                        string canonical;
+                        string werr = McpWriteServer(msg, addName, true, out canonical);
+                        if (werr != null) Send(new { type = "error", message = werr });
                         else
                         {
-                            McpBridge.SaveServer(addName.Trim(), addEnabled, addTmo >= 30000 ? (int?)addTmo : (int?)null,
-                                string.IsNullOrWhiteSpace(addCmd) ? null : addCmd.Trim(), addArgs);
                             SendMcpConfig();
-                            Send(new { type = "answer", answer = "MCP server '" + addName.Trim() + "' added — it joins the failover order for the next build." });
+                            Send(new { type = "answer", answer = "MCP server '" + canonical + "' added — it joins the failover order for the next build." });
                         }
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't add the MCP server (" + BoundDetail(ex.Message, 200) + ") — check Settings → MCP server, then try again." }); }
@@ -654,26 +959,12 @@ namespace Forge.SolidWorks
                 {
                     try
                     {
-                        string updName = null, updCmd = null;
+                        string updName = null;
                         try { updName = (string)msg.name; } catch { }
-                        try { updCmd = (string)msg.command; } catch { }
-                        string[] updArgs = ParseMcpArgs(msg);
-                        bool updEnabled = true; bool updHasEnabled = false;
-                        try { object eo = msg.enabled; if (eo != null) { updEnabled = Convert.ToBoolean(eo); updHasEnabled = true; } } catch { }
-                        int updTmo = 0;
-                        try { updTmo = Convert.ToInt32(msg.timeoutMs); } catch { }
-                        int updStart = 0; bool updHasStart = false;
-                        try { object so = msg.startTimeoutMs; if (so != null) { updStart = Convert.ToInt32(so); updHasStart = true; } } catch { }
-                        if (string.IsNullOrWhiteSpace(updName))
-                        { Send(new { type = "error", message = "Couldn't update the MCP server — no name was sent." }); }
-                        else
-                        {
-                            McpBridge.SaveServer(updName.Trim(), updHasEnabled ? (bool?)updEnabled : (bool?)null,
-                                updTmo >= 30000 ? (int?)updTmo : (int?)null,
-                                string.IsNullOrWhiteSpace(updCmd) ? null : updCmd.Trim(), updArgs,
-                                updHasStart ? (int?)(updStart >= 30000 ? updStart : 0) : (int?)null);
-                            SendMcpConfig();
-                        }
+                        string canonical;
+                        string werr = McpWriteServer(msg, updName, false, out canonical);
+                        if (werr != null) Send(new { type = "error", message = werr });
+                        else SendMcpConfig();
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't update the MCP server (" + BoundDetail(ex.Message, 200) + ") — check Settings → MCP server, then try again." }); }
                 }
@@ -731,6 +1022,14 @@ namespace Forge.SolidWorks
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't stop the MCP server (" + BoundDetail(ex.Message, 200) + ") — it may already be stopped." }); }
                 }
+                else if (action == "mcpLog")
+                {
+                    string lname = null;
+                    try { lname = (string)msg.name; } catch { }
+                    string text = "";
+                    try { text = McpBridge.ServerLog(string.IsNullOrWhiteSpace(lname) ? null : lname.Trim()) ?? ""; } catch { }
+                    Send(new { type = "mcpLog", name = lname, text });
+                }
                 else if (action == "reset")   // rehearsal/recording: wipe the panel + every pending thread for a clean take
                 {
                     try { if (_runCts != null) _runCts.Cancel(); } catch { }
@@ -787,8 +1086,11 @@ namespace Forge.SolidWorks
                     { Send(new { type = "answer", answer = "No key entered — staying on the keyless local path." }); return; }
                     try
                     {
-                        SaveProviderKey(provider, key.Trim(), model);
+                        var keyMissing = new List<string>();
+                        string xkey = ExpandEnvTokens(key.Trim(), keyMissing);
+                        SaveProviderKey(provider, xkey, model);
                         Send(new { type = "answer", answer = "Provider key saved — encrypted with Windows secure storage on this machine; it never leaves the device." });
+                        if (keyMissing.Count > 0) Send(new { type = "answer", answer = "Warning: unresolved environment variable(s): " + string.Join(", ", keyMissing.ToArray()) + " — left as literal text in the saved key; set them and re-save to expand." });
                         // Confirm the new key state to the panel (pill/ctx/settings) directly:
                         // the panel's follow-up getProvider can race this handler on a busy UI thread.
                         try
@@ -796,11 +1098,44 @@ namespace Forge.SolidWorks
                             var scfg = ReadForgeConfig();
                             string sp2 = (string)scfg["provider"], sbu2 = (string)scfg["baseUrl"];
                             string sslug2 = PresetSlugFor(sp2, sbu2);
-                            Send(new { type = "provider", slug = sslug2, provider = sp2, baseUrl = sbu2, model = (string)scfg["model"], dynamic = IsDynamicProvider(sp2), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(sslug2, sp2)), customModels = GetCustomModels(sslug2), customProviders = GetCustomProviders() });
+                            Send(new { type = "provider", slug = sslug2, provider = sp2, baseUrl = sbu2, displayName = ProviderFactory.DisplayNameFor(sp2, sbu2), model = (string)scfg["model"], dynamic = IsDynamicProvider(sp2), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(sslug2, sp2)), customModels = GetCustomModels(sslug2), customProviders = GetCustomProviders() });
                         }
                         catch { }
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't save the key (" + BoundDetail(ex.Message, 200) + ") — check the key and try again." }); }
+                }
+
+                // Settings → API key → "Remove saved key": the panel may hint a slug, but the
+                // host derives the real one (its own config is the source of truth) and only
+                // deletes that per-slug key file. KeyStore.Delete never throws. A fresh provider
+                // payload follows so hasKey/the key row repaint (opencode resumes keyless public).
+                else if (action == "keyRemove")
+                {
+                    string rslug = null;
+                    try { rslug = (string)msg.slug; } catch { }
+                    rslug = SanitizeCustomSlug(rslug);
+                    if (string.IsNullOrWhiteSpace(rslug))
+                    {
+                        try
+                        {
+                            var rcfg = ReadForgeConfig();
+                            rslug = PresetSlugFor((string)rcfg["provider"], (string)rcfg["baseUrl"]);
+                        }
+                        catch { }
+                        rslug = SanitizeCustomSlug(rslug);
+                    }
+                    if (string.IsNullOrWhiteSpace(rslug))
+                    { Send(new { type = "error", message = "No provider to remove a key for — pick one first." }); return; }
+                    try
+                    {
+                        KeyStore.Delete(rslug);
+                        var cfg = ReadForgeConfig();
+                        string sp = (string)cfg["provider"], sbu = (string)cfg["baseUrl"];
+                        string sslug = PresetSlugFor(sp, sbu);
+                        Send(new { type = "provider", slug = sslug, provider = sp, baseUrl = sbu, displayName = ProviderFactory.DisplayNameFor(sp, sbu), model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(sslug, sp)), customModels = GetCustomModels(sslug), customProviders = GetCustomProviders() });
+                        Send(new { type = "answer", answer = "Saved key removed for " + rslug + (string.Equals(rslug, "opencode", StringComparison.OrdinalIgnoreCase) ? " — keyless public models are available again." : " — paste a new key in Settings → API key when you need one.") });
+                    }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't remove the saved key (" + BoundDetail(ex.Message, 200) + ") — try again." }); }
                 }
 
                 // Dynamic model list: the panel asks the host to GET {baseUrl}/models with the
@@ -815,12 +1150,12 @@ namespace Forge.SolidWorks
                     // the same slug PresetSlugFor returns, never the raw pasted text.
                     string fslug = SanitizeCustomSlug(provider);
                     if (string.IsNullOrWhiteSpace(fslug))
-                    { Send(new { type = "models", models = new string[0], error = "Unknown provider '" + provider + "' — pick a provider from the dropdown, then Refresh." }); return; }
+                    { Send(new { type = "models", models = new string[0], modelMeta = new JArray(), error = "Unknown provider '" + provider + "' — pick a provider from the dropdown, then Refresh." }); return; }
                     var preset = ProviderPresetFor(fslug);
                     // Anthropic-wire endpoints (built-in or anthropic-kind custom) don't serve an
                     // OpenAI-style Bearer /models list — fail fast with guidance instead of a raw HTTP error.
                     if (string.Equals(preset.Provider, "anthropic", StringComparison.OrdinalIgnoreCase))
-                    { Send(new { type = "models", models = new string[0], error = "This endpoint has no OpenAI-style model list — add the model id under Custom models instead." }); return; }
+                    { Send(new { type = "models", models = new string[0], modelMeta = new JArray(), error = "This endpoint has no OpenAI-style model list — add the model id under Custom models instead." }); return; }
                     // Ollama and OpenCode Zen serve /models with no key (same exemption as
                     // refreshModels): only keyed providers fail closed here. OpenCode's keyless
                     // GET /models uses the literal bearer token "public" (free models only).
@@ -828,14 +1163,14 @@ namespace Forge.SolidWorks
                                || string.Equals(fslug, "opencode", StringComparison.OrdinalIgnoreCase);
                     if (string.IsNullOrWhiteSpace(key)) key = StoredProviderKeyForSlug(fslug, preset.Provider);
                     if (string.IsNullOrWhiteSpace(key) && !flocal)
-                    { Send(new { type = "models", models = new string[0], error = "nokey" }); return; }
+                    { Send(new { type = "models", models = new string[0], modelMeta = new JArray(), error = "nokey" }); return; }
                     if (string.Equals(fslug, "opencode", StringComparison.OrdinalIgnoreCase) && string.IsNullOrWhiteSpace(key)) key = "public";
                     try
                     {
-                        var ids = await FetchServableModels(preset.BaseUrl, (key ?? "").Trim());
-                        Send(new { type = "models", models = ids, selected = preset.Model });
+                        var ids = await FetchServableModels(preset.BaseUrl, (key ?? "").Trim(), fslug);
+                        Send(new { type = "models", models = ids, modelMeta = ModelMetaArray(ids, fslug), selected = preset.Model });
                     }
-                    catch (Exception ex) { Send(new { type = "models", models = new string[0], error = MapModelsError(ex) }); }
+                    catch (Exception ex) { Send(new { type = "models", models = new string[0], modelMeta = new JArray(), error = MapModelsError(ex) }); }
                 }
 
                 // Persistent chat model picker (Kilo-style): current provider/model for the pill,
@@ -848,7 +1183,7 @@ namespace Forge.SolidWorks
                         string p = (string)cfg["provider"];
                         string bu = (string)cfg["baseUrl"];
                         string gslug = PresetSlugFor(p, bu);
-                        Send(new { type = "provider", slug = gslug, provider = p, baseUrl = bu, model = (string)cfg["model"], dynamic = IsDynamicProvider(p), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(gslug, p)), customModels = GetCustomModels(gslug), customProviders = GetCustomProviders() });
+                        Send(new { type = "provider", slug = gslug, provider = p, baseUrl = bu, displayName = ProviderFactory.DisplayNameFor(p, bu), model = (string)cfg["model"], dynamic = IsDynamicProvider(p), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(gslug, p)), customModels = GetCustomModels(gslug), customProviders = GetCustomProviders() });
                         Send(new { type = "rules", allow = McpBuild.AlwaysList(), deny = McpBuild.DenyList() });
                     }
                     catch (Exception ex) { Send(new { type = "provider", error = "Couldn't load provider settings (" + BoundDetail(ex.Message, 200) + ") — try again." }); }
@@ -891,8 +1226,12 @@ namespace Forge.SolidWorks
                         string p = preset.Provider;
                         string keptModel = null;
                         try { keptModel = (string)cfg["model"]; } catch { }
-                        Send(new { type = "provider", slug = slug, provider = p, baseUrl = preset.BaseUrl, model = keptModel ?? preset.Model, dynamic = IsDynamicProvider(p), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(slug, p)), customModels = GetCustomModels(slug), customProviders = GetCustomProviders() });
-                        Send(new { type = "answer", answer = "Provider switched to " + slug + " (" + (keptModel ?? preset.Model) + ") — pick another model from the pill if you like." });
+                        Send(new { type = "provider", slug = slug, provider = p, baseUrl = preset.BaseUrl, displayName = ProviderFactory.DisplayNameFor(p, preset.BaseUrl), model = keptModel ?? preset.Model, dynamic = IsDynamicProvider(p), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(slug, p)), customModels = GetCustomModels(slug), customProviders = GetCustomProviders() });
+                        string dispName = ProviderFactory.DisplayNameFor(p, preset.BaseUrl);
+                        string freeClause = string.Equals(slug, "opencode", StringComparison.OrdinalIgnoreCase)
+                            ? " — no key needed, free models only (public)."
+                            : " — pick another model from the pill if you like.";
+                        Send(new { type = "answer", answer = "Provider switched to " + dispName + " (" + slug + ") · " + (keptModel ?? preset.Model) + freeClause });
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't switch provider (" + BoundDetail(ex.Message, 200) + ") — check the selection/key and try again." }); }
                 }
@@ -913,10 +1252,10 @@ namespace Forge.SolidWorks
                         bool ropencode = string.Equals(rslug, "opencode", StringComparison.OrdinalIgnoreCase);
                         if (ropencode && string.IsNullOrWhiteSpace(key)) key = "public";
                         if (string.IsNullOrWhiteSpace(key) && !rlocal && !ropencode) throw new Exception("No key saved for " + (rslug ?? p) + " — save one in Settings → API key (or set " + (Forge.Providers.ProviderFactory.EnvSlug(rslug) == null ? "FORGE_PROVIDER_KEY" : "FORGE_PROVIDER_KEY_" + Forge.Providers.ProviderFactory.EnvSlug(rslug)) + "), then Refresh.");
-                        var ids = await FetchServableModels(baseUrl, (key ?? "").Trim());
-                        Send(new { type = "models", models = ids, selected = (string)cfg["model"] });
+                        var ids = await FetchServableModels(baseUrl, (key ?? "").Trim(), rslug);
+                        Send(new { type = "models", models = ids, modelMeta = ModelMetaArray(ids, rslug), selected = (string)cfg["model"] });
                     }
-                    catch (Exception ex) { Send(new { type = "models", models = new string[0], error = MapModelsError(ex) }); }
+                    catch (Exception ex) { Send(new { type = "models", models = new string[0], modelMeta = new JArray(), error = MapModelsError(ex) }); }
                 }
                 else if (action == "setModel")
                 {
@@ -940,7 +1279,7 @@ namespace Forge.SolidWorks
                         try { ResetCtxForModelSwitch(); } catch { }
                         string sp = (string)cfg["provider"], sbu = (string)cfg["baseUrl"];
                         string smslug = PresetSlugFor(sp, sbu);
-                        Send(new { type = "provider", slug = smslug, provider = sp, baseUrl = sbu, model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(smslug, sp)), customModels = GetCustomModels(smslug), customProviders = GetCustomProviders() });
+                        Send(new { type = "provider", slug = smslug, provider = sp, baseUrl = sbu, displayName = ProviderFactory.DisplayNameFor(sp, sbu), model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(smslug, sp)), customModels = GetCustomModels(smslug), customProviders = GetCustomProviders() });
                         Send(new { type = "answer", answer = "Model switched to " + model.Trim() + " — it applies to the next run." });
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't switch model (" + BoundDetail(ex.Message, 200) + ") — check the selection/key and try again." }); }
@@ -966,7 +1305,7 @@ namespace Forge.SolidWorks
                         cfg = ReadForgeConfig();
                         string sp = (string)cfg["provider"], sbu = (string)cfg["baseUrl"];
                         string sslug = PresetSlugFor(sp, sbu);
-                        Send(new { type = "provider", slug = sslug, provider = sp, baseUrl = sbu, model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(sslug, sp)), customModels = arr, customProviders = GetCustomProviders() });
+                        Send(new { type = "provider", slug = sslug, provider = sp, baseUrl = sbu, displayName = ProviderFactory.DisplayNameFor(sp, sbu), model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(sslug, sp)), customModels = arr, customProviders = GetCustomProviders() });
                         Send(new { type = "answer", answer = "Custom model '" + cid.Trim() + "' added for " + (cslug ?? sslug) + " — pick it from the pill or Settings." });
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't add the custom model (" + BoundDetail(ex.Message, 200) + ") — check the id and try again." }); }
@@ -985,7 +1324,7 @@ namespace Forge.SolidWorks
                         cfg = ReadForgeConfig();
                         string sp = (string)cfg["provider"], sbu = (string)cfg["baseUrl"];
                         string sslug = PresetSlugFor(sp, sbu);
-                        Send(new { type = "provider", slug = sslug, provider = sp, baseUrl = sbu, model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(sslug, sp)), customModels = arr, customProviders = GetCustomProviders() });
+                        Send(new { type = "provider", slug = sslug, provider = sp, baseUrl = sbu, displayName = ProviderFactory.DisplayNameFor(sp, sbu), model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(sslug, sp)), customModels = arr, customProviders = GetCustomProviders() });
                         Send(new { type = "answer", answer = "Custom model '" + cid.Trim() + "' removed — the live list is unchanged." });
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't remove the custom model (" + BoundDetail(ex.Message, 200) + ") — try again." }); }
@@ -1003,14 +1342,45 @@ namespace Forge.SolidWorks
                     try { purl = (string)msg.baseUrl; } catch { }
                     try
                     {
-                        var list = CustomProviderAdd(pslug, plabel, pkind, purl);
+                        var missing = new List<string>();
+                        string xurl = ExpandEnvTokens(purl, missing);
+                        Newtonsoft.Json.Linq.JObject xheaders = ParseProviderHeaders(msg, missing);
+                        var list = CustomProviderAdd(pslug, plabel, pkind, xurl, false, xheaders);
                         var cfg = ReadForgeConfig();
                         string sp = (string)cfg["provider"], sbu = (string)cfg["baseUrl"];
                         string sslug = PresetSlugFor(sp, sbu);
-                        Send(new { type = "provider", slug = sslug, provider = sp, baseUrl = sbu, model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(sslug, sp)), customModels = GetCustomModels(sslug), customProviders = list });
+                        Send(new { type = "provider", slug = sslug, provider = sp, baseUrl = sbu, displayName = ProviderFactory.DisplayNameFor(sp, sbu), model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(sslug, sp)), customModels = GetCustomModels(sslug), customProviders = list });
                         Send(new { type = "answer", answer = "Custom provider '" + SanitizeCustomSlug(pslug) + "' added — pick it in the provider dropdown, save its key, then add its model ids under Custom models." });
+                        if (missing.Count > 0) Send(new { type = "answer", answer = "Warning: unresolved environment variable(s): " + string.Join(", ", missing.ToArray()) + " — left as literal text; set them and re-save to expand." });
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't add the custom provider (" + BoundDetail(ex.Message, 200) + ")." }); }
+                }
+                // Edit an existing custom provider in place. Upsert is keyed by the unchanged
+                // slug, so its KeyStore key file and customModels.<slug> entries ride along;
+                // CustomProviderAdd(..., update: true) re-runs the exact same validation/collision
+                // guards as Add (reserved slugs, baseUrl vs customs + built-ins incl. opencode/opencode-go,
+                // label impersonation, kind allowlist, http(s)).
+                else if (action == "customProviderUpdate")
+                {
+                    string pslug = null, plabel = null, pkind = null, purl = null;
+                    try { pslug = (string)msg.slug; } catch { }
+                    try { plabel = (string)msg.label; } catch { }
+                    try { pkind = (string)msg.kind; } catch { }
+                    try { purl = (string)msg.baseUrl; } catch { }
+                    try
+                    {
+                        var missing = new List<string>();
+                        string xurl = ExpandEnvTokens(purl, missing);
+                        Newtonsoft.Json.Linq.JObject xheaders = ParseProviderHeaders(msg, missing);
+                        var list = CustomProviderAdd(pslug, plabel, pkind, xurl, true, xheaders);
+                        var cfg = ReadForgeConfig();
+                        string sp = (string)cfg["provider"], sbu = (string)cfg["baseUrl"];
+                        string sslug = PresetSlugFor(sp, sbu);
+                        Send(new { type = "provider", slug = sslug, provider = sp, baseUrl = sbu, displayName = ProviderFactory.DisplayNameFor(sp, sbu), model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(sslug, sp)), customModels = GetCustomModels(sslug), customProviders = list });
+                        Send(new { type = "answer", answer = "Custom provider '" + SanitizeCustomSlug(pslug) + "' updated — its saved key and model ids were kept." });
+                        if (missing.Count > 0) Send(new { type = "answer", answer = "Warning: unresolved environment variable(s): " + string.Join(", ", missing.ToArray()) + " — left as literal text; set them and re-save to expand." });
+                    }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't update the custom provider (" + BoundDetail(ex.Message, 200) + ")." }); }
                 }
                 else if (action == "customProviderRemove")
                 {
@@ -1030,7 +1400,7 @@ namespace Forge.SolidWorks
                         var cfg = ReadForgeConfig();
                         string sp = (string)cfg["provider"], sbu = (string)cfg["baseUrl"];
                         string sslug = PresetSlugFor(sp, sbu);
-                        Send(new { type = "provider", slug = sslug, provider = sp, baseUrl = sbu, model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(sslug, sp)), customModels = GetCustomModels(sslug), customProviders = list });
+                        Send(new { type = "provider", slug = sslug, provider = sp, baseUrl = sbu, displayName = ProviderFactory.DisplayNameFor(sp, sbu), model = (string)cfg["model"], dynamic = IsDynamicProvider(sp), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(sslug, sp)), customModels = GetCustomModels(sslug), customProviders = list });
                         Send(new { type = "answer", answer = "Custom provider '" + gone + "' removed — " + (wasActive ? "it was active, so the provider fell back to deepseek (its key and model ids are kept on disk)." : "its key and model ids are kept on disk in case you re-add it.") });
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't remove the custom provider (" + BoundDetail(ex.Message, 200) + ")." }); }
@@ -1179,13 +1549,196 @@ namespace Forge.SolidWorks
             catch { return null; }
         }
 
+        private static bool McpHas(dynamic msg, string key)
+        {
+            try { var o = msg as Newtonsoft.Json.Linq.JObject; return o != null && o[key] != null; }
+            catch { return false; }
+        }
+
+        private static string McpStr(dynamic msg, string key)
+        {
+            try { var o = msg as Newtonsoft.Json.Linq.JObject; if (o == null) return null; return (string)o[key]; }
+            catch { return null; }
+        }
+
+        private static Newtonsoft.Json.Linq.JToken McpTok(dynamic msg, string key)
+        {
+            try { var o = msg as Newtonsoft.Json.Linq.JObject; if (o == null) return null; return o[key]; }
+            catch { return null; }
+        }
+
+        private static bool McpTryStringMap(Newtonsoft.Json.Linq.JToken tok, out System.Collections.Generic.Dictionary<string, string> map)
+        {
+            map = null;
+            var o = tok as Newtonsoft.Json.Linq.JObject;
+            if (o == null) return false;
+            var d = new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase);
+            foreach (var p in o.Properties())
+            {
+                if (p.Value == null || p.Value.Type != Newtonsoft.Json.Linq.JTokenType.String) return false;
+                d[p.Name] = (string)p.Value;
+            }
+            map = d;
+            return true;
+        }
+
+        private static object McpCoerce(object value, System.Type target)
+        {
+            try
+            {
+                if (value == null) return null;
+                if (target.IsInstanceOfType(value)) return value;
+                var d = value as System.Collections.Generic.Dictionary<string, string>;
+                if (d != null)
+                {
+                    if (target == typeof(Newtonsoft.Json.Linq.JObject)) return Newtonsoft.Json.Linq.JObject.FromObject(d);
+                    if (typeof(System.Collections.Generic.IDictionary<string, string>).IsAssignableFrom(target))
+                        return new System.Collections.Generic.Dictionary<string, string>(d, System.StringComparer.OrdinalIgnoreCase);
+                }
+                var s = value as string;
+                if (s != null && target == typeof(string)) return s;
+                return System.Convert.ChangeType(value, target);
+            }
+            catch { return value; }
+        }
+
+        private static bool McpSetMember(object target, string memberName, object value)
+        {
+            try
+            {
+                var t = target.GetType();
+                const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase;
+                var f = t.GetField(memberName, flags);
+                if (f != null && !f.IsInitOnly) { f.SetValue(target, McpCoerce(value, f.FieldType)); return true; }
+                var p = t.GetProperty(memberName, flags);
+                if (p != null && p.CanWrite) { p.SetValue(target, McpCoerce(value, p.PropertyType), null); return true; }
+                return false;
+            }
+            catch { return false; }
+        }
+
+        private static string McpGetString(object target, string memberName)
+        {
+            try
+            {
+                var t = target.GetType();
+                const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase;
+                var f = t.GetField(memberName, flags);
+                if (f != null) return f.GetValue(target) as string;
+                var p = t.GetProperty(memberName, flags);
+                if (p != null) return p.GetValue(target, null) as string;
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>Fetch the existing server, patch only fields the panel sent, then save through McpBridge (unknown fields survive). Returns an error message, or null on success.</summary>
+        private static string McpWriteServer(dynamic msg, string rawName, bool createIfMissing, out string canonical)
+        {
+            canonical = null;
+            try
+            {
+                if (string.IsNullOrWhiteSpace(rawName))
+                    return createIfMissing ? "Couldn't add the MCP server — give it a name first." : "Couldn't update the MCP server — no name was sent.";
+                string name = rawName.Trim();
+
+                string scopeKey = null;
+                try { scopeKey = McpBridge.ProjectKey; } catch { }
+                bool scoped = !string.IsNullOrWhiteSpace(scopeKey);
+                var list = scoped ? McpBridge.LoadServersForProject(scopeKey) : McpBridge.LoadServers();
+                if (list == null) list = new System.Collections.Generic.List<McpBridge.McpServerConfig>();
+                McpBridge.McpServerConfig entry = null;
+                foreach (var srv in list)
+                    if (srv != null && string.Equals(srv.Name, name, System.StringComparison.OrdinalIgnoreCase)) { entry = srv; break; }
+                if (entry == null)
+                {
+                    if (!createIfMissing) return "Unknown MCP server '" + name + "' — add it first.";
+                    entry = new McpBridge.McpServerConfig { Name = name };
+                    list.Add(entry);
+                }
+                canonical = entry.Name;
+
+                string s;
+                if (McpHas(msg, "type"))
+                {
+                    s = McpStr(msg, "type");
+                    if (!string.IsNullOrWhiteSpace(s))
+                    {
+                        s = s.Trim().ToLowerInvariant();
+                        if (s != "stdio" && s != "http") return "MCP server 'type' must be 'stdio' or 'http'.";
+                        McpSetMember(entry, "Type", s);
+                    }
+                }
+                else if (createIfMissing) McpSetMember(entry, "Type", "stdio");
+
+                if (McpHas(msg, "url")) McpSetMember(entry, "Url", McpStr(msg, "url") ?? "");
+                if (McpHas(msg, "cwd")) McpSetMember(entry, "Cwd", McpStr(msg, "cwd") ?? "");
+
+                System.Collections.Generic.Dictionary<string, string> map;
+                Newtonsoft.Json.Linq.JToken tok;
+                if (McpHas(msg, "headers"))
+                {
+                    tok = McpTok(msg, "headers");
+                    if (tok != null && tok.Type != Newtonsoft.Json.Linq.JTokenType.Null)
+                    {
+                        if (!McpTryStringMap(tok, out map)) return "MCP 'headers' must be an object of string values.";
+                        McpSetMember(entry, "Headers", map);
+                    }
+                }
+                if (McpHas(msg, "env"))
+                {
+                    tok = McpTok(msg, "env");
+                    if (tok != null && tok.Type != Newtonsoft.Json.Linq.JTokenType.Null)
+                    {
+                        if (!McpTryStringMap(tok, out map)) return "MCP 'env' must be an object of string values.";
+                        McpSetMember(entry, "Env", map);
+                    }
+                }
+
+                if (McpHas(msg, "command"))
+                {
+                    s = McpStr(msg, "command");
+                    if (!string.IsNullOrWhiteSpace(s)) entry.Command = s.Trim();
+                }
+                string[] args = ParseMcpArgs(msg);
+                if (args != null && args.Length > 0) entry.Args = args;
+
+                if (McpHas(msg, "enabled"))
+                { try { entry.Enabled = Convert.ToBoolean((object)McpTok(msg, "enabled")); } catch { } }
+                if (McpHas(msg, "timeoutMs"))
+                { int v = 0; try { v = Convert.ToInt32((object)McpTok(msg, "timeoutMs")); } catch { } if (v >= McpMinTimeoutMs) entry.TimeoutMs = v; }
+                if (McpHas(msg, "startTimeoutMs"))
+                { int v = 0; try { v = Convert.ToInt32((object)McpTok(msg, "startTimeoutMs")); } catch { } entry.StartTimeoutMs = v >= McpMinTimeoutMs ? v : 0; }
+
+                string ty = McpGetString(entry, "Type");
+                if (string.IsNullOrWhiteSpace(ty)) ty = McpStr(msg, "type");
+                if (string.IsNullOrWhiteSpace(ty)) ty = "stdio";
+                if (string.Equals(ty, "http", System.StringComparison.OrdinalIgnoreCase))
+                {
+                    string url = McpGetString(entry, "Url");
+                    if (string.IsNullOrWhiteSpace(url)) url = McpStr(msg, "url");
+                    if (string.IsNullOrWhiteSpace(url)) return "HTTP MCP servers need a url — set \"url\" in the server entry and try again.";
+                }
+                else if (string.IsNullOrWhiteSpace(entry.Command))
+                    return "stdio MCP servers need a command — set \"command\" in the server entry and try again.";
+
+                if (McpHas(msg, "watchPaths")) McpSetMember(entry, "WatchPaths", McpStringArray(McpTok(msg, "watchPaths")));
+                if (McpHas(msg, "alwaysAllow")) McpSetMember(entry, "AlwaysAllow", McpStringArray(McpTok(msg, "alwaysAllow")));
+                if (McpHas(msg, "disabledTools")) McpSetMember(entry, "DisabledTools", McpStringArray(McpTok(msg, "disabledTools")));
+                if (scoped) McpBridge.SaveServersForProject(scopeKey, list);
+                else McpBridge.SaveServers(list);
+                return null;
+            }
+            catch (Exception ex) { return "Couldn't save the MCP server (" + BoundDetail(ex.Message, 200) + ") — check Settings → MCP server, then try again."; }
+        }
+
         /// <summary>Resolve msg.name to a canonical server name (trim, case-insensitive). Null/empty → servers[0] iff exactly one; else error listing names. Never throws.</summary>
         private static bool TryResolveServerName(string raw, out string name, out string error)
         {
             name = null; error = null;
             try
             {
-                var servers = McpBridge.LoadServers();
+                var servers = McpBridge.LoadEffectiveServers();
                 var names = new System.Collections.Generic.List<string>();
                 if (servers != null) foreach (var s in servers) if (s != null && !string.IsNullOrWhiteSpace(s.Name)) names.Add(s.Name.Trim());
                 string t = (raw ?? "").Trim();
@@ -1303,8 +1856,7 @@ namespace Forge.SolidWorks
                     // STA + UI thread already (WinForms UserControl), so ShowDialog is safe here.
                     if (dlg.ShowDialog(this) == DialogResult.OK && !string.IsNullOrEmpty(dlg.FileName))
                     {
-                        _attachedFile = dlg.FileName;
-                        Send(new { type = "attached", name = Path.GetFileName(_attachedFile) });
+                        SetAttachedFile(dlg.FileName);
                     }
                 }
             }
@@ -1312,6 +1864,99 @@ namespace Forge.SolidWorks
             {
                 Send(new { type = "error", message = "Couldn't attach that file (" + BoundDetail(ex.Message, 200) + ") — try again." });
             }
+        }
+
+        private void SetAttachedFile(string path)
+        {
+            _attachedFile = path;
+            Send(new { type = "attached", name = Path.GetFileName(path) });
+        }
+
+        private static string SafePasteName(string name)
+        {
+            string s = (name ?? "").Trim();
+            try { s = Path.GetFileName(s.Replace('/', '\\')); } catch { }
+            foreach (char c in Path.GetInvalidFileNameChars()) s = s.Replace(c.ToString(), "_");
+            s = s.Trim();
+            if (s.Length == 0 || s == "." || s == "..") s = "paste.bin";
+            if (s.Length > 80) s = s.Substring(s.Length - 80);
+            return s;
+        }
+
+        private void ApplyPasteAttach(JArray files)
+        {
+            if (files == null || files.Count == 0) { Send(new { type = "error", message = "Nothing to attach — no files were pasted." }); return; }
+            string dir = Path.Combine(Path.GetTempPath(), "Forge-paste");
+            int taken = 0;
+            foreach (var item in files)
+            {
+                if (taken >= 3) { Send(new { type = "error", message = "Only the first 3 pasted files were attached." }); break; }
+                var f = item as JObject; if (f == null) continue;
+                string name = (string)f["name"];
+                string path = (string)f["path"];
+                string b64 = (string)f["bytesBase64"];
+                if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
+                {
+                    SetAttachedFile(path);
+                    taken++;
+                    continue;
+                }
+                if (string.IsNullOrWhiteSpace(b64)) continue;
+                byte[] bytes;
+                try { bytes = Convert.FromBase64String(b64); }
+                catch { Send(new { type = "error", message = "Skipped '" + SafePasteName(name) + "' — invalid file data." }); continue; }
+                if (bytes.Length > 10 * 1024 * 1024)
+                { Send(new { type = "error", message = "Skipped '" + SafePasteName(name) + "' — 10 MB limit per pasted file." }); continue; }
+                try
+                {
+                    Directory.CreateDirectory(dir);
+                    string target = Path.Combine(dir, SafePasteName(name));
+                    File.WriteAllBytes(target, bytes);
+                    SetAttachedFile(target);
+                    taken++;
+                }
+                catch (Exception ex) { Send(new { type = "error", message = "Couldn't save pasted '" + SafePasteName(name) + "' (" + BoundDetail(ex.Message, 120) + ")." }); }
+            }
+        }
+
+        private void DoInitContext(dynamic msg)
+        {
+            string sid = null;
+            try { sid = (string)msg.sid; } catch { }
+            if (string.IsNullOrWhiteSpace(sid)) sid = _lastRunSid;
+            if (string.IsNullOrWhiteSpace(sid)) sid = CurrentChatSid();
+            if (string.IsNullOrWhiteSpace(sid)) sid = "default";
+
+            ISldWorks app = null;
+            IModelDoc2 doc = null;
+            try { app = SwAddin.SwApp; } catch { }
+            try { if (app != null) doc = app.ActiveDoc as IModelDoc2; } catch { }
+            if (app == null || doc == null)
+            {
+                Send(new { type = "initContext", sid, summary = "No active SolidWorks document is open — open a part or assembly, then retry to capture CAD context.", available = false });
+                return;
+            }
+
+            string path = null, type = "unknown", ver = null;
+            int open = 0;
+            try { path = doc.GetPathName(); } catch { }
+            try
+            {
+                int t = doc.GetType();
+                if (t == (int)swDocumentTypes_e.swDocPART) type = "part";
+                else if (t == (int)swDocumentTypes_e.swDocASSEMBLY) type = "assembly";
+                else if (t == (int)swDocumentTypes_e.swDocDRAWING) type = "drawing";
+            }
+            catch { }
+            try { var mi = app.GetType().GetMethod("Version", Type.EmptyTypes); if (mi != null) ver = mi.Invoke(app, null) as string; } catch { }
+            if (string.IsNullOrWhiteSpace(ver)) ver = SwVer();
+            if (string.IsNullOrWhiteSpace(ver)) ver = "SolidWorks";
+            try { var docs = app.GetDocuments() as object[]; if (docs != null) open = docs.Length; } catch { }
+
+            string summary = ver + " · " + type + " · " + open + (open == 1 ? " document" : " documents") + " open"
+                + (string.IsNullOrWhiteSpace(path) ? "" : " · " + Path.GetFileName(path));
+            try { McpBuild.SetCadContext(sid, summary, path, type, open, ver); } catch { }
+            Send(new { type = "initContext", sid, summary, available = true, docPath = path, docType = type, openDocCount = open, swVersion = ver });
         }
 
         private IModelDoc2 ActivePart()
@@ -1348,7 +1993,7 @@ namespace Forge.SolidWorks
         //      {provider, baseUrl, model} â€” the API key is NEVER in the file â€” and stores the key via
         //      KeyStore (DPAPI, current-user). Presets match the README's student instructions exactly so
         //      the onboarding key box configures a real, working provider. ----
-        private static readonly string[] KnownSlugs = { "deepseek", "openrouter", "nvidia", "openai", "anthropic", "ollama", "opencode" };
+        private static readonly string[] KnownSlugs = { "deepseek", "openrouter", "nvidia", "openai", "anthropic", "ollama", "opencode", "opencode-go" };
 
         private static void SaveProviderKey(string provider, string key, string model = null)
         {
@@ -1401,6 +2046,21 @@ namespace Forge.SolidWorks
         private static readonly string[] NonChatModelHints =
             { "embed", "guard", "safety", "detect", "translate", "clip", "retriev", "rerank", "ocr" };
 
+        // OpenCode Zen's keyless "public" list mixes chat-completions models with
+        // messages/responses families this panel can't drive. Allow-list the chat families
+        // (and their *-free variants) so claude-*/gpt-*/gemini-*/jev/qwen3.[5-8]-(max|plus)
+        // never reach the picker. The NonChatModelHints filter above still applies to all.
+        private static readonly string[] OpenCodeChatFamilies =
+            { "glm", "kimi", "minimax", "deepseek", "qwen", "grok", "nemotron", "ling", "mimo", "big-pickle" };
+
+        // OpenCode Go (paid subscription) serves a different, chat-completions-only catalog:
+        // glm/kimi/deepseek/mimo/longcat/hy/space-bunny/minimax. Responses-only families
+        // (grok-*, gpt-*-luna, muse-spark-*), Messages-only families (qwen3.*-max/plus, jev,
+        // claude-*, gemini-*) and every other id are excluded. Hybrid names with a digit
+        // suffix (hy3-preview, hy4, minimax-m3) still belong to their leading family.
+        private static readonly string[] OpenCodeGoChatFamilies =
+            { "glm", "kimi", "minimax", "deepseek", "mimo", "longcat", "hy", "space-bunny" };
+
         private static JObject ReadForgeConfig()
         {
             string p = Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData), "Forge", "config.json");
@@ -1431,6 +2091,37 @@ namespace Forge.SolidWorks
                 return true;
             }
             catch { return true; }
+        }
+
+        private static void LoadAutoApprove()
+        {
+            try
+            {
+                JObject cfg = ReadForgeConfig();
+                JObject a = cfg["autoApprove"] as JObject;
+                if (a == null) return;
+                McpBuild.ApproveMaster = AutoApproveBool(a, "master", McpBuild.ApproveMaster);
+                McpBuild.ApproveRead = AutoApproveBool(a, "read", McpBuild.ApproveRead);
+                McpBuild.ApproveBuild = AutoApproveBool(a, "build", McpBuild.ApproveBuild);
+                McpBuild.ApproveDestructive = AutoApproveBool(a, "destructive", McpBuild.ApproveDestructive);
+            }
+            catch { }
+        }
+
+        private static bool AutoApproveBool(JObject cfg, string key, bool fallback)
+        {
+            try
+            {
+                JToken v = cfg == null ? null : cfg[key];
+                if (v == null) return fallback;
+                if (v.Type == JTokenType.Boolean) return (bool)v;
+                if (v.Type == JTokenType.Integer || v.Type == JTokenType.Float) return Convert.ToDouble(v) != 0;
+                string s = ((string)v ?? "").Trim().ToLowerInvariant();
+                if (s == "1" || s == "true" || s == "on" || s == "yes") return true;
+                if (s == "0" || s == "false" || s == "off" || s == "no") return false;
+            }
+            catch { }
+            return fallback;
         }
 
         private static void SetNotify(bool on)
@@ -1591,7 +2282,7 @@ namespace Forge.SolidWorks
         // (the ProviderPresetFor default), matching existing fallback behavior. The reserved
         // set also blocks "openai-compatible" so a custom slug can never collide with the
         // client-id fallback in PresetSlugFor.
-        private static readonly string[] ReservedSlugs = { "deepseek", "openrouter", "nvidia", "openai", "anthropic", "ollama", "opencode", "openai-compatible" };
+        private static readonly string[] ReservedSlugs = { "deepseek", "openrouter", "nvidia", "openai", "anthropic", "ollama", "opencode", "opencode-go", "openai-compatible" };
         private static readonly string[] CustomKinds = { "openai-compatible", "anthropic" };
 
         private static string SanitizeCustomSlug(string slug)
@@ -1668,6 +2359,12 @@ namespace Forge.SolidWorks
                         string lab = ((string)o["label"] ?? "").Trim();
                         var n = new JObject { ["slug"] = s, ["kind"] = kind, ["baseUrl"] = bu };
                         if (!string.IsNullOrWhiteSpace(lab)) n["label"] = lab.Length > 60 ? lab.Substring(0, 60) : lab;
+                        try
+                        {
+                            var hh = o["headers"] as JObject;
+                            if (hh != null) n["headers"] = hh.DeepClone();
+                        }
+                        catch { }
                         clean.Add(n);
                     }
                     catch { }
@@ -1717,7 +2414,11 @@ namespace Forge.SolidWorks
             return null;
         }
 
-        private static JArray CustomProviderAdd(string slug, string label, string kind, string baseUrl)
+        // Add (update:false) or edit-in-place (update:true) a {slug,label,kind,baseUrl} custom.
+        // Both paths re-run the exact same validation/collision guards. Upsert is keyed by the
+        // unchanged slug, so the provider's KeyStore key file and customModels.<slug> entries
+        // are never touched.
+        private static JArray CustomProviderAdd(string slug, string label, string kind, string baseUrl, bool update = false, JObject headers = null)
         {
             string s = SanitizeCustomSlug(slug);
             if (string.IsNullOrWhiteSpace(s)) throw new Exception("Give the provider a slug (lowercase letters, digits, hyphens) — e.g. corp-gw.");
@@ -1729,12 +2430,17 @@ namespace Forge.SolidWorks
             // Base-URL collision guard: PresetSlugFor and ProviderFactory.SlugFor match
             // customs by baseUrl FIRST, so a second custom reusing an existing baseUrl
             // (custom or built-in) would silently alias the first slug and strand keys/models.
+            // On edit the entry being changed is excluded (it may keep its own base URL).
             try
             {
                 foreach (var e in GetCustomProviders())
                 {
+                    var o = e as JObject;
+                    if (o == null) continue;
+                    string es = SanitizeCustomSlug((string)o["slug"]);
+                    if (update && !string.IsNullOrWhiteSpace(es) && string.Equals(es, s, StringComparison.OrdinalIgnoreCase)) continue;
                     string eb = null;
-                    try { var o = e as JObject; if (o == null) continue; eb = NormCustomBaseUrl((string)o["baseUrl"]); }
+                    try { eb = NormCustomBaseUrl((string)o["baseUrl"]); }
                     catch { continue; }
                     if (string.IsNullOrWhiteSpace(eb)) continue;
                     if (string.Equals(eb, bu, StringComparison.OrdinalIgnoreCase)) throw new Exception("That base URL is already registered — pick the existing entry or use a different URL.");
@@ -1746,7 +2452,7 @@ namespace Forge.SolidWorks
             }
             try
             {
-                foreach (var b in new string[] { "deepseek", "openrouter", "nvidia", "openai", "anthropic", "ollama", "opencode" })
+                foreach (var b in new string[] { "deepseek", "openrouter", "nvidia", "openai", "anthropic", "ollama", "opencode", "opencode-go" })
                 {
                     string pb = null;
                     try { var preset = ProviderPresetFor(b); if (preset != null) pb = NormCustomBaseUrl(preset.BaseUrl); }
@@ -1762,32 +2468,49 @@ namespace Forge.SolidWorks
             JObject cfg;
             try { cfg = ReadForgeConfig(); } catch { cfg = new JObject(); }
             if (cfg == null) cfg = new JObject();
+            // Capture active state before the entry changes: resolution is baseUrl-first, so if
+            // an edited custom was active its config baseUrl (and wire kind) must follow the edit
+            // or hasKey/model lookups would fall back to the reserved "openai-compatible" slug.
+            bool wasActive = string.Equals(PresetSlugFor((string)cfg["provider"], (string)cfg["baseUrl"]), s, StringComparison.OrdinalIgnoreCase);
             var raw = cfg["customProviders"] as JArray;
             if (raw == null) { raw = new JArray(); cfg["customProviders"] = raw; }
+            JToken existing = null;
             foreach (var e in raw)
             {
-                bool dupeSlug = false;
-                try
-                {
-                    var o = e as JObject;
-                    dupeSlug = o != null && string.Equals(SanitizeCustomSlug((string)o["slug"]), s, StringComparison.OrdinalIgnoreCase);
-                }
-                catch { dupeSlug = false; }
-                if (dupeSlug) throw new Exception("A custom provider '" + s + "' already exists — delete it first to replace it.");
+                var o = e as JObject;
+                string es = null;
+                try { es = o == null ? null : SanitizeCustomSlug((string)o["slug"]); } catch { }
+                if (!string.IsNullOrWhiteSpace(es) && string.Equals(es, s, StringComparison.OrdinalIgnoreCase)) { existing = e; break; }
             }
-            if (GetCustomProviders().Count >= 20) throw new Exception("Custom provider cap reached (20) — remove one first.");
-            var n = new JObject { ["slug"] = s, ["kind"] = k, ["baseUrl"] = bu };
+            if (update)
+            {
+                if (existing == null) throw new Exception("No custom provider '" + s + "' found — nothing to update.");
+            }
+            else
+            {
+                if (existing != null) throw new Exception("A custom provider '" + s + "' already exists — delete it first to replace it.");
+                if (GetCustomProviders().Count >= 20) throw new Exception("Custom provider cap reached (20) — remove one first.");
+            }
             string lab = (label ?? "").Trim();
             // Label impersonation guard: a custom label matching a built-in provider display name
-            // (ProviderFactory.DisplayNameFor: DeepSeek/OpenRouter/NVIDIA/OpenAI/Anthropic/Ollama/OpenCode Zen)
+            // (ProviderFactory.DisplayNameFor: DeepSeek/OpenRouter/NVIDIA/OpenAI/Anthropic/Ollama/OpenCode Zen/OpenCode Go)
             // would masquerade in the picker. Reject case-insensitively like the other validations.
             if (!string.IsNullOrWhiteSpace(lab))
             {
-                foreach (var b in new string[] { "DeepSeek", "OpenRouter", "NVIDIA", "OpenAI", "Anthropic", "Ollama", "OpenCode Zen" })
+                foreach (var b in new string[] { "DeepSeek", "OpenRouter", "NVIDIA", "OpenAI", "Anthropic", "Ollama", "OpenCode Zen", "OpenCode Go" })
                     if (string.Equals(lab, b, StringComparison.OrdinalIgnoreCase)) throw new Exception("'" + lab + "' is a built-in provider name — pick a different label.");
             }
+            if (headers == null && update && existing is JObject)
+            {
+                var oldHeaders = ((JObject)existing)["headers"] as JObject;
+                if (oldHeaders != null) headers = (JObject)oldHeaders.DeepClone();
+            }
+            var n = new JObject { ["slug"] = s, ["kind"] = k, ["baseUrl"] = bu };
             if (!string.IsNullOrWhiteSpace(lab)) n["label"] = lab.Length > 60 ? lab.Substring(0, 60) : lab;
-            raw.Add(n);
+            if (headers != null && headers.Count > 0) n["headers"] = headers.DeepClone();
+            if (update) existing.Replace(n);
+            else raw.Add(n);
+            if (update && wasActive) { cfg["provider"] = k; cfg["baseUrl"] = bu; }
             WriteForgeConfigAtomic(cfg);
             return GetCustomProviders();
         }
@@ -1926,8 +2649,10 @@ namespace Forge.SolidWorks
                     }
                     catch { }
                 }
-                // Kilo parity: OPENCODE_API_KEY is accepted alongside FORGE_PROVIDER_KEY_OPENCODE.
-                if (string.Equals(s, "opencode", StringComparison.OrdinalIgnoreCase))
+                // Kilo parity: OPENCODE_API_KEY is accepted alongside FORGE_PROVIDER_KEY_OPENCODE,
+                // and also for opencode-go which shares the Zen credential infra (key required).
+                if (string.Equals(s, "opencode", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(s, "opencode-go", StringComparison.OrdinalIgnoreCase))
                 {
                     try
                     {
@@ -1981,7 +2706,10 @@ namespace Forge.SolidWorks
             catch { return "unexpected error"; }
         }
 
-        private static async Task<System.Collections.Generic.List<string>> FetchServableModels(string baseUrl, string apiKey)
+        // chatFilterSlug: null = no family filter; "opencode"/"opencode-go" apply their
+        // respective chat-completions allow-lists. The Go list also admits digit-suffixed
+        // family names (hy3-preview, hy4, minimax-m3) without loosening the public Zen list.
+        private static async Task<System.Collections.Generic.List<string>> FetchServableModels(string baseUrl, string apiKey, string chatFilterSlug = null)
         {
             var ids = new System.Collections.Generic.List<string>();
             using (var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(30) })
@@ -1994,6 +2722,9 @@ namespace Forge.SolidWorks
                     if (!resp.IsSuccessStatusCode) throw new Exception("Model list request failed (HTTP " + (int)resp.StatusCode + " " + resp.StatusCode + ") — the provider refused the list; check the key, then Refresh.");
                     var data = JObject.Parse(text)["data"] as JArray;
                     if (data == null) throw new Exception("The provider returned a model list Forge couldn't read — try Refresh again; if it repeats, set the model manually.");
+                    bool go = string.Equals(chatFilterSlug, "opencode-go", StringComparison.OrdinalIgnoreCase);
+                    string[] families = go ? OpenCodeGoChatFamilies
+                        : (string.Equals(chatFilterSlug, "opencode", StringComparison.OrdinalIgnoreCase) ? OpenCodeChatFamilies : null);
                     foreach (var e in data)
                     {
                         string id = (string)e["id"];
@@ -2001,6 +2732,23 @@ namespace Forge.SolidWorks
                         string lc = id.ToLowerInvariant();
                         bool skip = false;
                         foreach (var h in NonChatModelHints) { if (lc.Contains(h)) { skip = true; break; } }
+                        if (!skip && families != null)
+                        {
+                            string name = lc;
+                            int slash = name.LastIndexOf('/');
+                            if (slash >= 0) name = name.Substring(slash + 1);
+                            bool allowedFamily = false;
+                            foreach (var f in families)
+                            {
+                                if (name == f || name.StartsWith(f + "-", StringComparison.Ordinal)) { allowedFamily = true; break; }
+                                // Go-only: a non-letter boundary still belongs to the leading
+                                // family (hy3-preview, hy4, minimax-m3). The public Zen list
+                                // keeps its strict prefix rule so qwen3.*-(max|plus) stay out.
+                                if (go && name.Length > f.Length && name.StartsWith(f, StringComparison.Ordinal)
+                                    && !char.IsLetter(name[f.Length])) { allowedFamily = true; break; }
+                            }
+                            if (!allowedFamily) skip = true;
+                        }
                         if (!skip) ids.Add(id);
                     }
                 }
@@ -2037,6 +2785,7 @@ namespace Forge.SolidWorks
             {
                 case "openrouter": return new ProviderPreset("openai-compatible", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini");
                 case "opencode":   return new ProviderPreset("openai-compatible", "https://opencode.ai/zen/v1", "glm-5.3-flash");
+                case "opencode-go": return new ProviderPreset("openai-compatible", "https://opencode.ai/zen/go/v1", "glm-5.3-flash");
                 case "nvidia":     return new ProviderPreset("openai-compatible", "https://integrate.api.nvidia.com/v1", "moonshotai/kimi-k3.1-pro");
                 case "openai":     return new ProviderPreset("openai-compatible", "https://api.openai.com/v1", "gpt-6-luna"); // gpt-4o-mini snapshot shuts down 2027-01-14
                 case "anthropic":  return new ProviderPreset("anthropic", "https://api.anthropic.com/v1", "claude-3-5-sonnet-20241022");
@@ -2110,11 +2859,13 @@ namespace Forge.SolidWorks
                 // Temp 0.7 only when the model accepts custom temperatures (Kilo enhance-prompt.ts);
                 // reasoning variants get the provider default instead of a rejected param.
                 double? enhanceTemp = ProviderFactory.SupportsTemperature(useModel) ? 0.7 : (double?)null;
+                string enhanceEffort = ConfiguredReasoningEffort(useModel);
+                try { McpBuild.ReasoningEffort = enhanceEffort; } catch { }
                 ProviderResult res;
                 try
                 {
                     res = await client.CompleteStreamingAsync(msgs,
-                        new ProviderOptions { MaxTokens = 32000, Temperature = enhanceTemp, Model = useModel },
+                        new ProviderOptions { MaxTokens = 32000, Temperature = enhanceTemp, Model = useModel, ReasoningEffort = enhanceEffort },
                         ect,
                         (kind, delta) =>
                         {
@@ -2132,7 +2883,7 @@ namespace Forge.SolidWorks
                 {
                     // Non-streaming backends (Anthropic): same prompt as one unary call, no live deltas.
                     res = await client.CompleteAsync(msgs,
-                        new ProviderOptions { MaxTokens = 32000, Temperature = enhanceTemp, Model = useModel },
+                        new ProviderOptions { MaxTokens = 32000, Temperature = enhanceTemp, Model = useModel, ReasoningEffort = enhanceEffort },
                         ect);
                 }
                 watch.Stop();
@@ -2222,8 +2973,67 @@ namespace Forge.SolidWorks
             "with which fasteners); end with build order; take as many words as the machine needs, no length limit. " +
             "Vague scope is banned: 'pattern holes where applicable' must become exact counts, sizes, positions.";
 
+        private static string HostHtmlEsc(string s)
+        {
+            return (s ?? "").Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;").Replace("\"", "&quot;");
+        }
+
+        private static JArray BuildHostTurns(string sid)
+        {
+            var data = new JArray();
+            try
+            {
+                string safe = (sid ?? "").Trim();
+                if (safe.Length == 0) safe = "default";
+                try { safe = Path.GetFileName(safe); } catch { }
+                foreach (char c in Path.GetInvalidFileNameChars()) safe = safe.Replace(c.ToString(), "_");
+                if (safe.Length == 0 || safe == "." || safe == "..") safe = "default";
+                string path = Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData), "Forge", "agent", safe + ".json");
+                if (!File.Exists(path)) return data;
+                var arr = JArray.Parse(File.ReadAllText(path));
+                var starts = new List<int>();
+                for (int i = 0; i < arr.Count; i++)
+                {
+                    var o = arr[i] as JObject;
+                    if (o != null && string.Equals((string)o["role"], "user", StringComparison.OrdinalIgnoreCase)) starts.Add(i);
+                }
+                int from = Math.Max(0, starts.Count - 30);
+                for (int k = from; k < starts.Count; k++)
+                {
+                    int start = starts[k];
+                    int end = k + 1 < starts.Count ? starts[k + 1] : arr.Count;
+                    string q = "";
+                    var body = new System.Text.StringBuilder();
+                    for (int i = start; i < end; i++)
+                    {
+                        var o = arr[i] as JObject;
+                        if (o == null) continue;
+                        string role = (string)o["role"] ?? "";
+                        string content = (string)o["content"] ?? "";
+                        if (string.Equals(role, "user", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (i == start) q = content;
+                            continue;
+                        }
+                        if (content.Length == 0) continue;
+                        if (body.Length > 0) body.Append("<br>");
+                        body.Append(HostHtmlEsc(content));
+                    }
+                    string bodyHtml = body.ToString();
+                    if (bodyHtml.Length > 59900) bodyHtml = bodyHtml.Substring(0, 59900) + "… (truncated)";
+                    string a = bodyHtml.Length > 0 ? "<div class=\"card\"><div class=\"answer\">" + bodyHtml + "</div></div>" : "";
+                    if (q.Length > 60000) q = q.Substring(0, 60000) + "… (truncated)";
+                    data.Add(new JObject { ["q"] = q, ["a"] = a });
+                }
+            }
+            catch { }
+            return data;
+        }
+
         private async Task Generate(string intent, string sid, Newtonsoft.Json.Linq.JArray postedPaths)
         {
+            SyncMcpProjectScope();
+            try { McpBuild.ReasoningEffort = ConfiguredReasoningEffortFor(ProviderFactory.CurrentModel()); } catch { McpBuild.ReasoningEffort = null; }
             if (string.IsNullOrWhiteSpace(intent)) intent = "";
             // A pasted blob (50KB dumps, emoji walls, log files) must fail closed here: no regex
             // storm in the matchers, no token blowup in the LLM calls, no bloat in telemetry logs.
@@ -2986,6 +3796,812 @@ namespace Forge.SolidWorks
             catch { }
         }
 
+        private string QueueActiveSid()
+        {
+            if (!string.IsNullOrWhiteSpace(_lastRunSid)) return SafeSidLocal(_lastRunSid);
+            try { string s = CurrentChatSid(); if (!string.IsNullOrWhiteSpace(s)) return SafeSidLocal(s); } catch { }
+            return "default";
+        }
+
+        private static string SafeSidLocal(string sid)
+        {
+            string s = (sid ?? "").Trim();
+            if (s.Length == 0) return "default";
+            try { s = Path.GetFileName(s); } catch { }
+            foreach (char c in Path.GetInvalidFileNameChars()) s = s.Replace(c.ToString(), "_");
+            if (s.Length == 0 || s == "." || s == "..") return "default";
+            return s;
+        }
+
+        private static string AgentSessionPath(string sid)
+        {
+            return Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData), "Forge", "agent", SafeSidLocal(sid) + ".json");
+        }
+
+        private static void AtomicWriteJson(string path, JToken token)
+        {
+            try
+            {
+                string dir = Path.GetDirectoryName(path);
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                string tmp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                try
+                {
+                    File.WriteAllText(tmp, token.ToString(Newtonsoft.Json.Formatting.None));
+                    if (File.Exists(path)) File.Replace(tmp, path, null);
+                    else File.Move(tmp, path);
+                }
+                catch
+                {
+                    try { File.Delete(tmp); } catch { }
+                    throw;
+                }
+            }
+            catch { }
+        }
+
+        private SidQueue QueueFor(string sid)
+        {
+            string key = SafeSidLocal(sid);
+            SidQueue q;
+            if (Queues.TryGetValue(key, out q)) return q;
+            q = new SidQueue();
+            try
+            {
+                string p = Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData), "Forge", "agent", key + ".queue.json");
+                if (File.Exists(p))
+                {
+                    var o = JObject.Parse(File.ReadAllText(p));
+                    try { q.paused = (bool)o["paused"]; } catch { }
+                    var arr = o["items"] as JArray;
+                    if (arr != null) foreach (var t in arr)
+                    {
+                        var it = t as JObject;
+                        if (it == null) continue;
+                        var qi = new QueuedFollowUp
+                        {
+                            id = (string)it["id"],
+                            intent = (string)it["intent"],
+                            paths = (string)it["paths"],
+                            createdAt = (long?)it["createdAt"] ?? 0
+                        };
+                        if (!string.IsNullOrWhiteSpace(qi.id) && !string.IsNullOrWhiteSpace(qi.intent)) q.items.Add(qi);
+                        if (q.items.Count >= 50) break;
+                    }
+                }
+            }
+            catch { }
+            Queues[key] = q;
+            return q;
+        }
+
+        private void PersistQueue(string sid)
+        {
+            try
+            {
+                string key = SafeSidLocal(sid);
+                SidQueue q;
+                lock (QueueLock) { if (!Queues.TryGetValue(key, out q)) return; }
+                var arr = new JArray();
+                foreach (var it in q.items)
+                    arr.Add(new JObject { ["id"] = it.id, ["intent"] = it.intent, ["paths"] = it.paths, ["createdAt"] = it.createdAt });
+                string p = Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData), "Forge", "agent", key + ".queue.json");
+                AtomicWriteJson(p, new JObject { ["paused"] = q.paused, ["items"] = arr });
+            }
+            catch { }
+        }
+
+        private void QueueAdd(string sid, string intent, JArray paths)
+        {
+            string ps = null;
+            try { if (paths != null) ps = paths.ToString(Newtonsoft.Json.Formatting.None); } catch { }
+            lock (QueueLock)
+            {
+                SidQueue q = QueueFor(sid);
+                if (q.items.Count >= 50)
+                { Send(new { type = "error", message = "Follow-up queue is full (50) — remove an item before adding another." }); return; }
+                q.items.Add(new QueuedFollowUp
+                {
+                    id = Guid.NewGuid().ToString("N").Substring(0, 12),
+                    intent = intent,
+                    paths = ps,
+                    createdAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                });
+                PersistQueue(sid);
+            }
+            SendQueued(sid);
+        }
+
+        private string QueueSidForItem(string id)
+        {
+            if (string.IsNullOrWhiteSpace(id)) return null;
+            lock (QueueLock)
+            {
+                foreach (var kv in Queues)
+                {
+                    foreach (var it in kv.Value.items)
+                        if (string.Equals(it.id, id, StringComparison.OrdinalIgnoreCase)) return kv.Key;
+                }
+            }
+            string key = SafeSidLocal(QueueActiveSid());
+            string p = Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData), "Forge", "agent", key + ".queue.json");
+            try
+            {
+                if (File.Exists(p))
+                {
+                    var o = JObject.Parse(File.ReadAllText(p));
+                    var arr = o["items"] as JArray;
+                    if (arr != null) foreach (var t in arr)
+                    {
+                        var jo = t as JObject;
+                        if (jo != null && string.Equals((string)jo["id"], id, StringComparison.OrdinalIgnoreCase)) return key;
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private void QueueEdit(string sid, string id, string intent)
+        {
+            lock (QueueLock)
+            {
+                SidQueue q = QueueFor(sid);
+                foreach (var it in q.items)
+                    if (string.Equals(it.id, id, StringComparison.OrdinalIgnoreCase)) { it.intent = intent; break; }
+                PersistQueue(sid);
+            }
+            SendQueued(sid);
+        }
+
+        private void QueueRemove(string sid, string id)
+        {
+            lock (QueueLock)
+            {
+                SidQueue q = QueueFor(sid);
+                for (int i = 0; i < q.items.Count; i++)
+                    if (string.Equals(q.items[i].id, id, StringComparison.OrdinalIgnoreCase)) { q.items.RemoveAt(i); break; }
+                PersistQueue(sid);
+            }
+            SendQueued(sid);
+        }
+
+        private void QueueMove(string sid, string id, int index)
+        {
+            lock (QueueLock)
+            {
+                SidQueue q = QueueFor(sid);
+                int from = -1;
+                for (int i = 0; i < q.items.Count; i++)
+                    if (string.Equals(q.items[i].id, id, StringComparison.OrdinalIgnoreCase)) { from = i; break; }
+                if (from >= 0)
+                {
+                    var item = q.items[from];
+                    q.items.RemoveAt(from);
+                    if (index > q.items.Count) index = q.items.Count;
+                    if (index < 0) index = 0;
+                    q.items.Insert(index, item);
+                }
+                PersistQueue(sid);
+            }
+            SendQueued(sid);
+        }
+
+        private void SendQueued(string sid)
+        {
+            string key = SafeSidLocal(sid);
+            var items = new JArray();
+            bool paused = false;
+            lock (QueueLock)
+            {
+                SidQueue q;
+                if (Queues.TryGetValue(key, out q))
+                {
+                    paused = q.paused;
+                    foreach (var it in q.items)
+                        items.Add(new JObject { ["id"] = it.id, ["intent"] = it.intent, ["createdAt"] = it.createdAt });
+                }
+            }
+            Send(new { type = "queued", sid = key, items, paused });
+        }
+
+        private void SendQueueState(string sid)
+        {
+            string key = SafeSidLocal(sid);
+            bool paused = false;
+            lock (QueueLock)
+            {
+                SidQueue q;
+                if (Queues.TryGetValue(key, out q)) paused = q.paused;
+            }
+            Send(new { type = "queueState", sid = key, paused });
+        }
+
+        private string LastIntent(string sid)
+        {
+            string key = SafeSidLocal(sid);
+            string intent = null;
+            lock (LastIntentBySid) { LastIntentBySid.TryGetValue(key, out intent); }
+            if (!string.IsNullOrWhiteSpace(intent)) return intent;
+            return ReadLastUserIntent(key);
+        }
+
+        private static string ReadLastUserIntent(string sid)
+        {
+            try
+            {
+                string p = AgentSessionPath(sid);
+                if (!File.Exists(p)) return null;
+                var arr = JArray.Parse(File.ReadAllText(p));
+                for (int i = arr.Count - 1; i >= 0; i--)
+                {
+                    var o = arr[i] as JObject;
+                    if (o == null || !string.Equals((string)o["role"], "user", StringComparison.OrdinalIgnoreCase)) continue;
+                    string c = (string)o["content"] ?? "";
+                    if (c.Length > 4000) c = c.Substring(c.Length - 4000);
+                    return c;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private void McpBuildRemoveLastUserTurnByReflection(string sid)
+        {
+            try
+            {
+                McpBuild.EnsureSessionPublic(sid);
+                var t = typeof(McpBuild);
+                const BindingFlags bf = BindingFlags.NonPublic | BindingFlags.Static;
+                var fSessions = t.GetField("Sessions", bf);
+                var mSafe = t.GetMethod("SafeSid", bf);
+                var mSave = t.GetMethod("SaveSession", bf);
+                if (fSessions == null || mSafe == null || mSave == null) return;
+                object sessions = fSessions.GetValue(null);
+                if (sessions == null) return;
+                string key = mSafe.Invoke(null, new object[] { sid }) as string;
+                if (string.IsNullOrEmpty(key)) key = "default";
+                object sessionObj = null;
+                lock (sessions)
+                {
+                    var dict = sessions as System.Collections.IDictionary;
+                    if (dict != null) sessionObj = dict[key];
+                }
+                if (sessionObj == null) return;
+                var fMsgs = sessionObj.GetType().GetField("Msgs", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                var fTurns = sessionObj.GetType().GetField("TurnStarts", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (fMsgs == null || fTurns == null) return;
+                var msgs = fMsgs.GetValue(sessionObj) as System.Collections.IList;
+                var turns = fTurns.GetValue(sessionObj) as System.Collections.IList;
+                if (msgs == null || turns == null) return;
+                lock (msgs)
+                {
+                    int last = -1;
+                    for (int i = msgs.Count - 1; i >= 0; i--)
+                    {
+                        var jo = msgs[i] as JObject;
+                        if (jo != null && string.Equals((string)jo["role"], "user", StringComparison.OrdinalIgnoreCase)) { last = i; break; }
+                    }
+                    if (last < 0) return;
+                    msgs.RemoveAt(last);
+                    for (int i = turns.Count - 1; i >= 0; i--)
+                    {
+                        try { if (Convert.ToInt32(turns[i]) == last) { turns.RemoveAt(i); break; } } catch { }
+                    }
+                }
+                try { mSave.Invoke(null, new object[] { sid }); } catch { }
+            }
+            catch { }
+        }
+
+        private async Task RunGenerateTracked(string intent, string sid, JArray paths, string queueId, bool force, bool continued, bool autoDispatch, bool dispatchOwner = false)
+        {
+            if (string.IsNullOrWhiteSpace(sid)) sid = QueueActiveSid();
+            sid = SafeSidLocal(sid);
+            lock (LastIntentBySid) { LastIntentBySid[sid] = intent ?? ""; }
+            _lastRunSid = sid;
+            if (continued) lock (InterruptedBySid) { InterruptedBySid[sid] = false; }
+            System.Threading.Interlocked.Increment(ref _activeRuns);
+            try { await Generate(intent, sid, paths); }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { Send(new { type = "error", message = "Run failed (" + BoundDetail(ex.Message, 300) + ") — check the model for partial changes." }); }
+            finally
+            {
+                System.Threading.Interlocked.Decrement(ref _activeRuns);
+                if (dispatchOwner) lock (QueueLock) { Dispatching.Remove(sid); }
+                try { SendQueued(sid); } catch { }
+                if (autoDispatch && !force)
+                { try { var _ = DispatchNextQueued(sid); } catch { } }
+            }
+        }
+
+        private async Task DispatchNextQueued(string sid)
+        {
+            string key = SafeSidLocal(sid);
+            try
+            {
+                QueuedFollowUp next = null;
+                if (System.Threading.Volatile.Read(ref _activeRuns) > 0) return;
+                lock (QueueLock)
+                {
+                    SidQueue q;
+                    if (!Queues.TryGetValue(key, out q) || q.paused || q.items.Count == 0) return;
+                    bool dispatching;
+                    Dispatching.TryGetValue(key, out dispatching);
+                    if (dispatching) return;
+                    Dispatching[key] = true;
+                    next = q.items[0];
+                    q.items.RemoveAt(0);
+                    PersistQueue(key);
+                }
+                SendQueued(key);
+                JArray paths = null;
+                try { if (!string.IsNullOrWhiteSpace(next.paths)) paths = JArray.Parse(next.paths); } catch { }
+                await RunGenerateTracked(next.intent, key, paths, next.id, false, false, true, true);
+            }
+            finally
+            {
+                lock (QueueLock) { Dispatching.Remove(key); }
+            }
+        }
+
+        private string ForkSession(string sourceSid, int? turnIndex)
+        {
+            string src = AgentSessionPath(sourceSid);
+            var arr = new JArray();
+            if (File.Exists(src)) arr = JArray.Parse(File.ReadAllText(src));
+            if (turnIndex.HasValue)
+            {
+                int seen = -1, cut = arr.Count;
+                for (int i = 0; i < arr.Count; i++)
+                {
+                    var o = arr[i] as JObject;
+                    if (o == null || !string.Equals((string)o["role"], "user", StringComparison.OrdinalIgnoreCase)) continue;
+                    seen++;
+                    if (seen == turnIndex.Value) { cut = i; break; }
+                }
+                while (arr.Count > cut) arr.RemoveAt(arr.Count - 1);
+            }
+            string dir = Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData), "Forge", "agent");
+            string newSid, dst;
+            do
+            {
+                newSid = "fork-" + Guid.NewGuid().ToString("N").Substring(0, 12);
+                dst = Path.Combine(dir, newSid + ".json");
+            }
+            while (File.Exists(dst));
+            AtomicWriteJson(dst, arr);
+            try
+            {
+                string sctx = src.Substring(0, src.Length - ".json".Length) + ".ctx.json";
+                if (File.Exists(sctx)) File.Copy(sctx, dst.Substring(0, dst.Length - ".json".Length) + ".ctx.json", true);
+            }
+            catch { }
+            McpBuild.EnsureSessionPublic(newSid);
+            return newSid;
+        }
+
+        private void DoShareTranscript(string sid)
+        {
+            string md = BuildMarkdownTranscript(sid);
+            try
+            {
+                using (var dlg = new SaveFileDialog())
+                {
+                    dlg.Title = "Save Forge conversation";
+                    dlg.Filter = "Markdown (*.md)|*.md|All files (*.*)|*.*";
+                    dlg.FileName = "forge-session-" + SafeSidLocal(sid) + ".md";
+                    if (dlg.ShowDialog(this) != DialogResult.OK || string.IsNullOrWhiteSpace(dlg.FileName))
+                    { Send(new { type = "shared", path = (string)null, cancelled = true }); return; }
+                    File.WriteAllText(dlg.FileName, md);
+                    Send(new { type = "shared", path = dlg.FileName });
+                }
+            }
+            catch (Exception ex) { Send(new { type = "error", message = "Couldn't save the transcript (" + BoundDetail(ex.Message, 200) + ") — try a different folder." }); }
+        }
+
+        private static string BuildMarkdownTranscript(string sid)
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append("# Forge conversation — ").Append(SafeSidLocal(sid)).Append("\n\n");
+            try
+            {
+                string p = AgentSessionPath(sid);
+                if (!File.Exists(p)) { sb.Append("(no messages)\n"); return sb.ToString(); }
+                var arr = JArray.Parse(File.ReadAllText(p));
+                var starts = new List<int>();
+                for (int i = 0; i < arr.Count; i++)
+                {
+                    var o = arr[i] as JObject;
+                    if (o != null && string.Equals((string)o["role"], "user", StringComparison.OrdinalIgnoreCase)) starts.Add(i);
+                }
+                for (int k = 0; k < starts.Count; k++)
+                {
+                    int start = starts[k];
+                    int end = k + 1 < starts.Count ? starts[k + 1] : arr.Count;
+                    var q = arr[start] as JObject;
+                    string qc = q != null ? ((string)q["content"] ?? "") : "";
+                    sb.Append("## Turn ").Append(k + 1).Append("\n\n**You:** ").Append(qc).Append("\n\n");
+                    for (int i = start + 1; i < end; i++)
+                    {
+                        var o = arr[i] as JObject;
+                        if (o == null) continue;
+                        string role = (string)o["role"] ?? "";
+                        string c = (string)o["content"] ?? "";
+                        if (string.IsNullOrWhiteSpace(c)) continue;
+                        sb.Append("**").Append(role).Append(":** ").Append(c).Append("\n\n");
+                    }
+                }
+            }
+            catch (Exception ex) { sb.Append("\n(transcript read failed: ").Append(BoundDetail(ex.Message, 200)).Append(")\n"); }
+            return sb.ToString();
+        }
+
+        private static JArray DiffLastAnswers(string sid)
+        {
+            var lines = new JArray();
+            try
+            {
+                string p = AgentSessionPath(sid);
+                if (!File.Exists(p)) return lines;
+                var arr = JArray.Parse(File.ReadAllText(p));
+                var answers = new List<string>();
+                foreach (var t in arr)
+                {
+                    var o = t as JObject;
+                    if (o == null || !string.Equals((string)o["role"], "assistant", StringComparison.OrdinalIgnoreCase)) continue;
+                    string c = (string)o["content"] ?? "";
+                    if (!string.IsNullOrWhiteSpace(c)) answers.Add(c);
+                }
+                if (answers.Count == 0) return lines;
+                string newer = answers[answers.Count - 1];
+                string older = answers.Count > 1 ? answers[answers.Count - 2] : "";
+                string[] aAll = older.Replace("\r\n", "\n").Split('\n');
+                int n = Math.Min(aAll.Length, 200);
+                string[] a = new string[n];
+                Array.Copy(aAll, a, n);
+                string[] bAll = newer.Replace("\r\n", "\n").Split('\n');
+                int m = Math.Min(bAll.Length, 200);
+                string[] b = new string[m];
+                Array.Copy(bAll, b, m);
+                int[,] dp = new int[n + 1, m + 1];
+                for (int i = n - 1; i >= 0; i--)
+                    for (int j = m - 1; j >= 0; j--)
+                        dp[i, j] = string.Equals(a[i], b[j], StringComparison.Ordinal) ? dp[i + 1, j + 1] + 1 : Math.Max(dp[i + 1, j], dp[i, j + 1]);
+                int x = 0, y = 0;
+                while (x < n && y < m)
+                {
+                    if (string.Equals(a[x], b[y], StringComparison.Ordinal))
+                    { lines.Add(new JObject { ["type"] = "same", ["text"] = a[x] }); x++; y++; }
+                    else if (dp[x + 1, y] >= dp[x, y + 1])
+                    { lines.Add(new JObject { ["type"] = "del", ["text"] = a[x] }); x++; }
+                    else
+                    { lines.Add(new JObject { ["type"] = "add", ["text"] = b[y] }); y++; }
+                }
+                while (x < n) { lines.Add(new JObject { ["type"] = "del", ["text"] = a[x] }); x++; }
+                while (y < m) { lines.Add(new JObject { ["type"] = "add", ["text"] = b[y] }); y++; }
+            }
+            catch { }
+            return lines;
+        }
+
+        private static JArray BuildTimeline(string sid)
+        {
+            var events = new JArray();
+            try
+            {
+                string p = AgentSessionPath(sid);
+                if (!File.Exists(p)) return events;
+                var arr = JArray.Parse(File.ReadAllText(p));
+                string at = File.GetLastWriteTimeUtc(p).ToString("o");
+                foreach (var t in arr)
+                {
+                    var o = t as JObject;
+                    if (o == null) continue;
+                    string role = (string)o["role"] ?? "";
+                    string content = (string)o["content"] ?? "";
+                    var tc = o["tool_calls"] as JArray;
+                    if (string.Equals(role, "user", StringComparison.OrdinalIgnoreCase))
+                        events.Add(new JObject { ["kind"] = "turn", ["label"] = content.Length > 160 ? content.Substring(0, 160) + "…" : content, ["at"] = at });
+                    else if (string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase) && tc != null && tc.Count > 0)
+                    {
+                        var names = new List<string>();
+                        foreach (var c in tc)
+                        {
+                            var co = c as JObject;
+                            var fn = co != null ? co["function"] as JObject : null;
+                            string nm = fn != null ? (string)fn["name"] : null;
+                            if (!string.IsNullOrWhiteSpace(nm)) names.Add(nm.Trim());
+                        }
+                        events.Add(new JObject { ["kind"] = "tool", ["label"] = string.Join(", ", names.ToArray()), ["at"] = at });
+                    }
+                    else if (string.Equals(role, "tool", StringComparison.OrdinalIgnoreCase))
+                        events.Add(new JObject { ["kind"] = (content ?? "").StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase) ? "error" : "tool", ["label"] = content.Length > 160 ? content.Substring(0, 160) + "…" : content, ["at"] = at });
+                    else if (string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(content))
+                        events.Add(new JObject { ["kind"] = "turn", ["label"] = content.Length > 160 ? content.Substring(0, 160) + "…" : content, ["at"] = at });
+                }
+            }
+            catch { }
+            return events;
+        }
+
+        private static void ApplyWorkStyle(string style)
+        {
+            if (string.Equals(style, "review-first", StringComparison.OrdinalIgnoreCase))
+            {
+                McpBuild.ApproveMaster = false;
+                McpBuild.ApproveRead = true;
+                McpBuild.ApproveBuild = true;
+                McpBuild.ApproveDestructive = false;
+                return;
+            }
+            McpBuild.ApproveMaster = true;
+            McpBuild.ApproveRead = true;
+            McpBuild.ApproveBuild = true;
+            McpBuild.ApproveDestructive = false;
+        }
+
+        private static int DefaultMaxOutput()
+        {
+            try
+            {
+                var cfg = ReadForgeConfig();
+                string slug = PresetSlugFor((string)cfg["provider"], (string)cfg["baseUrl"]);
+                int maxOut = ProviderFactory.MaxOutputTokensFor(slug, (string)cfg["model"], 0);
+                if (maxOut > 0) return maxOut;
+            }
+            catch { }
+            return 16000;
+        }
+
+        private void LoadHostPreferences()
+        {
+            try
+            {
+                var cfg = ReadForgeConfig();
+                string ws = (string)cfg["workStyle"];
+                if (!string.IsNullOrWhiteSpace(ws)) ApplyWorkStyle(ws.Trim());
+                int pct = 60, reserve = Math.Min(20000, DefaultMaxOutput()), tail = 2;
+                try { pct = Convert.ToInt32((object)cfg["compactThresholdPct"]); } catch { }
+                try { reserve = Convert.ToInt32((object)cfg["compactReservedTokens"]); } catch { }
+                try { tail = Convert.ToInt32((object)cfg["compactTailTurns"]); } catch { }
+                if (pct < 1) pct = 1; if (pct > 100) pct = 100;
+                if (reserve < 0) reserve = 0;
+                if (tail < 0) tail = 0; if (tail > 10) tail = 10;
+                bool compactOn = true;
+                try { var cv = cfg["compactOn"]; if (cv != null) compactOn = (bool)cv; } catch { }
+                try { McpBuild.ConfigureCompaction(compactOn, pct, reserve, tail); } catch { }
+                CompactReservedTokens = reserve;
+                CompactTailTurns = tail;
+            }
+            catch { }
+        }
+
+        private static string ModelKey(string model)
+        {
+            string k = SanitizeCustomSlug(model);
+            return string.IsNullOrWhiteSpace(k) ? "default" : k;
+        }
+
+        private void SendProviderSnapshot()
+        {
+            try
+            {
+                var cfg = ReadForgeConfig();
+                string p = (string)cfg["provider"], bu = (string)cfg["baseUrl"];
+                string slug = PresetSlugFor(p, bu);
+                Send(new { type = "provider", slug, provider = p, baseUrl = bu, displayName = ProviderFactory.DisplayNameFor(p, bu), model = (string)cfg["model"], dynamic = IsDynamicProvider(p), hasKey = !string.IsNullOrWhiteSpace(StoredProviderKeyForSlug(slug, p)), customModels = GetCustomModels(slug), customProviders = GetCustomProviders() });
+            }
+            catch { }
+        }
+
+        private static string ExpandEnvTokens(string value, List<string> missing)
+        {
+            if (string.IsNullOrEmpty(value)) return value;
+            string s = value;
+            try
+            {
+                s = System.Text.RegularExpressions.Regex.Replace(s, @"\{env:([A-Za-z_][A-Za-z0-9_]*)\}", m => EnvToken(m.Groups[1].Value, m.Value, missing));
+                s = System.Text.RegularExpressions.Regex.Replace(s, @"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", m => EnvToken(m.Groups[1].Value, m.Value, missing));
+                s = System.Text.RegularExpressions.Regex.Replace(s, @"%([A-Za-z_][A-Za-z0-9_]*)%", m => EnvToken(m.Groups[1].Value, m.Value, missing));
+            }
+            catch { }
+            return s;
+        }
+
+        private static string EnvToken(string name, string original, List<string> missing)
+        {
+            try
+            {
+                string v = System.Environment.GetEnvironmentVariable(name);
+                if (!string.IsNullOrEmpty(v)) return v;
+            }
+            catch { }
+            if (missing != null && !missing.Contains(name)) missing.Add(name);
+            return original;
+        }
+
+        private static JObject ParseProviderHeaders(dynamic msg, List<string> missing)
+        {
+            JObject raw = null;
+            try { raw = msg.headers as JObject; } catch { }
+            if (raw == null || raw.Count == 0) return null;
+            var clean = new JObject();
+            foreach (var pr in raw.Properties())
+            {
+                string v = null;
+                try { v = (string)pr.Value; } catch { }
+                if (v == null) continue;
+                clean[pr.Name] = ExpandEnvTokens(v, missing);
+            }
+            return clean.Count > 0 ? clean : null;
+        }
+
+        private static string[] McpStringArray(JToken tok)
+        {
+            var arr = tok as JArray;
+            var clean = new List<string>();
+            if (arr == null) return clean.ToArray();
+            foreach (var t in arr)
+            {
+                string s = null;
+                try { s = (string)t; } catch { }
+                if (!string.IsNullOrWhiteSpace(s) && clean.Count < 200) clean.Add(s.Trim());
+            }
+            return clean.ToArray();
+        }
+
+        private static bool IsFreeModel(string id, string slug)
+        {
+            string m = (id ?? "").Trim().ToLowerInvariant();
+            if (m.Contains("-free") || m.Contains(":free") || m.Contains("free-")) return true;
+            if (string.Equals(slug, "opencode", StringComparison.OrdinalIgnoreCase) && m.Contains("flash")) return true;
+            return false;
+        }
+
+        private static bool IsByokSlug(string slug)
+        {
+            string s = (slug ?? "").Trim().ToLowerInvariant();
+            if (s.Length == 0) return true;
+            if (s == "opencode" || s == "ollama") return false;
+            return true;
+        }
+
+        private static bool IsVisionModel(string id)
+        {
+            string m = (id ?? "").Trim().ToLowerInvariant();
+            return m.Contains("vision") || m.Contains("gemini") || m.Contains("gpt-4o") || m.Contains("claude") || m.Contains("kimi");
+        }
+
+        private static JObject ModelMeta(string id, string slug)
+        {
+            bool free = IsFreeModel(id, slug), byok = IsByokSlug(slug);
+            int window = 0, maxOut = 0;
+            bool exact = false, reasoning = false, temperature = false, pricingUnknown = true;
+            string label = id;
+            JObject pricing = null;
+            try
+            {
+                var info = ProviderFactory.ModelInfo(slug, id);
+                if (info != null)
+                {
+                    label = (string)info["label"] ?? label;
+                    free = (bool?)info["free"] ?? free;
+                    byok = (bool?)info["byok"] ?? byok;
+                    window = (int?)info["contextWindow"] ?? 0;
+                    maxOut = (int?)info["maxOutput"] ?? 0;
+                    exact = (bool?)info["contextWindowExact"] ?? false;
+                    reasoning = ((bool?)info["reasoning"] ?? false) || ProviderFactory.IsReasoningModel(id);
+                    temperature = (bool?)info["temperatureSupported"] ?? ProviderFactory.SupportsTemperature(id);
+                    pricingUnknown = (bool?)info["pricingUnknown"] ?? true;
+                    var p = info["pricing"] as JObject;
+                    if (p != null) { pricing = (JObject)p.DeepClone(); pricingUnknown = false; }
+                }
+            }
+            catch
+            {
+                try { var w = ProviderFactory.ContextWindowFor(id); window = w.Item1; exact = w.Item2; } catch { }
+                try { reasoning = ProviderFactory.IsReasoningModel(id); } catch { }
+                try { temperature = ProviderFactory.SupportsTemperature(id); } catch { }
+            }
+            if (pricing == null) pricingUnknown = true;
+            var caps = new JArray();
+            if (reasoning) caps.Add("reasoning");
+            caps.Add("tools");
+            if (temperature) caps.Add("temperature");
+            if (IsVisionModel(id)) caps.Add("vision");
+            if (free) caps.Add("free");
+            return new JObject
+            {
+                ["id"] = id,
+                ["label"] = label,
+                ["free"] = free,
+                ["byok"] = byok,
+                ["pricing"] = pricing,
+                ["pricingUnknown"] = pricingUnknown,
+                ["contextWindow"] = window,
+                ["contextWindowExact"] = exact,
+                ["maxOutput"] = maxOut,
+                ["capabilities"] = caps,
+                ["reasoning"] = reasoning,
+                ["temperatureSupported"] = temperature
+            };
+        }
+
+        private static JArray ModelMetaArray(IEnumerable<string> ids, string slug)
+        {
+            var metas = new JArray();
+            if (ids == null) return metas;
+            foreach (var id in ids) metas.Add(ModelMeta(id ?? "", slug));
+            return metas;
+        }
+
+        private static object WithModelMeta(object payload)
+        {
+            Newtonsoft.Json.Linq.JObject jo = payload as Newtonsoft.Json.Linq.JObject;
+            if (jo == null) { try { jo = Newtonsoft.Json.Linq.JObject.FromObject(payload); } catch { return payload; } }
+            else { try { jo = (Newtonsoft.Json.Linq.JObject)jo.DeepClone(); } catch { return payload; } }
+            string t = null;
+            try { t = (string)jo["type"]; } catch { return payload; }
+            if (t != "models" && t != "provider") return payload;
+            try
+            {
+                var metas = new JArray();
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                if (t == "models")
+                {
+                    var ids = jo["models"] as JArray;
+                    string slug = null;
+                    try { slug = (string)jo["slug"]; } catch { }
+                    if (string.IsNullOrWhiteSpace(slug))
+                    { try { var mcfg = ReadForgeConfig(); slug = PresetSlugFor((string)mcfg["provider"], (string)mcfg["baseUrl"]); } catch { } }
+                    if (ids != null) foreach (var id in ids)
+                    {
+                        string s = null;
+                        try { s = (string)id; } catch { }
+                        if (string.IsNullOrWhiteSpace(s) || !seen.Add(s)) continue;
+                        metas.Add(ModelMeta(s, slug));
+                    }
+                    if (jo["modelMeta"] == null) jo["modelMeta"] = metas;
+                }
+                else
+                {
+                    string slug = null, cur = null;
+                    try { slug = (string)jo["slug"]; } catch { }
+                    try { cur = (string)jo["model"]; } catch { }
+                    if (!string.IsNullOrWhiteSpace(cur) && seen.Add(cur)) metas.Add(ModelMeta(cur, slug));
+                    foreach (var known in KnownSlugs)
+                    {
+                        var preset = ProviderPresetFor(known);
+                        if (preset == null || string.IsNullOrWhiteSpace(preset.Model)) continue;
+                        if (seen.Add(preset.Model)) metas.Add(ModelMeta(preset.Model, known));
+                    }
+                    var customs = GetCustomModels(slug);
+                    foreach (var c in customs)
+                    {
+                        string cid = c is JObject ? (string)((JObject)c)["id"] : null;
+                        if (string.IsNullOrWhiteSpace(cid) || !seen.Add(cid)) continue;
+                        metas.Add(ModelMeta(cid, slug));
+                    }
+                    jo["modelMeta"] = metas;
+                    try { jo["reasoningEffortCapability"] = ProviderFactory.ReasoningEffortCapabilityTable(); } catch { }
+                    try
+                    {
+                        var cfg = ReadForgeConfig();
+                        jo["workStyle"] = (string)cfg["workStyle"] ?? "high-autonomy";
+                        jo["reasoningEffort"] = (string)cfg["reasoningEffort"] ?? "medium";
+                        try { jo["reasoningEffortSupported"] = ProviderFactory.SupportsReasoningEffort(slug); } catch { }
+                        try { jo["compactThresholdPct"] = Convert.ToInt32((object)cfg["compactThresholdPct"]); } catch { jo["compactThresholdPct"] = McpBuild.CompactAt; }
+                        jo["compactReservedTokens"] = CompactReservedTokens;
+                        jo["compactTailTurns"] = CompactTailTurns;
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return jo;
+        }
+
         private void Send(object payload)
         {
             // Never throws: every caller runs on paths that end in async-void (OnWebMessage) or
@@ -2999,6 +4615,7 @@ namespace Forge.SolidWorks
                 // (that was the "stuck on On itâ€¦" bug â€” the panel never got the done/status messages).
                 object wire = payload;
                 try { wire = WithCtx(payload); } catch { wire = payload; }
+                try { wire = WithModelMeta(wire); } catch { }
                 string json = JsonConvert.SerializeObject(wire);
                 var web = _web;
                 if (web == null || web.IsDisposed) return;

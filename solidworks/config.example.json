@@ -1,5 +1,6 @@
 {
   "provider": "openai-compatible",
   "baseUrl": "https://api.deepseek.com/v1",
-  "model": "deepseek-flash"
+  "model": "deepseek-flash",
+  "autoApprove": { "master": true, "read": true, "build": true, "destructive": false }
 }

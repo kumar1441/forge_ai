@@ -46,7 +46,8 @@ namespace Forge.Providers
             try
             {
                 byte[] plain = Encoding.UTF8.GetBytes(apiKey);
-                protectedBlob = ProtectedData.Protect(plain, null, DataProtectionScope.CurrentUser);
+                try { protectedBlob = ProtectedData.Protect(plain, null, DataProtectionScope.CurrentUser); }
+                finally { Array.Clear(plain, 0, plain.Length); }
             }
             catch (CryptographicException ex)
             {
@@ -103,8 +104,12 @@ namespace Forge.Providers
                 string b64 = File.ReadAllText(path).Trim();
                 byte[] protectedBlob = Convert.FromBase64String(b64);
                 byte[] plain = ProtectedData.Unprotect(protectedBlob, null, DataProtectionScope.CurrentUser);
-                string s = Encoding.UTF8.GetString(plain);
-                return string.IsNullOrWhiteSpace(s) ? null : s;
+                try
+                {
+                    string s = Encoding.UTF8.GetString(plain);
+                    return string.IsNullOrWhiteSpace(s) ? null : s;
+                }
+                finally { Array.Clear(plain, 0, plain.Length); }
             }
             catch
             {

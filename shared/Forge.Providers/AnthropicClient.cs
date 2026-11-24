@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Text;
@@ -101,12 +102,221 @@ namespace Forge.Providers
             }
         }
 
-        public Task<ProviderResult> CompleteStreamingAsync(
+        public async Task<ProviderResult> CompleteStreamingAsync(
             IReadOnlyList<ChatMessage> messages, ProviderOptions opts, CancellationToken ct, System.Action<string, string> onDelta)
         {
-            // Faulted task (not a synchronous throw) so `var t = ...; await t` callers see the same error.
-            try { throw new ProviderException("Streaming is not supported for the Anthropic provider — Enhance and planning fall back to a single fast call automatically; the full agent build loop needs an OpenAI-compatible model (switch provider in Settings → Provider to build)."); }
-            catch (ProviderException ex) { var tcs = new TaskCompletionSource<ProviderResult>(); tcs.SetException(ex); return tcs.Task; }
+            if (messages == null) throw new ArgumentNullException("messages");
+            string model = (opts != null && !string.IsNullOrWhiteSpace(opts.Model)) ? opts.Model : _defaultModel;
+            if (string.IsNullOrWhiteSpace(model))
+                throw new ProviderException("No model selected for " + ProviderFactory.DisplayNameFor(Id, _baseUrl) + " — pick one in the model picker (▲), then resend.");
+            string noKeyS = null;
+            try { noKeyS = ProviderFactory.MissingKeyMessage(Id, _baseUrl); } catch { noKeyS = null; }
+            if (!string.IsNullOrWhiteSpace(noKeyS) && string.IsNullOrWhiteSpace(_apiKey)) throw new ProviderException(noKeyS);
+            string body = BuildBody(messages, opts, model, true);
+            return await CompleteStreamingBodyAsync(body, model, opts, ct, onDelta);
+        }
+
+        private async Task<ProviderResult> CompleteStreamingBodyAsync(
+            string body, string model, ProviderOptions opts, CancellationToken ct, Action<string, string> onDelta)
+        {
+            string url = BuildUrl(opts);
+            var contentAcc = new StringBuilder(8192);
+            var reasonAcc = new StringBuilder(4096);
+            var toolParts = new Dictionary<int, ToolCall>();
+            string gotModel = null;
+            int tokIn = 0, tokOut = 0;
+            string finishReason = null;
+            string firstNonData = null;
+            string evtType = null;
+
+            HttpResponseMessage resp = null;
+            for (int attempt = 0; ; attempt++)
+            {
+                HttpRequestMessage req0;
+                try { req0 = new HttpRequestMessage(HttpMethod.Post, url); }
+                catch (Exception ex) { throw new ProviderException("Provider address looks wrong (bad base URL \"" + url + "\") — check the provider URL in settings, then resend: " + Truncate(ex.Message), ex); }
+                if (!string.IsNullOrEmpty(_apiKey))
+                    req0.Headers.TryAddWithoutValidation("x-api-key", _apiKey);
+                req0.Headers.TryAddWithoutValidation("anthropic-version", ApiVersion);
+                req0.Content = new StringContent(body, Encoding.UTF8, "application/json");
+                try { resp = await Http.SendAsync(req0, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false); }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { try { req0.Dispose(); } catch { } throw; }
+                catch (TaskCanceledException) { try { req0.Dispose(); } catch { } throw new ProviderException("Provider request timed out after 10 minutes — the model is overloaded; try again or switch to a faster model."); }
+                catch (HttpRequestException ex) { try { req0.Dispose(); } catch { } throw new ProviderException("Provider network failure (" + Truncate(ex.Message) + ") — check the connection and try again.", ex); }
+                catch (InvalidOperationException ex) { try { req0.Dispose(); } catch { } throw new ProviderException("Provider address looks wrong (bad base URL \"" + url + "\") — check the provider URL in settings, then resend: " + Truncate(ex.Message), ex); }
+                catch (UriFormatException ex) { try { req0.Dispose(); } catch { } throw new ProviderException("Provider address looks wrong (bad base URL \"" + url + "\") — check the provider URL in settings, then resend: " + Truncate(ex.Message), ex); }
+                try { req0.Dispose(); } catch { }
+                if (resp.IsSuccessStatusCode) break;
+                string t = "";
+                try { t = await resp.Content.ReadAsStringAsync().ConfigureAwait(false); }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { try { resp.Dispose(); } catch { } resp = null; throw; }
+                catch { }
+                ct.ThrowIfCancellationRequested();
+                int code = (int)resp.StatusCode;
+                try { resp.Dispose(); } catch { }
+                resp = null;
+                bool transient = code == 408 || code == 429 || code == 500 || code == 502 || code == 503 || code == 504 || code == 529;
+                if (!transient || attempt >= 3)
+                {
+                    if (code == 401 || code == 403) throw new ProviderException(ProviderFactory.AuthRefusedMessage(Id, _baseUrl, code));
+                    throw new ProviderException("Provider request failed (" + HttpHint(code, (System.Net.HttpStatusCode)code) + "): " + Truncate(t) + " — try again; if it repeats, wait and resend or switch model.");
+                }
+                try { await Task.Delay(TimeSpan.FromSeconds(5 * (attempt + 1)), ct).ConfigureAwait(false); }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            }
+
+            ct.ThrowIfCancellationRequested();
+            string pendingFrag = null;
+            using (resp)
+            using (var stream = await resp.Content.ReadAsStreamAsync().ConfigureAwait(false))
+            using (var reader = new StreamReader(stream, Encoding.UTF8))
+            using (ct.Register(() => { try { resp.Dispose(); } catch { } }))
+            {
+                ct.ThrowIfCancellationRequested();
+                string line;
+                try
+                {
+                    while ((line = await reader.ReadLineAsync().ConfigureAwait(false)) != null)
+                    {
+                        if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
+                        line = line.Trim().TrimStart((char)0xFEFF);
+                        if (line.Length == 0) continue;
+                        if (line[0] == ':') continue;
+                        if (line.StartsWith("event:", StringComparison.OrdinalIgnoreCase))
+                        {
+                            evtType = line.Substring(6).Trim();
+                            continue;
+                        }
+                        if (line == "data") line = "data:";
+                        if (line.Length < 5 || !line.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (firstNonData == null && line.Length > 0)
+                                firstNonData = line.Length > 500 ? line.Substring(0, 500) : line;
+                            continue;
+                        }
+                        string data = line.Substring(5).Trim().TrimStart((char)0xFEFF);
+                        if (data.Length == 0) continue;
+                        if (pendingFrag != null) { data = pendingFrag + data; pendingFrag = null; }
+                        JObject evt;
+                        try { evt = JObject.Parse(data); }
+                        catch
+                        {
+                            pendingFrag = data.Length < 100000 ? data : null;
+                            continue;
+                        }
+                        string type = (string)evt["type"];
+                        if (string.IsNullOrEmpty(type) && !string.IsNullOrEmpty(evtType)) type = evtType;
+                        if (type == "error")
+                        {
+                            string em = (string)evt["error"]?["message"] ?? (string)evt["message"];
+                            string ec = (string)evt["error"]?["type"];
+                            throw new ProviderException("Provider stream error" + (string.IsNullOrWhiteSpace(ec) ? "" : " [" + ec.Trim() + "]") + " (" + Truncate(em ?? evt.ToString()) + ") — try again; if it repeats, switch model.");
+                        }
+                        if (type == "message_start")
+                        {
+                            var msg = evt["message"] as JObject;
+                            if (msg != null)
+                            {
+                                string mn = (string)msg["model"];
+                                if (!string.IsNullOrWhiteSpace(mn)) gotModel = mn;
+                                try
+                                {
+                                    var usage = msg["usage"];
+                                    if (usage != null) tokIn = (int?)usage["input_tokens"] ?? tokIn;
+                                }
+                                catch { }
+                            }
+                            continue;
+                        }
+                        if (type == "content_block_start")
+                        {
+                            int idx = (int?)evt["index"] ?? 0;
+                            var cb = evt["content_block"] as JObject;
+                            string bt = cb != null ? (string)cb["type"] : null;
+                            if (bt == "tool_use")
+                                toolParts[idx] = new ToolCall { Id = (string)cb["id"], Name = (string)cb["name"], ArgumentsJson = "" };
+                            continue;
+                        }
+                        if (type == "content_block_delta")
+                        {
+                            var delta = evt["delta"] as JObject;
+                            if (delta != null)
+                            {
+                                string dt = (string)delta["type"];
+                                string dtx = (string)delta["text"];
+                                string dth = (string)delta["thinking"];
+                                if (!string.IsNullOrEmpty(dtx))
+                                {
+                                    if (contentAcc.Length < 200000) contentAcc.Append(dtx.Length + contentAcc.Length > 200000 ? dtx.Substring(0, 200000 - contentAcc.Length) : dtx);
+                                    try { if (onDelta != null) onDelta("content", dtx); } catch { }
+                                }
+                                if (!string.IsNullOrEmpty(dth))
+                                {
+                                    if (reasonAcc.Length < 100000) reasonAcc.Append(dth.Length + reasonAcc.Length > 100000 ? dth.Substring(0, 100000 - reasonAcc.Length) : dth);
+                                    try { if (onDelta != null) onDelta("reasoning", dth); } catch { }
+                                }
+                                if (dt == "input_json_delta")
+                                {
+                                    string frag = (string)delta["partial_json"];
+                                    if (!string.IsNullOrEmpty(frag))
+                                    {
+                                        int idx = (int?)evt["index"] ?? 0;
+                                        ToolCall part;
+                                        if (!toolParts.TryGetValue(idx, out part)) { part = new ToolCall { ArgumentsJson = "" }; toolParts[idx] = part; }
+                                        if (part.ArgumentsJson == null || part.ArgumentsJson.Length < 100000) part.ArgumentsJson = (part.ArgumentsJson ?? "") + frag;
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        if (type == "message_delta")
+                        {
+                            var d = evt["delta"] as JObject;
+                            if (d != null)
+                            {
+                                string sr = (string)d["stop_reason"];
+                                if (!string.IsNullOrEmpty(sr)) finishReason = sr;
+                            }
+                            try
+                            {
+                                var usage = evt["usage"];
+                                if (usage != null) tokOut = (int?)usage["output_tokens"] ?? tokOut;
+                            }
+                            catch { }
+                            continue;
+                        }
+                        if (type == "message_stop") break;
+                    }
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                catch (ObjectDisposedException) when (ct.IsCancellationRequested) { throw new OperationCanceledException(ct); }
+                catch (IOException) when (ct.IsCancellationRequested) { throw new OperationCanceledException(ct); }
+            }
+
+            string content = contentAcc.ToString();
+            string reasoning = reasonAcc.ToString();
+            if (string.Equals(finishReason, "max_tokens", StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrWhiteSpace(content) && !string.IsNullOrWhiteSpace(reasoning))
+                    throw new ProviderException("Response truncated at the output-token limit while thinking — partial reasoning discarded. Retry or shorten the conversation.");
+                throw new ProviderException("Response was truncated at the output-token limit (stop_reason=max_tokens).");
+            }
+            if (string.IsNullOrWhiteSpace(content)) content = reasoning;
+            var ordered = new List<int>(toolParts.Keys);
+            ordered.Sort();
+            var calls = new List<ToolCall>(ordered.Count);
+            foreach (int k in ordered) calls.Add(toolParts[k]);
+            if (string.IsNullOrWhiteSpace(content) && calls.Count == 0)
+                throw new ProviderException("Provider returned no content" + (string.IsNullOrEmpty(firstNonData) ? "" : " (detail: " + Truncate(firstNonData) + ")") + " — try again or rephrase.");
+            return new ProviderResult
+            {
+                Text = content,
+                Reasoning = string.IsNullOrEmpty(reasoning) ? null : reasoning,
+                TokIn = tokIn,
+                TokOut = tokOut,
+                Model = gotModel ?? model,
+                ToolCalls = calls
+            };
         }
 
         private string BuildUrl(ProviderOptions opts)
@@ -117,14 +327,32 @@ namespace Forge.Providers
             return root + "/messages";
         }
 
-        private static string BuildBody(IReadOnlyList<ChatMessage> messages, ProviderOptions opts, string model)
+        private static int ThinkingBudget(string effort)
         {
+            if (string.IsNullOrWhiteSpace(effort)) return 0;
+            switch (effort.Trim().ToLowerInvariant())
+            {
+                case "low": return 1024;
+                case "medium": return 4096;
+                case "high": return 8192;
+                case "xhigh": return 16384;
+                case "max": return 32768;
+                default: return 0;
+            }
+        }
+
+        private static string BuildBody(IReadOnlyList<ChatMessage> messages, ProviderOptions opts, string model, bool stream = false)
+        {
+            int maxTokens = ProviderFactory.ClampOutputTokens(model,
+                (opts != null && opts.MaxTokens.HasValue) ? opts.MaxTokens.Value : 1024);
+            string effort = opts != null ? opts.ReasoningEffort : null;
+            int budget = ProviderFactory.SupportsExtendedThinking(model) ? ThinkingBudget(effort) : 0;
+            if (budget > 0 && maxTokens < budget + 1024) maxTokens = budget + 1024;
             var j = new JObject();
             j["model"] = model;
-            j["max_tokens"] = (opts != null && opts.MaxTokens.HasValue) ? opts.MaxTokens.Value : 1024;
-            // Central gate (callers with hardcoded Temperature=0 still omit it here): reasoning
-            // variants reject custom temperatures, so unsupported models send no field at all.
-            if (opts != null && opts.Temperature.HasValue && ProviderFactory.SupportsTemperature(model)) j["temperature"] = opts.Temperature.Value;
+            j["max_tokens"] = maxTokens;
+            if (budget > 0) j["thinking"] = new JObject { ["type"] = "enabled", ["budget_tokens"] = budget };
+            if (opts != null && opts.Temperature.HasValue && budget == 0 && ProviderFactory.SupportsTemperature(model)) j["temperature"] = opts.Temperature.Value;
 
             var system = new StringBuilder();
             var arr = new JArray();
@@ -153,6 +381,7 @@ namespace Forge.Providers
                 throw new ProviderException("Provider request has no user/assistant messages to send.");
             if (system.Length > 0) j["system"] = system.ToString();
             j["messages"] = arr;
+            if (stream) j["stream"] = true;
 
             return j.ToString(Newtonsoft.Json.Formatting.None);
         }
@@ -222,6 +451,7 @@ namespace Forge.Providers
             return new ProviderResult
             {
                 Text = outText ?? "",
+                Reasoning = think.Length > 0 ? think.ToString() : null,
                 TokIn = tokIn,
                 TokOut = tokOut,
                 Model = (string)j["model"] ?? fallbackModel,

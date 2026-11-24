@@ -35,10 +35,18 @@ namespace Forge.Providers
             try { provider = (string)cfg["provider"]; } catch { provider = null; }
             if (string.IsNullOrWhiteSpace(provider)) return null;
             try { baseUrl = (string)cfg["baseUrl"]; } catch { baseUrl = null; }
-            // Slug-only configs (provider "opencode" with no baseUrl) fall back to the zen
-            // gateway instead of silently drifting to api.openai.com.
-            if (string.Equals((provider ?? "").Trim(), "opencode", StringComparison.OrdinalIgnoreCase)
-                && string.IsNullOrWhiteSpace(baseUrl)) baseUrl = "https://opencode.ai/zen/v1";
+            // Slug-only configs (provider "opencode"/"opencode-go" with no baseUrl) fall back
+            // to the matching zen gateway instead of silently drifting to api.openai.com.
+            if (string.IsNullOrWhiteSpace(baseUrl))
+            {
+                // OpenCode Go must stay on zen/go/v1 (NOT inference/go): the Go gateway keys
+                // routing/prompt caching on x-opencode-session, which OpenAiCompatibleClient
+                // sends only for /zen/go base URLs. Changing this breaks session header detection.
+                if (string.Equals((provider ?? "").Trim(), "opencode-go", StringComparison.OrdinalIgnoreCase))
+                    baseUrl = "https://opencode.ai/zen/go/v1";
+                else if (string.Equals((provider ?? "").Trim(), "opencode", StringComparison.OrdinalIgnoreCase))
+                    baseUrl = "https://opencode.ai/zen/v1";
+            }
             try { model = (string)cfg["model"]; } catch { model = null; }
             if (model != null) model = model.Trim();
             if (model != null && model.Length == 0) model = null;
@@ -55,7 +63,8 @@ namespace Forge.Providers
                 try { apiKey = Environment.GetEnvironmentVariable("FORGE_PROVIDER_KEY"); } catch { }
             }
             // OpenCode Zen (Kilo parity): no key anywhere -> literal bearer token "public";
-            // the gateway then serves only zero-cost models. Never applied to other slugs.
+            // the gateway then serves only zero-cost models. Never applied to other slugs
+            // (in particular opencode-go: that gateway needs a paid subscription key).
             if (string.IsNullOrEmpty(apiKey)
                 && string.Equals(slug, "opencode", System.StringComparison.OrdinalIgnoreCase))
             {
@@ -74,6 +83,7 @@ namespace Forge.Providers
                 case "nvidia":
                 case "ollama":
                 case "opencode":
+                case "opencode-go":
                     return new OpenAiCompatibleClient(apiKey, baseUrl, model);
                 case "anthropic":
                     return new AnthropicClient(apiKey, baseUrl, model);
@@ -112,7 +122,9 @@ namespace Forge.Providers
         /// </summary>
         public static bool SupportsTemperature(string model)
         {
-            return !IsReasoningModel(model);
+            if (IsReasoningModel(model)) return false;
+            if (!string.IsNullOrWhiteSpace(model) && model.Trim().ToLowerInvariant().Contains("magistral")) return false;
+            return true;
         }
 
         /// <summary>
@@ -129,6 +141,112 @@ namespace Forge.Providers
             return false;
         }
 
+        private static readonly string[] ReasoningEffortYesSlugs = { "openai", "openrouter", "xai", "grok" };
+        private static readonly string[] ReasoningEffortNoSlugs = { "deepseek", "anthropic", "ollama", "nvidia", "opencode", "opencode-go" };
+        private static readonly string[] ByokSlugs = { "openai", "deepseek", "openrouter", "anthropic", "xai", "grok", "nvidia", "opencode-go" };
+        private static readonly string[] FreeSlugs = { "opencode", "ollama", "local", "public" };
+
+        public static JObject ReasoningEffortCapabilityTable()
+        {
+            var j = new JObject();
+            foreach (var s in ReasoningEffortYesSlugs) j[s] = true;
+            foreach (var s in ReasoningEffortNoSlugs) j[s] = false;
+            return j;
+        }
+
+        public static bool SupportsReasoningEffort(string slugOrModel)
+        {
+            if (string.IsNullOrWhiteSpace(slugOrModel)) return false;
+            string s = slugOrModel.Trim().ToLowerInvariant();
+            foreach (var x in ReasoningEffortYesSlugs) if (s == x) return true;
+            foreach (var x in ReasoningEffortNoSlugs) if (s == x) return false;
+            if (s.Contains("deepseek")) return false;
+            if (s.Contains("grok")) return true;
+            return System.Text.RegularExpressions.Regex.IsMatch(s, @"(^|[^a-z0-9])(o[1-9]|gpt-[56]|codex)([^a-z0-9]|$)");
+        }
+
+        public static bool AcceptsReasoningEffort(string baseUrl, string model)
+        {
+            string bu = (baseUrl ?? "").Trim().ToLowerInvariant();
+            if (bu.Contains("deepseek")) return false;
+            string slug = null;
+            try { slug = SlugFor(null, bu); } catch { slug = null; }
+            string sl = (slug ?? "").Trim().ToLowerInvariant();
+            if (sl == "deepseek" || sl == "anthropic" || sl == "ollama" || sl == "nvidia" || sl == "opencode" || sl == "opencode-go") return false;
+            if (bu.Contains("api.x.ai") || bu.Contains("xai") || bu.Contains("grok")) return true;
+            string m = (model ?? "").Trim().ToLowerInvariant();
+            if (m.Contains("deepseek")) return false;
+            if (m.Contains("grok")) return true;
+            return System.Text.RegularExpressions.Regex.IsMatch(m, @"(^|[^a-z0-9])(o[1-9]|gpt-[56]|codex)([^a-z0-9]|$)");
+        }
+
+        public static bool SupportsExtendedThinking(string model)
+        {
+            if (IsReasoningModel(model)) return true;
+            string m = (model ?? "").Trim().ToLowerInvariant();
+            return m.Contains("claude");
+        }
+
+        public static int ClampOutputTokens(string model, int requested)
+        {
+            int window = 128000;
+            try { var cw = ContextWindowFor(model); if (cw != null && cw.Item1 > 0) window = cw.Item1; } catch { }
+            int budget = System.Math.Max(4096, window / 2);
+            return requested > 0 ? System.Math.Min(requested, budget) : budget;
+        }
+
+        public static int MaxOutputTokensFor(string slug, string modelId, int requested)
+        {
+            if (string.IsNullOrWhiteSpace(modelId)) return 0;
+            var cw = ContextWindowFor(modelId);
+            if (cw == null || !cw.Item2 || cw.Item1 <= 0) return 0;
+            int cap = ClampOutputTokens(modelId, int.MaxValue);
+            return requested > 0 ? System.Math.Min(requested, cap) : cap;
+        }
+
+        private static string LabelFor(string modelId, string slug)
+        {
+            if (string.IsNullOrWhiteSpace(modelId)) return DisplayNameFor(slug, null);
+            string m = modelId.Trim();
+            string[] parts = m.Split('-');
+            for (int i = 0; i < parts.Length; i++)
+                if (parts[i].Length > 0) parts[i] = char.ToUpperInvariant(parts[i][0]) + parts[i].Substring(1);
+            return string.Join(" ", parts);
+        }
+
+        public static JObject ModelInfo(string slug, string modelId)
+        {
+            string s = (slug ?? "").Trim().ToLowerInvariant();
+            var cw = ContextWindowFor(modelId);
+            int window = cw != null && cw.Item1 > 0 ? cw.Item1 : 128000;
+            bool exact = cw != null && cw.Item2;
+            bool free = false, byok = false;
+            foreach (var x in FreeSlugs) if (s == x) free = true;
+            foreach (var x in ByokSlugs) if (s == x) byok = true;
+            bool thinking = string.Equals(s, "anthropic", System.StringComparison.OrdinalIgnoreCase) && SupportsExtendedThinking(modelId);
+            bool reasoning = IsReasoningModel(modelId) || thinking;
+            bool temp = SupportsTemperature(modelId) && !thinking;
+            var caps = new JArray { "streaming", "tools", "max-output-tokens" };
+            if (reasoning) caps.Add("reasoning");
+            if (thinking) caps.Add("thinking");
+            if (temp) caps.Add("temperature");
+            return new JObject
+            {
+                ["id"] = modelId ?? "",
+                ["label"] = LabelFor(modelId, s),
+                ["free"] = free,
+                ["byok"] = byok,
+                ["pricing"] = JValue.CreateNull(),
+                ["pricingUnknown"] = true,
+                ["contextWindow"] = window,
+                ["contextWindowExact"] = exact,
+                ["maxOutput"] = MaxOutputTokensFor(s, modelId, 0),
+                ["capabilities"] = caps,
+                ["reasoning"] = reasoning,
+                ["temperatureSupported"] = temp
+            };
+        }
+
         /// <summary>
         /// Approximate context window (input tokens) for a model id. Returns
         /// (window, exact): exact=false means the id was unknown and the 128k
@@ -142,11 +260,18 @@ namespace Forge.Providers
                 string m = (model ?? "").Trim().ToLowerInvariant();
                 if (m.Length == 0) return Tuple.Create(128000, false);
                 if (m.Contains("claude")) return Tuple.Create(200000, true); // haiku-4-5/sonnet/opus incl. 4-5 family
+                if (m.Contains("gpt-6") || System.Text.RegularExpressions.Regex.IsMatch(m, @"gpt-5\.[4-9]"))
+                    return Tuple.Create(m.Contains("mini") || m.Contains("nano") ? 400000 : 1050000, true);
                 if (m.Contains("gpt-5")) return Tuple.Create(400000, true);
                 if (m.Contains("gpt-3.5")) return Tuple.Create(16000, true);
-                if (m.Contains("gpt-6") || m.Contains("gpt-4") || System.Text.RegularExpressions.Regex.IsMatch(m, @"(^|[^a-z0-9])o[1-9]([^a-z0-9]|$)")) return Tuple.Create(128000, true); // gpt-6-luna preset, 4-class, o-series
-                if (m.Contains("deepseek-reasoner") || m.Contains("deepseek-r1")) return Tuple.Create(128000, true);
-                if (m.Contains("deepseek")) return Tuple.Create(64000, true); // deepseek-chat/flash family
+                if (m.Contains("gpt-4") || System.Text.RegularExpressions.Regex.IsMatch(m, @"(^|[^a-z0-9])o[1-9]([^a-z0-9]|$)")) return Tuple.Create(128000, true); // 4-class, o-series
+                if (m.Contains("deepseek")) return Tuple.Create(1000000, true);
+                if (m.Contains("gemini")) return Tuple.Create(1000000, false);
+                if (m.Contains("kimi-k3") || (m.Contains("moonshot") && m.Contains("k3"))) return Tuple.Create(1048576, false);
+                if (m.Contains("kimi") || m.Contains("moonshot")) return Tuple.Create(262144, false);
+                if (m.Contains("glm-5.3-flash-free")) return Tuple.Create(200000, true);
+                if (m.Contains("glm-5") || m.Contains("glm5")) return Tuple.Create(m.Contains("-free") ? 200000 : 1000000, false);
+                if (m.Contains("glm-4")) return Tuple.Create(200000, false);
                 if (m.Contains("llama") || m.Contains("qwen") || m.Contains("mistral") ||
                     m.Contains("gemma") || m.Contains("phi") || m.Contains("nvidia") ||
                     m.Contains("ollama")) return Tuple.Create(128000, false); // local/open weights vary by build
@@ -204,6 +329,7 @@ namespace Forge.Providers
                 case "anthropic": return "Anthropic";
                 case "ollama": return "Ollama";
                 case "opencode": return "OpenCode Zen";
+                case "opencode-go": return "OpenCode Go";
                 default: return "the provider";
             }
         }
@@ -232,10 +358,13 @@ namespace Forge.Providers
         /// <summary>Missing-key refusal naming the right env var for the current slug; null when no key is needed.</summary>
         public static string MissingKeyMessage(string provider, string baseUrl)
         {
-            string env = null, display = "the provider";
+            string env = null, display = "the provider", slug = null;
             try { env = KeyEnvFor(provider, baseUrl); } catch { env = null; }
             try { display = DisplayNameFor(provider, baseUrl); } catch { }
+            try { slug = SlugFor(provider, baseUrl); } catch { slug = null; }
             if (env == null) return null;
+            if (string.Equals(slug, "opencode-go", StringComparison.OrdinalIgnoreCase))
+                return "OpenCode Go subscription required — save your OpenCode Go key in Settings → API key (or set " + env + "), then resend.";
             return "No API key saved for " + display + " — save one in Settings → API key (or set " + env + "), then resend.";
         }
 
@@ -316,7 +445,7 @@ namespace Forge.Providers
             if (p == "ollama") return "ollama";
             if (bu.Contains("integrate.api.nvidia.com")) return "nvidia";
             if (bu.Contains("openrouter.ai")) return "openrouter";
-            if (bu.Contains("opencode.ai")) return "opencode";
+            if (bu.Contains("opencode.ai")) return bu.Contains("/zen/go") ? "opencode-go" : "opencode";
             if (bu.Contains("api.deepseek.com")) return "deepseek";
             if (bu.Contains("api.openai.com")) return "openai";
             if (bu.Contains("localhost") || bu.Contains("127.0.0.1") || bu.Contains("::1")) return "ollama";
@@ -352,9 +481,11 @@ namespace Forge.Providers
                     }
                     catch { }
                 }
-                // Kilo parity for OpenCode Zen: OPENCODE_API_KEY is read in addition to
-                // FORGE_PROVIDER_KEY_OPENCODE (slug env above) and the per-slug key file.
-                if (string.Equals(s, "opencode", System.StringComparison.OrdinalIgnoreCase))
+                // Kilo parity for OpenCode Zen and its Go sibling: OPENCODE_API_KEY is read
+                // in addition to FORGE_PROVIDER_KEY_OPENCODE[_GO] (slug env above) and the
+                // per-slug key file. Go shares the Zen credential infra but requires a key.
+                if (string.Equals(s, "opencode", System.StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(s, "opencode-go", System.StringComparison.OrdinalIgnoreCase))
                 {
                     try
                     {

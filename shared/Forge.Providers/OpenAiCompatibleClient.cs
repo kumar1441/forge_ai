@@ -18,6 +18,11 @@ namespace Forge.Providers
     public class OpenAiCompatibleClient : IProviderClient
     {
         private static readonly HttpClient Http = CreateClient();
+        // OpenCode Go gateway requires a stable x-opencode-session per conversation (400 MissingSessionID
+        // otherwise). The host (ForgePanel) points this at the current Forge chat sid; when unhooked or
+        // null we still send a stable per-process GUID so zen/go requests never 400.
+        public static Func<string> SessionIdProvider;
+        private static readonly string FallbackSessionId = Guid.NewGuid().ToString("N");
         // Single-entry parse cache: ToolsJson is identical on ~every agent-loop turn, and
         // JArray.Parse re-tokenizes that same multi-KB string per call. Hit = DeepClone only.
         private static readonly object ToolsCacheGate = new object();
@@ -43,6 +48,20 @@ namespace Forge.Providers
             // Static lifetime is intentional (avoids socket exhaustion); DNS staleness is accepted —
             // a base-URL host change requires process restart. Do not switch to per-call clients.
             return new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
+        }
+
+        // OpenCode Go (zen/go) routing/cache headers. Applied to every request built from a
+        // zen/go base URL: chat/completions (unary + streaming). Other gateways are untouched.
+        // TryAddWithoutValidation is deliberate — User-Agent / custom headers can be restricted
+        // on Framework HttpClient; a refused header must never fail the request.
+        private static void ApplyZenGoHeaders(HttpRequestMessage req, string url)
+        {
+            if (string.IsNullOrEmpty(url) || url.IndexOf("/zen/go", StringComparison.OrdinalIgnoreCase) < 0) return;
+            string sid = null;
+            try { sid = SessionIdProvider != null ? SessionIdProvider() : null; } catch { sid = null; }
+            if (string.IsNullOrWhiteSpace(sid)) sid = FallbackSessionId;
+            req.Headers.TryAddWithoutValidation("x-opencode-session", sid);
+            req.Headers.TryAddWithoutValidation("User-Agent", "Forge/1.0 (+SolidWorks add-in)");
         }
 
         public async Task<ProviderResult> CompleteAsync(IReadOnlyList<ChatMessage> messages, ProviderOptions opts, CancellationToken ct)
@@ -73,6 +92,7 @@ namespace Forge.Providers
                 {
                     if (!string.IsNullOrEmpty(_apiKey))
                         req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + _apiKey);
+                    ApplyZenGoHeaders(req, url);
                     req.Content = new StringContent(body, Encoding.UTF8, "application/json");
 
                     HttpResponseMessage resp;
@@ -120,21 +140,28 @@ namespace Forge.Providers
         // models (e.g. gpt-3.5 at 16k -> 8k) don't 400 on an output cap larger than their context.
         private static int ClampOutputTokens(string model, int requested)
         {
-            int window = 128000;
-            try { var cw = ProviderFactory.ContextWindowFor(model); if (cw != null && cw.Item1 > 0) window = cw.Item1; } catch { }
-            int budget = System.Math.Max(4096, window / 2);
-            return requested > 0 ? System.Math.Min(requested, budget) : budget;
+            return ProviderFactory.ClampOutputTokens(model, requested);
         }
 
-        private static void ApplyMaxOutputTokens(JObject j, ProviderOptions opts, string model)
+        private string NormalizeReasoningEffort(ProviderOptions opts, string model)
+        {
+            if (opts == null || string.IsNullOrWhiteSpace(opts.ReasoningEffort)) return null;
+            string e = opts.ReasoningEffort.Trim().ToLowerInvariant();
+            if (e == "none") return null;
+            if (e != "low" && e != "medium" && e != "high" && e != "xhigh" && e != "max") return null;
+            return ProviderFactory.AcceptsReasoningEffort(_baseUrl, model) ? e : null;
+        }
+
+        private void ApplyMaxOutputTokens(JObject j, ProviderOptions opts, string model)
         {
             if (opts == null || !opts.MaxTokens.HasValue) return;
-            // Reasoning models reject max_tokens and require max_completion_tokens instead.
-            string field = ProviderFactory.IsReasoningModel(model) ? "max_completion_tokens" : "max_tokens";
+            string bu = (_baseUrl ?? "").Trim().ToLowerInvariant();
+            bool deepseek = bu.Contains("deepseek") || (model ?? "").Trim().ToLowerInvariant().Contains("deepseek");
+            string field = ProviderFactory.IsReasoningModel(model) && !deepseek ? "max_completion_tokens" : "max_tokens";
             j[field] = ClampOutputTokens(model, opts.MaxTokens.Value);
         }
 
-        private static string BuildBody(IReadOnlyList<ChatMessage> messages, ProviderOptions opts, string model, bool stream = false)
+        private string BuildBody(IReadOnlyList<ChatMessage> messages, ProviderOptions opts, string model, bool stream = false)
         {
             var j = new JObject();
             j["model"] = model;
@@ -153,6 +180,8 @@ namespace Forge.Providers
                 // Central gate (callers with hardcoded Temperature=0 still omit it here): reasoning
                 // variants reject custom temperatures, so unsupported models send no field at all.
                 if (opts.Temperature.HasValue && ProviderFactory.SupportsTemperature(model)) j["temperature"] = opts.Temperature.Value;
+                string effort = NormalizeReasoningEffort(opts, model);
+                if (effort != null) j["reasoning_effort"] = effort;
                 if (!string.IsNullOrWhiteSpace(opts.ToolsJson))
                 {
                     // tool_choice without a tools array is a 400 on strict gateways: only send
@@ -229,6 +258,8 @@ namespace Forge.Providers
                 // Central gate (callers with hardcoded Temperature=0 still omit it here): reasoning
                 // variants reject custom temperatures, so unsupported models send no field at all.
                 if (opts.Temperature.HasValue && ProviderFactory.SupportsTemperature(model)) j["temperature"] = opts.Temperature.Value;
+                string effort = NormalizeReasoningEffort(opts, model);
+                if (effort != null) j["reasoning_effort"] = effort;
                 if (!string.IsNullOrWhiteSpace(opts.ToolsJson))
                 {
                     // tool_choice without a tools array is a 400 on strict gateways: only send
@@ -250,6 +281,9 @@ namespace Forge.Providers
             var toolParts = new System.Collections.Generic.Dictionary<int, ToolCall>();
             string gotModel = null;
             int tokIn = 0, tokOut = 0;
+            string finishReason = null;
+            bool sawDone = false;
+            bool sawDelta = false;
 
             // Transient overload on the initial response retries with backoff (same policy as unary).
             // A fresh request per attempt: Framework HttpClient won't resend a used message.
@@ -261,6 +295,7 @@ namespace Forge.Providers
                 catch (Exception ex) { throw new ProviderException("Provider address looks wrong (bad base URL \"" + url + "\") — check the provider URL in settings, then resend: " + Truncate(ex.Message), ex); }
                 if (!string.IsNullOrEmpty(_apiKey))
                     req0.Headers.TryAddWithoutValidation("Authorization", "Bearer " + _apiKey);
+                ApplyZenGoHeaders(req0, url);
                 req0.Content = new StringContent(body, Encoding.UTF8, "application/json");
                 try { resp = await Http.SendAsync(req0, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false); }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { try { req0.Dispose(); } catch { } throw; }
@@ -342,7 +377,7 @@ namespace Forge.Providers
                             }
                             string data = line.Substring(5).Trim().TrimStart((char)0xFEFF);
                             if (data.Length == 0) continue; // keepalive
-                            if (data == "[DONE]") break;
+                            if (data == "[DONE]") { sawDone = true; break; }
                             if (pendingFrag != null) { data = pendingFrag + data; pendingFrag = null; }
                             JObject evt;
                             try { evt = JObject.Parse(data); }
@@ -380,11 +415,17 @@ namespace Forge.Providers
                                  catch { }
                                 var choices = evt["choices"] as JArray;
                                 var choice = choices != null && choices.Count > 0 ? choices[0] : null;
+                            if (choice != null)
+                            {
+                                string fr = (string)choice["finish_reason"];
+                                if (!string.IsNullOrEmpty(fr)) finishReason = fr;
+                            }
                             // Some gateways emit message (not delta) chunks mid-stream: read both.
                             JObject delta = choice != null ? choice["delta"] as JObject : null;
                             JObject msgObj = choice != null ? choice["message"] as JObject : null;
                             JObject src = delta ?? msgObj;
                             if (src == null) continue;
+                            sawDelta = true;
                             string dc = (string)src["content"];
                             string dr = (string)src["reasoning_content"] ?? (string)src["reasoning"];
                             // Accumulator caps: a runaway stream must degrade to truncation, never OOM.
@@ -438,8 +479,18 @@ namespace Forge.Providers
                     }
                 }
 
+            if (!sawDone && sawDelta)
+                throw new ProviderException("Provider stream ended unexpectedly mid-response.");
+
             string content = contentAcc.ToString();
-            if (string.IsNullOrWhiteSpace(content)) content = reasonAcc.ToString();
+            string reasoning = reasonAcc.ToString();
+            if (string.Equals(finishReason, "length", System.StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrWhiteSpace(content) && !string.IsNullOrWhiteSpace(reasoning))
+                    throw new ProviderException("Response truncated at the output-token limit while thinking — partial reasoning discarded. Retry or shorten the conversation.");
+                throw new ProviderException("Response was truncated at the output-token limit (finish_reason=length).");
+            }
+            if (string.IsNullOrWhiteSpace(content)) content = reasoning;
             // Order by the streamed index: Dictionary order is not a call order.
             var ordered = new System.Collections.Generic.List<int>(toolParts.Keys);
             ordered.Sort();
@@ -447,7 +498,7 @@ namespace Forge.Providers
             foreach (int k in ordered) calls.Add(toolParts[k]);
             if (string.IsNullOrWhiteSpace(content) && calls.Count == 0)
                 throw new ProviderException("Provider returned no content" + (string.IsNullOrEmpty(firstNonData) ? "" : " (detail: " + Truncate(firstNonData) + ")") + " — try again or rephrase.");
-            return new ProviderResult { Text = content, TokIn = tokIn, TokOut = tokOut, Model = gotModel ?? model, ToolCalls = calls };
+            return new ProviderResult { Text = content, Reasoning = string.IsNullOrEmpty(reasoning) ? null : reasoning, TokIn = tokIn, TokOut = tokOut, Model = gotModel ?? model, ToolCalls = calls };
         }
 
         private static ProviderResult Parse(string text, string fallbackModel)
@@ -462,6 +513,7 @@ namespace Forge.Providers
             // model is usable: standard content, DeepSeek-style reasoning_content, alternate
             // reasoning field, then legacy text. Reasoning-only output is still a real answer.
             string content = null;
+            string reasoning = null;
             var calls = new System.Collections.Generic.List<ToolCall>();
             if (choice != null)
             {
@@ -481,8 +533,8 @@ namespace Forge.Providers
                         if (sb.Length > 0) content = sb.ToString();
                     }
                 }
-                if (string.IsNullOrWhiteSpace(content)) content = (string)choice["message"]?["reasoning_content"];
-                if (string.IsNullOrWhiteSpace(content)) content = (string)choice["message"]?["reasoning"];
+                reasoning = (string)choice["message"]?["reasoning_content"] ?? (string)choice["message"]?["reasoning"];
+                if (string.IsNullOrWhiteSpace(content)) content = reasoning;
                 if (string.IsNullOrWhiteSpace(content)) content = (string)choice["text"];
                 // Tool-only turn: no text content but the model requested function calls.
                 // Without this Parse throws "no content" and the agent loop can never use tools.
@@ -522,6 +574,7 @@ namespace Forge.Providers
             return new ProviderResult
             {
                 Text = content ?? "",
+                Reasoning = string.IsNullOrEmpty(reasoning) ? null : reasoning,
                 TokIn = tokIn,
                 TokOut = tokOut,
                 Model = (string)j["model"] ?? fallbackModel,

@@ -21,6 +21,7 @@ namespace Forge.Providers
         /// <summary>Serialized JSON array of OpenAI-style {type:function,function:{name,description,parameters}} tools.</summary>
         public string ToolsJson;
         public string ToolChoice;
+        public string ReasoningEffort;
     }
 
     /// <summary>A single function call requested by the model in an agentic loop turn.</summary>
@@ -35,6 +36,7 @@ namespace Forge.Providers
     public class ProviderResult
     {
         public string Text;
+        public string Reasoning;
         public long TokIn;
         public long TokOut;
         public string Model;

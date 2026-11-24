@@ -30,6 +30,9 @@ namespace Forge.SolidWorks
 
         private static readonly Dictionary<string, AgentSession> Sessions = new Dictionary<string, AgentSession>();
         private static string CurrentSid;
+
+        public static string ReasoningEffort { get; set; }
+
         public static int AgentMsgCount { get; private set; }
         private static long _agentTokCount;
         public static long AgentTokCount { get { return System.Threading.Interlocked.Read(ref _agentTokCount); } private set { System.Threading.Interlocked.Exchange(ref _agentTokCount, value); } }
@@ -596,11 +599,12 @@ namespace Forge.SolidWorks
         {
             if (string.IsNullOrWhiteSpace(tool)) return null;
             string t = tool.Trim();
+            string bare = BareToolName(t);
             string found = null;
             lock (Rules)
             {
                 foreach (var r in Rules)
-                    if (GlobMatch(r.Pattern, t)) found = r.Pattern;
+                    if (GlobMatch(r.Pattern, t) || (!string.IsNullOrEmpty(bare) && GlobMatch(r.Pattern, bare))) found = r.Pattern;
             }
             return found;
         }
@@ -613,31 +617,62 @@ namespace Forge.SolidWorks
             return "Tool '" + tool + "' is blocked (" + why + ") — remove it in Settings → Denied, or ask for a workaround.";
         }
 
+        private static string BareToolName(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return name;
+            try
+            {
+                var servers = McpBridge.LoadEffectiveServers();
+                if (servers == null || servers.Count == 0) return name;
+                var names = new List<string>();
+                foreach (var s in servers) if (s != null && !string.IsNullOrWhiteSpace(s.Name)) names.Add(s.Name.Trim());
+                string srv, bare;
+                if (McpBridge.TrySplitQualified(name, names, out srv, out bare) && !string.IsNullOrWhiteSpace(bare)) return bare;
+                foreach (var n in names)
+                    if (name.Length > n.Length + 1 && name[n.Length] == '_' &&
+                        string.Equals(name.Substring(0, n.Length), n, StringComparison.OrdinalIgnoreCase))
+                        return name.Substring(n.Length + 1);
+            }
+            catch { }
+            return name;
+        }
+
+        private static string PolicyFor(string tool)
+        {
+            string pol = null;
+            try { pol = GetToolPolicy(tool); } catch { }
+            if (pol != null) return pol;
+            string bare = BareToolName(tool);
+            if (!string.IsNullOrEmpty(bare) && !string.Equals(bare, tool, StringComparison.OrdinalIgnoreCase))
+            {
+                try { pol = GetToolPolicy(bare); } catch { }
+            }
+            return pol;
+        }
+
         /// <returns>null = ask (card), "allow" / "deny" = last matching rule wins (Kilo parity).</returns>
         public static string ApprovalFor(string tool)
         {
-            // PRECEDENCE: an explicit per-tool entry wins over every glob. "allow"->allow,
-            // "deny"->deny, "ask"->null (forces an approval card). Absent entry falls through
-            // to the existing glob chain below (last-match-wins).
-            if (!string.IsNullOrWhiteSpace(tool))
-            {
-                try
-                {
-                    string pol = GetToolPolicy(tool);
-                    if (pol == "allow") return "allow";
-                    if (pol == "deny") return "deny";
-                    if (pol == "ask") return null;
-                }
-                catch { }
-            }
             if (string.IsNullOrWhiteSpace(tool)) return null;
+            try { if (IsToolDisabled(tool)) return "deny"; } catch { }
+            try
+            {
+                string pol = PolicyFor(tool);
+                if (pol == "allow") return "allow";
+                if (pol == "deny") return "deny";
+                if (pol == "ask") return null;
+            }
+            catch { }
             string t = tool.Trim();
+            string bare = BareToolName(t);
             string found = null;
             lock (Rules)
             {
                 foreach (var r in Rules)
-                    if (GlobMatch(r.Pattern, t)) found = r.Action;
+                    if (GlobMatch(r.Pattern, t) || (!string.IsNullOrEmpty(bare) && GlobMatch(r.Pattern, bare))) found = r.Action;
             }
+            if (found == "deny") return "deny";
+            try { if (PerServerListMatches(t, true)) return "allow"; } catch { }
             return found;
         }
 
@@ -659,6 +694,45 @@ namespace Forge.SolidWorks
             }
             while (px < p.Length && p[px] == '*') px++;
             return px == p.Length;
+        }
+
+        private static string BareToolNameForServer(string serverName, string tool)
+        {
+            if (string.IsNullOrWhiteSpace(tool) || string.IsNullOrWhiteSpace(serverName)) return tool;
+            string prefix = serverName.Trim() + "_";
+            return tool.Length > prefix.Length && tool.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+                ? tool.Substring(prefix.Length) : tool;
+        }
+
+        private static bool PerServerListMatches(string tool, bool allowList)
+        {
+            if (string.IsNullOrWhiteSpace(tool)) return false;
+            try
+            {
+                var servers = McpBridge.LoadEffectiveServers();
+                if (servers == null) return false;
+                string owner = McpBridge.ServerForTool(tool);
+                foreach (var s in servers)
+                {
+                    if (s == null) continue;
+                    if (!string.IsNullOrWhiteSpace(owner) && !string.Equals(s.Name, owner, StringComparison.OrdinalIgnoreCase)) continue;
+                    var list = allowList ? s.AlwaysAllow : s.DisabledTools;
+                    if (list == null || list.Length == 0) continue;
+                    string bare = BareToolNameForServer(s.Name, tool);
+                    foreach (var pat in list)
+                    {
+                        if (string.IsNullOrWhiteSpace(pat)) continue;
+                        if (GlobMatch(pat, tool) || (!string.IsNullOrEmpty(bare) && GlobMatch(pat, bare))) return true;
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        public static bool IsToolDisabled(string tool)
+        {
+            return PerServerListMatches(tool, false);
         }
 
         public static bool SetDenied(string tool, bool denied)
@@ -694,7 +768,7 @@ namespace Forge.SolidWorks
             if (ApprovalFor(tool) == "allow") return true;
             // Per-tool "ask" must force a card even when the master switch + category
             // toggles would otherwise auto-approve (acceptance: ask + master ON -> card).
-            try { if (GetToolPolicy(tool) == "ask") return false; } catch { }
+            try { if (PolicyFor(tool) == "ask") return false; } catch { }
             if (!ApproveMaster) return false;
             switch (ToolCategory(tool))
             {
@@ -723,7 +797,7 @@ namespace Forge.SolidWorks
                     // wipe that deny and defeat the GateToolAsync/doom-loop deny rechecks, so skip the write.
                     // Also clear any explicit per-tool entry (ask/deny) so the new glob allow takes
                     // effect: otherwise the per-tool entry would keep shadowing the glob (precedence).
-                    if (!string.IsNullOrWhiteSpace(tool) && !tool.TrimStart().StartsWith("(") && ApprovalFor(tool) != "deny") { AddAlwaysAllow(tool); try { SetToolPolicy(tool.Trim(), null); } catch { } }
+                    if (!string.IsNullOrWhiteSpace(tool) && !tool.TrimStart().StartsWith("(") && ApprovalFor(tool) != "deny") { AddAlwaysAllow(tool); try { string t = tool.Trim(); SetToolPolicy(t, null); string bare = BareToolName(t); if (!string.Equals(bare, t, StringComparison.OrdinalIgnoreCase)) SetToolPolicy(bare, null); } catch { } }
                     d = "approve";
             }
             try { tcs.TrySetResult(d); } catch { }
@@ -849,6 +923,29 @@ namespace Forge.SolidWorks
         public static bool CompactOn = true;
         public static int CompactAt = 60;
 
+        private static readonly object CompactCfgLock = new object();
+        private static bool _compactionOn = false;
+        private static int _compactionThresholdPct = 60;
+        private static int _compactionReservedTokens = 0;
+        private static int _compactionTailTurns = 2;
+        private static bool _compactionConfigured = false;
+
+        public static void ConfigureCompaction(bool on, int thresholdPct, int reservedTokens, int tailTurns)
+        {
+            if (thresholdPct < 1) thresholdPct = 1;
+            if (thresholdPct > 100) thresholdPct = 100;
+            if (reservedTokens < 0) reservedTokens = 0;
+            if (tailTurns < 0) tailTurns = 0;
+            lock (CompactCfgLock)
+            {
+                _compactionOn = on;
+                _compactionThresholdPct = thresholdPct;
+                _compactionReservedTokens = reservedTokens;
+                _compactionTailTurns = tailTurns;
+                _compactionConfigured = true;
+            }
+        }
+
         /// <summary>Cheap invariant (TurnStarts vs Msgs): entries must be sorted, unique,
         /// in-range. Repair in place, never throw. Call with the Msgs lock held.</summary>
         private static void RepairTurns(AgentSession s)
@@ -892,6 +989,50 @@ namespace Forge.SolidWorks
             s = s.Trim();
             if (s.Length == 0 || s == "." || s == "..") return "default";
             return s;
+        }
+
+        private static string CadCtxPath(string sid)
+        {
+            try { return Path.Combine(AgentDir(), SafeSid(sid) + ".cadctx.json"); } catch { return null; }
+        }
+
+        public static void SetCadContext(string sid, string summary, string docPath, string docType, int openDocCount, string swVersion)
+        {
+            try
+            {
+                string p = CadCtxPath(sid); if (p == null) return;
+                var o = new JObject
+                {
+                    ["sid"] = SafeSid(sid),
+                    ["summary"] = summary ?? "",
+                    ["docPath"] = docPath ?? "",
+                    ["docType"] = docType ?? "",
+                    ["openDocCount"] = openDocCount,
+                    ["swVersion"] = swVersion ?? "",
+                    ["capturedAtUtc"] = DateTime.UtcNow.ToString("o")
+                };
+                string tmp = p + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                try
+                {
+                    File.WriteAllText(tmp, o.ToString(Newtonsoft.Json.Formatting.None));
+                    if (File.Exists(p)) File.Replace(tmp, p, null);
+                    else File.Move(tmp, p);
+                }
+                catch { try { File.Delete(tmp); } catch { } throw; }
+            }
+            catch { }
+        }
+
+        public static string CadContextSummary(string sid)
+        {
+            try
+            {
+                string p = CadCtxPath(sid);
+                if (p == null || !File.Exists(p)) return null;
+                var o = JObject.Parse(File.ReadAllText(p));
+                return (string)o["summary"];
+            }
+            catch { return null; }
         }
 
         private static AgentSession EnsureSession(string sid)
@@ -1101,6 +1242,49 @@ namespace Forge.SolidWorks
             SaveSession(sid);
         }
 
+        public static void StripLastUserTurn(string sid)
+        {
+            if (string.IsNullOrWhiteSpace(sid)) return;
+            var s = EnsureSession(sid);
+            int removed = 0;
+            lock (s.Msgs)
+            {
+                int u = -1;
+                for (int i = s.Msgs.Count - 1; i >= 0; i--)
+                {
+                    try { if (string.Equals((string)s.Msgs[i]["role"], "user", StringComparison.OrdinalIgnoreCase)) { u = i; break; } } catch { }
+                }
+                if (u < 0) return;
+                int end = u + 1;
+                while (end < s.Msgs.Count)
+                {
+                    JObject m = s.Msgs[end];
+                    string role = null;
+                    try { role = (string)m["role"]; } catch { }
+                    if (!string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase)) break;
+                    string content = null;
+                    try { content = (string)m["content"]; } catch { }
+                    JArray calls = null;
+                    try { calls = m["tool_calls"] as JArray; } catch { }
+                    if (!string.IsNullOrEmpty(content) || (calls != null && calls.Count > 0)) break;
+                    end++;
+                }
+                removed = end - u;
+                s.Msgs.RemoveRange(u, removed);
+                var kept = new List<int>(s.TurnStarts.Count);
+                foreach (int t in s.TurnStarts)
+                {
+                    if (t >= u && t < end) continue;
+                    kept.Add(t > u ? t - removed : t);
+                }
+                s.TurnStarts.Clear();
+                s.TurnStarts.AddRange(kept);
+                RepairTurns(s);
+                AgentMsgCount = s.Msgs.Count;
+            }
+            if (removed > 0) SaveSession(sid);
+        }
+
         /// <summary>Context usage for the %-based auto-compact gate. Reuses the pill's
         /// tracking: CtxCur(sid) = latest prompt_tokens = current context size, window from
         /// the same ProviderFactory table as the pill. False = no usable data (missing /
@@ -1132,29 +1316,45 @@ namespace Forge.SolidWorks
         /// message-count gate when no ctx sidecar data exists — never silently disables.</summary>
         private static async Task CompactHistoryIfNeeded(IProviderClient client, string sid, string model, System.Threading.CancellationToken ct)
         {
-            if (!CompactOn) return; // the settings toggle alone disables — no magic numbers
-            int at = CompactAt; // percent of the model's context window (panel + host clamp 10-95)
-            if (at < 10) at = 10; if (at > 95) at = 95;
+            bool on; int at; int reserved; int tail;
+            lock (CompactCfgLock)
+            {
+                on = _compactionConfigured ? _compactionOn : CompactOn;
+                at = _compactionConfigured ? _compactionThresholdPct : CompactAt;
+                reserved = _compactionReservedTokens;
+                tail = _compactionTailTurns;
+            }
+            if (!on) return;
+            if (at < 1) at = 1; if (at > 100) at = 100;
             AgentSession session = EnsureSession(sid);
-            int count;
-            lock (session.Msgs) { count = session.Msgs.Count; }
+            int count; int cut;
+            lock (session.Msgs)
+            {
+                count = session.Msgs.Count;
+                cut = -1;
+                int keepTail = tail < 1 ? 1 : tail;
+                if (session.TurnStarts.Count > keepTail)
+                {
+                    cut = session.TurnStarts[session.TurnStarts.Count - keepTail];
+                    if (cut < 1) cut = 1;
+                }
+            }
             double pct = 0; long cur = 0; int window = 0;
             bool havePct = false;
             try { havePct = TryContextUsagePct(sid, model, out pct, out cur, out window); } catch { havePct = false; pct = 0; }
             if (havePct)
             {
-                if (pct < at) return; // below the threshold % — nothing to do
+                int usable = window - reserved;
+                if (usable < 1) usable = 1;
+                pct = cur * 100.0 / usable;
+                if (pct < at) return;
             }
             else
             {
-                // LEGACY FALLBACK: no ctx data for this sid (old session, missing/corrupt
-                // sidecar) — keep the old message-count gate so compaction still fires.
-                // `at` is a context-window PERCENT (10-95), never a message count: the legacy
-                // gate uses a fixed message-count floor independent of `at`.
                 if (count <= 60) return;
             }
-            if (count <= 31) return; // too small to compact: GetRange(1, cut-1) would throw below
-            int cut = count - 30; // summarize everything except the newest 30
+            if (cut < 1) cut = count - 30;
+            if (cut < 2 || cut > count - 1) return;
             List<JObject> old;
             lock (session.Msgs) { old = session.Msgs.GetRange(1, cut - 1); } // keep [0]=system
             string summary = null;
@@ -1172,7 +1372,7 @@ namespace Forge.SolidWorks
                     new ChatMessage { Role = "user", Content = oldJson }
                 };
                     var res = await client.CompleteAsync(msgs,
-                        new ProviderOptions { MaxTokens = 800, Model = ProviderFactory.SmallModelForCurrentConfig() ?? model },
+                        new ProviderOptions { MaxTokens = 800, Model = ProviderFactory.SmallModelForCurrentConfig() ?? model, ReasoningEffort = ReasoningEffort },
                         ct);
                 summary = res != null ? res.Text : null;
                 try { if (res != null) { IntentRate.Note(res.TokIn, res.TokOut); NoteCtx(sid, res.TokIn, res.TokOut); } } catch { }
@@ -1330,14 +1530,17 @@ namespace Forge.SolidWorks
             await emit("Builder", "starting the MCP build server", "run", null);
 
             JArray tools;
-            string winnerName = null; // routed winner, pinned for every CallToolAsync in this run
+            object route = null;
+            string verifyServer = null;
             try
             {
-                // Ordered failover across enabled servers (no namespacing); the winner serves this run.
-                var routed = await McpBridge.ListToolsRoutedAsync(ct);
-                tools = routed != null && routed.Tools != null ? routed.Tools : new JArray();
-                winnerName = routed != null ? routed.Winner : null;
-                if (tools == null || tools.Count == 0) throw new McpBridge.McpException("tool list came back empty.");
+                var routed = await McpBridge.RouteAsync(ct);
+                route = routed;
+                var rr = routed as McpBridge.RouteResult;
+                verifyServer = rr != null ? rr.Winner : null;
+                tools = await McpBridge.ListAllToolsAsync(ct);
+                if (tools == null || tools.Count == 0) throw new McpBridge.McpException("tool list came back empty from all enabled servers — check each server's logs and confirm at least one exposes tools.");
+                AppendResourceCatalogTools(tools);
             }
             catch (OperationCanceledException) { outcome.Error = "INTERRUPTED"; return outcome; }
             catch (Exception ex)
@@ -1356,15 +1559,19 @@ namespace Forge.SolidWorks
             {
                 var o = t as JObject; if (o == null) continue;
                 string n = (string)o["name"]; if (string.IsNullOrWhiteSpace(n)) continue;
+                if (ApprovalFor(n) == "deny") continue;
+                if (names.Contains(n)) continue;
+                if (names.Count >= MaxCatalogTools) break;
                 names.Add(n);
                 string d = ((string)o["description"] ?? "").Split('\n')[0].Trim();
                 if (d.Length > 160) d = d.Substring(0, 160);
                 lines.Add(n + ": " + d);
             }
 
+            bool hideInstructions = AllToolsDenied(route, tools);
             await emit("Builder", "planning " + lines.Count + " available modelling tools", "run", null);
             Tuple<JObject, string> authored;
-            try { authored = await AuthorPlan(client, intent, planModel, lines, ct, onThink); }
+            try { authored = await AuthorPlan(client, intent, planModel, lines, hideInstructions ? "" : ServerInstructionsSection(route), ct, onThink); }
             catch (OperationCanceledException) { outcome.Error = "INTERRUPTED"; return outcome; }
             catch (Exception ex)
             {
@@ -1417,26 +1624,28 @@ namespace Forge.SolidWorks
                 n_++;
                 await emit("Builder", "step " + n_ + "/" + steps.Count + ": " + tool, "run", null);
                 McpBridge.ToolResult r;
-                var gate = await GateToolAsync(tool, args, emit, ct, cardSender, isCurrent);
-                if (gate != null)
+                if (IsResourceTool(tool))
                 {
-                    // Surface the gate's own text: a deny-list refusal reads differently
-                    // from a user reject, matching what the agent loop feeds back.
-                    outcome.Error = "Step " + n_ + " (" + tool + "): " + gate.Text + " — what built so far stays open in SolidWorks; adjust and ask again.";
-                    return outcome;
+                    r = await HandleResourceToolAsync(tool, args, route, emit, ct, cardSender, isCurrent);
                 }
-                try
+                else
                 {
-                    // Cancellable mid-flight: stop throws out of the server call itself instead of
-                    // abandoning the wait on its (minutes-long) timeout — no orphaned unobserved task.
-                    // Pinned to the routed winner so every step in this run hits the same server.
-                    r = await McpBridge.CallToolAsync(tool, args, 300000, ct, winnerName);
-                }
-                catch (OperationCanceledException) { throw; }
-                catch (Exception ex)
-                {
-                    outcome.Error = "Step " + n_ + " (" + tool + ") transport failed (" + CleanDetail(ex.Message, 300) + ") — what built so far stays open in SolidWorks; fix that step and ask again.";
-                    return outcome;
+                    var gate = await GateToolAsync(tool, args, emit, ct, cardSender, isCurrent);
+                    if (gate != null)
+                    {
+                        outcome.Error = "Step " + n_ + " (" + tool + "): " + gate.Text + " — what built so far stays open in SolidWorks; adjust and ask again.";
+                        return outcome;
+                    }
+                    try
+                    {
+                        r = await McpBridge.CallToolAsync(tool, args, 300000, ct);
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception ex)
+                    {
+                        outcome.Error = "Step " + n_ + " (" + tool + ") transport failed (" + CleanDetail(ex.Message, 300) + ") — what built so far stays open in SolidWorks; fix that step and ask again.";
+                        return outcome;
+                    }
                 }
                 string text = (r.Text ?? "").Length > 600 ? r.Text.Substring(0, 600) + "…" : (r.Text ?? "");
                 log.Add(tool + " -> " + (r.Ok ? "ok" : "FAILED") + " " + text);
@@ -1447,7 +1656,7 @@ namespace Forge.SolidWorks
                 }
             }
 
-            string measured = await BestEffortVerify(ct, winnerName);
+            string measured = await BestEffortVerify(ct, names, verifyServer);
             outcome.Summary = "Built via the MCP server in " + steps.Count + " steps (" +
                 string.Join("; ", log.ToArray()).Substring(0, Math.Min(400, string.Join("; ", log.ToArray()).Length)) +
                 ")" + (string.IsNullOrEmpty(measured) ? "." : " Measured: " + measured);
@@ -1483,14 +1692,14 @@ namespace Forge.SolidWorks
 
             outcome.Attempted = true;
             JArray tools;
-            string winnerName = null; // routed winner, pinned for every CallToolAsync in this run
+            object route = null;
             try
             {
-                // Ordered failover across enabled servers (no namespacing); the winner serves this run.
-                var routed = await McpBridge.ListToolsRoutedAsync(ct);
-                tools = routed != null && routed.Tools != null ? routed.Tools : new JArray();
-                winnerName = routed != null ? routed.Winner : null;
-                if (tools == null || tools.Count == 0) throw new McpBridge.McpException("tool list came back empty.");
+                var routed = await McpBridge.RouteAsync(ct);
+                route = routed;
+                tools = await McpBridge.ListAllToolsAsync(ct);
+                if (tools == null || tools.Count == 0) throw new McpBridge.McpException("tool list came back empty from all enabled servers — check each server's logs and confirm at least one exposes tools.");
+                AppendResourceCatalogTools(tools);
             }
             catch (OperationCanceledException) { outcome.Error = "INTERRUPTED"; return outcome; }
             catch (Exception ex)
@@ -1508,6 +1717,9 @@ namespace Forge.SolidWorks
             {
                 var o = t as JObject; if (o == null) continue;
                 string n = (string)o["name"]; if (string.IsNullOrWhiteSpace(n)) continue;
+                if (ApprovalFor(n) == "deny") continue;
+                if (names.Contains(n)) continue;
+                if (names.Count >= MaxCatalogTools) break;
                 names.Add(n);
                 fns.Add(new JObject
                 {
@@ -1530,13 +1742,18 @@ namespace Forge.SolidWorks
             string model = modelSnapshot;
 
             var session = EnsureSession(sid);
+            string cadCtx = CadContextSummary(sid);
+            string sysContent = AgentSystemPrompt + (AllToolsDenied(route, tools) ? "" : ServerInstructionsSection(route))
+                + (string.IsNullOrWhiteSpace(cadCtx) ? "" : "\n\nCAD context for this session: " + cadCtx);
             lock (session.Msgs)
             {
                 if (session.Msgs.Count == 0 || (string)session.Msgs[0]["role"] != "system")
                 {
-                    session.Msgs.Insert(0, new JObject { ["role"] = "system", ["content"] = AgentSystemPrompt });
+                    session.Msgs.Insert(0, new JObject { ["role"] = "system", ["content"] = sysContent });
                     for (int ti = 0; ti < session.TurnStarts.Count; ti++) session.TurnStarts[ti]++;
                 }
+                else if (!string.Equals((string)session.Msgs[0]["content"], sysContent, StringComparison.Ordinal))
+                    session.Msgs[0]["content"] = sysContent;
                 session.TurnStarts.Add(session.Msgs.Count);
                 // A pasted blob must not ride every turn + the persisted session file unbounded.
                 string histIntent = (intent ?? "").Trim();
@@ -1547,7 +1764,7 @@ namespace Forge.SolidWorks
             SaveSession(sid);
             await CompactHistoryIfNeeded(client, sid, model, ct);
 
-            var opts = new ProviderOptions { MaxTokens = 16000, Model = model, ToolsJson = toolsJson, ToolChoice = "auto" };
+            var opts = new ProviderOptions { MaxTokens = 16000, Model = model, ToolsJson = toolsJson, ToolChoice = "auto", ReasoningEffort = ReasoningEffort };
             var log = new List<string>();
             int executed = 0;
             int succeeded = 0; // tool calls that returned Ok: the success line reports these, never attempts
@@ -1663,16 +1880,20 @@ namespace Forge.SolidWorks
                         try { await emit("Builder", "step " + executed + ": " + c.Name, "run", null); }
                         catch { /* dead panel: keep executing, the user just sees nothing */ }
                         McpBridge.ToolResult r;
-                        var gate = await GateToolAsync(c.Name, args, emit, ct, cardSender, isCurrent);
-                        if (gate != null) r = gate;
+                        if (IsResourceTool(c.Name))
+                        {
+                            r = await HandleResourceToolAsync(c.Name, args, route, emit, ct, cardSender, isCurrent);
+                        }
                         else
                         {
-                            // Cancellable mid-flight inside the bridge call: no orphaned server wait is
-                            // abandoned (and none applied twice) — stop throws before any history append.
-                            // Pinned to the routed winner so every step in this run hits the same server.
-                            try { r = await McpBridge.CallToolAsync(c.Name, args, 300000, ct, winnerName); }
-                            catch (OperationCanceledException) { throw; }
-                    catch (Exception ex) { r = new McpBridge.ToolResult { Ok = false, Text = "transport failed (" + CleanDetail(ex.Message, 300) + ")" }; }
+                            var gate = await GateToolAsync(c.Name, args, emit, ct, cardSender, isCurrent);
+                            if (gate != null) r = gate;
+                            else
+                            {
+                                try { r = await McpBridge.CallToolAsync(c.Name, args, 300000, ct); }
+                                catch (OperationCanceledException) { throw; }
+                        catch (Exception ex) { r = new McpBridge.ToolResult { Ok = false, Text = "transport failed (" + CleanDetail(ex.Message, 300) + ") — check the MCP server and retry that step." }; }
+                            }
                         }
                         string text = r.Text ?? "";
                         if (text.Length > 2000) text = text.Substring(0, 2000) + "…(truncated)";
@@ -1789,6 +2010,222 @@ namespace Forge.SolidWorks
             return res;
         }
 
+        private const string ResourceToolList = "list_mcp_resources";
+        private const string ResourceToolTemplates = "list_mcp_resource_templates";
+        private const string ResourceToolRead = "read_mcp_resource";
+
+        private static bool IsResourceTool(string name)
+        {
+            return string.Equals(name, ResourceToolList, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, ResourceToolTemplates, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, ResourceToolRead, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static JObject ResourceToolSchema(string name, bool needsUri)
+        {
+            var props = new JObject
+            {
+                ["server"] = new JObject { ["type"] = "string", ["description"] = "MCP server name; omit to use the current route winner." }
+            };
+            if (needsUri)
+                props["uri"] = new JObject { ["type"] = "string", ["description"] = "Resource uri from list_mcp_resources." };
+            var schema = new JObject { ["type"] = "object", ["properties"] = props };
+            if (needsUri) schema["required"] = new JArray("uri");
+            string desc = string.Equals(name, ResourceToolList, StringComparison.OrdinalIgnoreCase)
+                ? "List MCP resources exposed by a connected server (read-only, external)."
+                : (string.Equals(name, ResourceToolTemplates, StringComparison.OrdinalIgnoreCase)
+                    ? "List MCP resource templates exposed by a connected server (read-only, external)."
+                    : "Read one MCP resource by uri from a connected server (read-only, external).");
+            return new JObject
+            {
+                ["name"] = name,
+                ["description"] = desc,
+                ["inputSchema"] = schema
+            };
+        }
+
+        private static void AppendResourceCatalogTools(JArray tools)
+        {
+            if (tools == null) return;
+            tools.Add(ResourceToolSchema(ResourceToolList, false));
+            tools.Add(ResourceToolSchema(ResourceToolTemplates, false));
+            tools.Add(ResourceToolSchema(ResourceToolRead, true));
+        }
+
+        private static string WinnerFromRoute(object route)
+        {
+            try
+            {
+                if (route == null) return null;
+                var type = route.GetType();
+                var field = type.GetField("Winner");
+                object val = field != null ? field.GetValue(route) : null;
+                if (field == null)
+                {
+                    var prop = type.GetProperty("Winner");
+                    if (prop != null) val = prop.GetValue(route, null);
+                }
+                return val as string;
+            }
+            catch { return null; }
+        }
+
+        private static async Task<McpBridge.ToolResult> HandleResourceToolAsync(
+            string tool, JObject args, object route, Func<string, string, string, string, Task> emit,
+            System.Threading.CancellationToken ct, Action<JObject> cardSender, Func<bool> isCurrent)
+        {
+            args = args ?? new JObject();
+            var gate = await GateToolAsync(tool, args, emit, ct, cardSender, isCurrent);
+            if (gate != null) return gate;
+            try
+            {
+                string server = "";
+                try { server = (string)args["server"]; } catch { }
+                if (string.IsNullOrWhiteSpace(server)) server = WinnerFromRoute(route);
+                if (string.IsNullOrWhiteSpace(server))
+                {
+                    var servers = McpBridge.LoadEffectiveServers();
+                    if (servers != null)
+                        foreach (var s in servers)
+                            if (s != null && s.Enabled) { server = s.Name; break; }
+                }
+                if (string.IsNullOrWhiteSpace(server))
+                    return new McpBridge.ToolResult { Ok = false, Text = "No MCP server is available for resources — start one under Settings → MCP servers." };
+                if (string.Equals(tool, ResourceToolRead, StringComparison.OrdinalIgnoreCase))
+                {
+                    string uri = "";
+                    try { uri = (string)args["uri"]; } catch { }
+                    if (string.IsNullOrWhiteSpace(uri))
+                        return new McpBridge.ToolResult { Ok = false, Text = "read_mcp_resource needs a 'uri' argument from list_mcp_resources." };
+                    string text = await McpBridge.ReadResourceAsync(server, uri, ct).ConfigureAwait(false);
+                    return new McpBridge.ToolResult { Ok = true, Text = string.IsNullOrEmpty(text) ? "(empty resource)" : text };
+                }
+                JArray arr = string.Equals(tool, ResourceToolTemplates, StringComparison.OrdinalIgnoreCase)
+                    ? await McpBridge.ListResourceTemplatesAsync(server, ct).ConfigureAwait(false)
+                    : await McpBridge.ListResourcesAsync(server, ct).ConfigureAwait(false);
+                string json = arr != null ? arr.ToString(Newtonsoft.Json.Formatting.None) : "[]";
+                if (json.Length > 8000) json = json.Substring(0, 8000) + "…(truncated)";
+                return new McpBridge.ToolResult { Ok = true, Text = "Server '" + server + "': " + json };
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                return new McpBridge.ToolResult { Ok = false, Text = "resources failed on server (" + CleanDetail(ex.Message, 300) + ") — check the MCP server and retry." };
+            }
+        }
+
+        private const int MaxCatalogTools = 256;
+
+        private static List<string> InstructionsParts(object route)
+        {
+            var parts = new List<string>();
+            if (route == null) return parts;
+            try
+            {
+                var type = route.GetType();
+                var field = type.GetField("Instructions");
+                object val = field != null ? field.GetValue(route) : null;
+                if (field == null)
+                {
+                    var prop = type.GetProperty("Instructions");
+                    if (prop != null) val = prop.GetValue(route, null);
+                }
+                if (val == null) return parts;
+                var s = val as string;
+                if (s != null)
+                {
+                    foreach (var line in s.Split('\n'))
+                        if (!string.IsNullOrWhiteSpace(line)) parts.Add(line.Trim());
+                    return parts;
+                }
+                if (val is JObject)
+                {
+                    foreach (var kv in (JObject)val)
+                    {
+                        string txt = kv.Value == null ? null : kv.Value.ToString();
+                        if (!string.IsNullOrWhiteSpace(txt)) parts.Add(txt.Trim());
+                    }
+                }
+                else if (val is System.Collections.IEnumerable)
+                {
+                    foreach (var item in (System.Collections.IEnumerable)val)
+                    {
+                        if (item == null) continue;
+                        string txt = null;
+                        if (item is System.Collections.DictionaryEntry)
+                            txt = ((System.Collections.DictionaryEntry)item).Value == null ? null : ((System.Collections.DictionaryEntry)item).Value.ToString();
+                        else
+                        {
+                            var vt = item.GetType().GetProperty("Value");
+                            object vv = vt != null ? vt.GetValue(item, null) : item;
+                            txt = vv == null ? null : vv.ToString();
+                        }
+                        if (!string.IsNullOrWhiteSpace(txt)) parts.Add(txt.Trim());
+                    }
+                }
+                else
+                {
+                    string one = val.ToString();
+                    if (!string.IsNullOrWhiteSpace(one)) parts.Add(one.Trim());
+                }
+            }
+            catch { }
+            return parts;
+        }
+
+        private static bool AllToolsDenied(object route, JArray tools)
+        {
+            try
+            {
+                string winner = null;
+                if (route != null)
+                {
+                    var type = route.GetType();
+                    var field = type.GetField("Winner");
+                    winner = field != null ? field.GetValue(route) as string : null;
+                    if (field == null)
+                    {
+                        var prop = type.GetProperty("Winner");
+                        if (prop != null) winner = prop.GetValue(route, null) as string;
+                    }
+                }
+                if (string.IsNullOrWhiteSpace(winner) || tools == null) return false;
+                string prefix = winner.Trim() + "_";
+                bool any = false;
+                foreach (var t in tools)
+                {
+                    var o = t as JObject;
+                    string n = o != null ? (string)o["name"] : (string)t;
+                    if (string.IsNullOrWhiteSpace(n) || !n.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+                    any = true;
+                    if (ApprovalFor(n) != "deny") return false;
+                }
+                return any;
+            }
+            catch { return false; }
+        }
+
+        private static string ServerInstructionsSection(object route)
+        {
+            var parts = InstructionsParts(route);
+            if (parts.Count == 0) return "";
+            const string header = "## Connected MCP servers\n";
+            const int perPart = 800;
+            int room = 4000 - header.Length - 2;
+            var kept = new List<string>();
+            int used = 0;
+            foreach (var p in parts)
+            {
+                string txt = p.Length > perPart ? p.Substring(0, perPart - 1) + "…" : p;
+                int need = txt.Length + (kept.Count == 0 ? 0 : 1);
+                if (used + need > room) break;
+                kept.Add(txt);
+                used += need;
+            }
+            if (kept.Count == 0) return "";
+            return "\n\n" + header + string.Join("\n", kept.ToArray());
+        }
+
         private const string AgentSystemPrompt =
             "You are Forge, a parametric CAD builder driving SolidWorks through tools. ALL dimensions in MILLIMETRES. " +
             "Rules: start with new_part (or new_assembly for multi-part builds); build the base solid first, then features; " +
@@ -1796,15 +2233,23 @@ namespace Forge.SolidWorks
             "verify with get_mass_properties or get_bounding_box when done; keep calling tools until the request is fully built; " +
             "then reply with a short summary including measured dims. No filler steps.";
 
-        private static async Task<string> BestEffortVerify(System.Threading.CancellationToken ct, string serverName = null)
+        private static async Task<string> BestEffortVerify(System.Threading.CancellationToken ct, HashSet<string> qualifiedNames, string serverName = null)
         {
             foreach (string probe in new[] { "get_mass_properties", "get_bounding_box" })
             {
                 ct.ThrowIfCancellationRequested();
+                string callName = probe;
+                try
+                {
+                    if (qualifiedNames != null)
+                        foreach (var qn in qualifiedNames)
+                            if (qn.EndsWith("_" + probe, StringComparison.OrdinalIgnoreCase)) { callName = qn; break; }
+                }
+                catch { callName = probe; }
                 try
                 {
                     // ct-bound: stop during the verify probes interrupts instead of hanging up to 120s each.
-                    var r = await McpBridge.CallToolAsync(probe, new JObject(), 120000, ct, serverName);
+                    var r = await McpBridge.CallToolAsync(callName, new JObject(), 120000, ct, string.Equals(callName, probe, StringComparison.OrdinalIgnoreCase) ? serverName : null);
                     if (r.Ok && !string.IsNullOrWhiteSpace(r.Text))
                     {
                         string t = r.Text;
@@ -1817,13 +2262,13 @@ namespace Forge.SolidWorks
             return null;
         }
 
-        private static async Task<Tuple<JObject, string>> AuthorPlan(IProviderClient client, string intent, string model, List<string> catalog, System.Threading.CancellationToken ct, Action<string, string> onThink)
+        private static async Task<Tuple<JObject, string>> AuthorPlan(IProviderClient client, string intent, string model, List<string> catalog, string instructions, System.Threading.CancellationToken ct, Action<string, string> onThink)
         {
             // Finite cap: uncapped lets reasoning models think forever and the call never returns.
             // Verified live: capped calls complete; uncapped hang past the 10-minute timeout.
             // Model is the run's snapshot (caller's Resolve), never a fresh CurrentModel read.
             // No Temperature: provider default, like Kilo (temp only forced for enhance rewrites).
-            var opts = new ProviderOptions { MaxTokens = 32000, Model = model };
+            var opts = new ProviderOptions { MaxTokens = 32000, Model = model, ReasoningEffort = ReasoningEffort };
             // The intent is untrusted data (framed as such below, dims verbatim — even inch
             // marks survive); the 2000-char cap keeps a pasted blob from becoming a token blowup.
             string safe = (intent ?? "").Trim();
@@ -1835,7 +2280,7 @@ namespace Forge.SolidWorks
                 ct.ThrowIfCancellationRequested();
                 var msgs = new List<ChatMessage>
                 {
-                    new ChatMessage { Role = "system", Content = PlanSystemPrompt + "\n\nAvailable tools:\n" + string.Join("\n", catalog.ToArray()) },
+                    new ChatMessage { Role = "system", Content = PlanSystemPrompt + instructions + "\n\nAvailable tools:\n" + string.Join("\n", catalog.ToArray()) },
                     new ChatMessage { Role = "user", Content = attempt == 0 ? user : user + " JSON object only." }
                 };
                 ProviderResult res;
