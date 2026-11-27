@@ -53,7 +53,7 @@ namespace Forge.SolidWorks
         public static async Task<HandleConfigExplosionResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new HandleConfigExplosionResult();
-            if (model == null) { res.Error = "Open a part or assembly to check its configuration count."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly (.SLDPRT/.SLDASM) to check its configuration count."; return res; }
 
             await emit("Sentinel", "counting configurations", "run", null);
             int count = 0;

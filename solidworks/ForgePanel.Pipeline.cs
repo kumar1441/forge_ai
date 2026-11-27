@@ -2897,8 +2897,10 @@ namespace Forge.SolidWorks
         }
 
         // ---- the runner: returns true if the pipeline handled the command; false => let the offline regex path try. ----
-        private async Task<bool> RunViaPipeline(string intent)
+        private async Task<bool> RunViaPipeline(string intent, System.Threading.CancellationToken ct = default(System.Threading.CancellationToken), string sid = null)
         {
+            ct.ThrowIfCancellationRequested(); // stop/new-chat wins before any COM or cloud work
+            string myId = _currentRunId; // a newer Generate owns the panel: stay silent when stale
             var doc = App?.ActiveDoc as IModelDoc2;
             if (doc == null) return false;   // no doc: let the legacy path show its guidance
 
@@ -2907,14 +2909,18 @@ namespace Forge.SolidWorks
             // property/health check. Same guard as Harness.cs IntentDispatch, kept in sync.
             if (HonestLimits.IsPressureRatingQuestion(intent))
             {
+                if (myId != _currentRunId) return true; // superseded: don't attribute our answer to the new run
                 Send(new { type = "answer", answer = HonestLimits.PressureRatingLimitMessage });
+                try { NotifyToast("Forge done", HonestLimits.PressureRatingLimitMessage); } catch { }
                 return true;
             }
 
             // test-loop wrong-route fix (flange-17-why-leaking): same guard as Harness.cs IntentDispatch, kept in sync.
             if (HonestLimits.IsLeakDiagnosisQuestion(intent))
             {
+                if (myId != _currentRunId) return true; // superseded: don't attribute our answer to the new run
                 Send(new { type = "answer", answer = HonestLimits.LeakDiagnosisLimitMessage });
+                try { NotifyToast("Forge done", HonestLimits.LeakDiagnosisLimitMessage); } catch { }
                 return true;
             }
 
@@ -2924,7 +2930,9 @@ namespace Forge.SolidWorks
             // with Harness.cs IntentDispatch.
             if (HonestLimits.IsWeldRequest(intent))
             {
+                if (myId != _currentRunId) return true; // superseded: don't attribute our answer to the new run
                 Send(new { type = "answer", answer = HonestLimits.WeldLimitMessage });
+                try { NotifyToast("Forge done", HonestLimits.WeldLimitMessage); } catch { }
                 return true;
             }
 
@@ -2933,7 +2941,9 @@ namespace Forge.SolidWorks
             // above, kept in sync with Harness.cs IntentDispatch.
             if (HonestLimits.IsGenerativeSynthesisRequest(intent))
             {
+                if (myId != _currentRunId) return true; // superseded: don't attribute our answer to the new run
                 Send(new { type = "answer", answer = HonestLimits.GenerativeSynthesisLimitMessage });
+                try { NotifyToast("Forge done", HonestLimits.GenerativeSynthesisLimitMessage); } catch { }
                 return true;
             }
 
@@ -2942,7 +2952,9 @@ namespace Forge.SolidWorks
             // IntentDispatch. This scenario's own expected behavior IS to clarify, not act.
             if (HonestLimits.IsVagueAestheticRequest(intent))
             {
+                if (myId != _currentRunId) return true; // superseded: don't attribute our answer to the new run
                 Send(new { type = "answer", answer = HonestLimits.VagueAestheticClarifyMessage });
+                try { NotifyToast("Forge done", HonestLimits.VagueAestheticClarifyMessage); } catch { }
                 return true;
             }
 
@@ -2977,15 +2989,18 @@ namespace Forge.SolidWorks
             // before the cloud parse, same shape as the HonestLimits guards above.
             if (GetFaces.IsIntent(intent))
             {
+                if (myId != _currentRunId) return true; // superseded before starting: the new run owns the panel
                 OpCounter.Increment();
                 ForgeData.RunBegin("get_faces", ForgeData.Mask(intent, IntentLayer.ComponentNames(doc)), 0);
                 Func<string, string, string, string, Task> emitF = async (agent, gloss, state, result) =>
-                { Send(new { type = "step", agent, gloss, state, result }); await Task.Delay(60); };
+                { if (myId != _currentRunId) return; Send(new { type = "step", agent, gloss, state, result }); await Task.Delay(60); };
                 var fr = await GetFaces.Run(App, doc, intent, emitF);
+                if (myId != _currentRunId) return true; // superseded: don't attribute our answer to the new run
                 if (fr.Error != null)
-                { LogRun("get_faces", intent, doc, "error", false, 0, errorCode: "get_faces"); Send(new { type = "error", message = fr.Error }); return true; }
+                { LogRun("get_faces", intent, doc, "error", false, 0, errorCode: "get_faces"); Send(new { type = "error", message = fr.Error }); try { NotifyToast("Forge failed", fr.Error); } catch { } return true; }
                 LogRun("get_faces", intent, doc, "executed", true, fr.Total);
                 Send(new { type = "answer", answer = fr.Info, runId = _currentRunId, handler = "get_faces" });
+                try { NotifyToast("Forge done", fr.Info); } catch { }
                 return true;
             }
 
@@ -2994,11 +3009,13 @@ namespace Forge.SolidWorks
             // route both AUTHORITATIVELY before the cloud parse for the same reason.
             if (GetEdges.IsIntent(intent))
             {
+                if (myId != _currentRunId) return true; // superseded before starting: the new run owns the panel
                 OpCounter.Increment();
                 ForgeData.RunBegin("get_edge_length", ForgeData.Mask(intent, IntentLayer.ComponentNames(doc)), 0);
                 Func<string, string, string, string, Task> emitE = async (agent, gloss, state, result) =>
-                { Send(new { type = "step", agent, gloss, state, result }); await Task.Delay(60); };
+                { if (myId != _currentRunId) return; Send(new { type = "step", agent, gloss, state, result }); await Task.Delay(60); };
                 var er = await GetEdges.Run(App, doc, intent, emitE);
+                if (myId != _currentRunId) return true; // superseded: don't attribute our answer to the new run
                 if (er.Error != null)
                 { LogRun("get_edge_length", intent, doc, "error", false, 0, errorCode: "get_edge_length"); Send(new { type = "error", message = er.Error }); return true; }
                 LogRun("get_edge_length", intent, doc, "executed", true, er.EdgeCount);
@@ -3017,11 +3034,13 @@ namespace Forge.SolidWorks
             // own "diagnose"/"what's wrong"/"audit" wording.
             if (DetectFileHealth.IsIntent(intent))
             {
+                if (myId != _currentRunId) return true; // superseded before starting: the new run owns the panel
                 OpCounter.Increment();
                 ForgeData.RunBegin("detect_file_health", ForgeData.Mask(intent, IntentLayer.ComponentNames(doc)), 0);
                 Func<string, string, string, string, Task> emitFH = async (agent, gloss, state, result) =>
-                { Send(new { type = "step", agent, gloss, state, result }); await Task.Delay(60); };
+                { if (myId != _currentRunId) return; Send(new { type = "step", agent, gloss, state, result }); await Task.Delay(60); };
                 var fhr = await DetectFileHealth.Run(App, doc, intent, emitFH);
+                if (myId != _currentRunId) return true; // superseded: don't attribute our answer to the new run
                 if (fhr.Error != null)
                 { LogRun("detect_file_health", intent, doc, "error", false, 0, errorCode: "detect_file_health"); Send(new { type = "error", message = fhr.Error }); return true; }
                 LogRun("detect_file_health", intent, doc, "executed", true, fhr.RebuildProblems);
@@ -5068,6 +5087,17 @@ namespace Forge.SolidWorks
                 return true;
             }
 
+            // MCP BUILD (multi-part / assembly from scratch) — runs BEFORE recipe: tangled creates the
+            // deterministic paths can't split go to the SolidWorks-MCP server (its own COM session against the
+            // running SolidWorks). Explicit "mcp" asks, assembly builds, and 3+-step compounds land here.
+            if (await TryRunMcpBuild(intent, ct, sid)) return true;
+
+            // RECIPE CREATE (multi-feature from scratch) — runs BEFORE compound: a refused-class create
+            // ("bracket with 4 holes and filleted edges") becomes an LLM-authored feature recipe executed by
+            // RecipeExecutor (native tree, fail-closed verify, doc stays open). Bare primitives and confident
+            // two-step compounds keep their deterministic paths; keyless chat falls through to the honest refusal.
+            if (await TryRunCreateRecipe(intent, ct)) return true;
+
             // COMPOUND CREATE ("create X and add Y on top") — runs FIRST, before the per-shape intercepts below AND before
             // the guardrail each shape's Run() carries: no single bare-primitive handler or CreateGuardrail refusal can
             // honour a genuine two-step ask, so when CompoundCreate confidently splits the intent into a bare primary +
@@ -5082,7 +5112,7 @@ namespace Forge.SolidWorks
             // HSpecs. These run BEFORE the cloud parse so the basic solids route even when the cloud is unreachable.
             // Specific-first: each fenced by its own noun, before the generic create_part. The plate cue uses the
             // widened local net (IsOfflinePlateIntent) so plain block/cube/rectangular phrasing still lands.
-            if (CreateSphere.IsIntent(intent))
+            if (CreateSphere.IsIntent(intent) && !IsEditPhrasing(intent))
             {
                 var spSpec = Specs().Find(s => s.Name == "create_sphere");
                 var spPlan = new IntentPlan { Confidence = 1.0 };
@@ -5097,7 +5127,7 @@ namespace Forge.SolidWorks
             // either, so a bare "make a washer" / "create a cone" would otherwise parse 0 ops. Specific-first, each
             // fenced by its own noun. tube/pipe MUST be claimed before the (widened) create_cylinder, whose matcher also
             // fires on tube|pipe — so the tube family sits above the cylinder intercept below.
-            if (CreateFlange.IsIntent(intent))
+            if (CreateFlange.IsIntent(intent) && !IsEditPhrasing(intent))
             {
                 var flSpec = Specs().Find(s => s.Name == "create_flange");
                 var flPlan = new IntentPlan { Confidence = 1.0 };
@@ -5107,7 +5137,7 @@ namespace Forge.SolidWorks
                 return true;
             }
 
-            if (CreateCone.IsIntent(intent))
+            if (CreateCone.IsIntent(intent) && !IsEditPhrasing(intent))
             {
                 var cnSpec = Specs().Find(s => s.Name == "create_cone");
                 var cnPlan = new IntentPlan { Confidence = 1.0 };
@@ -5117,7 +5147,7 @@ namespace Forge.SolidWorks
                 return true;
             }
 
-            if (CreateTorus.IsIntent(intent))
+            if (CreateTorus.IsIntent(intent) && !IsEditPhrasing(intent))
             {
                 var toSpec = Specs().Find(s => s.Name == "create_torus");
                 var toPlan = new IntentPlan { Confidence = 1.0 };
@@ -5127,7 +5157,7 @@ namespace Forge.SolidWorks
                 return true;
             }
 
-            if (CreateTube.IsIntent(intent))
+            if (CreateTube.IsIntent(intent) && !IsEditPhrasing(intent))
             {
                 var tuSpec = Specs().Find(s => s.Name == "create_tube");
                 var tuPlan = new IntentPlan { Confidence = 1.0 };
@@ -5137,7 +5167,7 @@ namespace Forge.SolidWorks
                 return true;
             }
 
-            if (CreateCylinder.IsIntent(intent))
+            if (CreateCylinder.IsIntent(intent) && !IsEditPhrasing(intent))
             {
                 var cySpec = Specs().Find(s => s.Name == "create_cylinder");
                 var cyPlan = new IntentPlan { Confidence = 1.0 };
@@ -5147,7 +5177,7 @@ namespace Forge.SolidWorks
                 return true;
             }
 
-            if (IsOfflinePlateIntent(intent))
+            if (IsOfflinePlateIntent(intent) && !IsEditPhrasing(intent))
             {
                 var plSpec = Specs().Find(s => s.Name == "create_plate");
                 var plPlan = new IntentPlan { Confidence = 1.0 };
@@ -5380,6 +5410,11 @@ namespace Forge.SolidWorks
         //      outcome so a multi-op chain can decide whether to run its next leg. ----
         private async Task<HOutcome> ExecuteSpec(HSpec spec, IModelDoc2 doc, IntentPlan plan, IntentOperation op, string intent)
         {
+            // The doc is captured before awaits (cloud parse, approvals): it can be null or closed
+            // by the time we run. Fail closed with an actionable message — never a COM cascade.
+            if (doc == null) { Send(new { type = "error", message = "Open a part or assembly first (.SLDPRT/.SLDASM) — open it, then resend." }); return new HOutcome { Error = "no open document — open a part or assembly first (.SLDPRT/.SLDASM), then resend" }; }
+            try { string probe = doc.GetTitle(); }
+            catch { Send(new { type = "error", message = "The model was closed — reopen it and ask again." }); return new HOutcome { Error = "model was closed — reopen it and ask again" }; }
             OpCounter.Increment();
             ForgeData.RunBegin(spec.Name, ForgeData.Mask(intent, IntentLayer.ComponentNames(doc)), 0);
             var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -5392,8 +5427,8 @@ namespace Forge.SolidWorks
             {
                 LogRun(spec.Name, intent, doc, "error", false, 0, plan, ex.GetType().Name, sw.ElapsedMilliseconds);
                 Telemetry.Log("edit_run", success: false, swVersion: SwVer(), opsUsed: OpCounter.Count, errorCode: ex.GetType().Name, questionType: "edit", questionSummary: spec.Name);
-                Send(new { type = "error", message = ex.Message });
-                return new HOutcome { Error = ex.Message };
+                Send(new { type = "error", message = "Couldn't finish that step (" + BoundDetail(ex.Message, 300) + ") — check the model for partial changes, then retry." });
+                return new HOutcome { Error = BoundDetail(ex.Message, 200) };
             }
 
             // confirm-or-ask surfaced by the handler itself (e.g. material: unknown target) — Rule #2.
@@ -5418,6 +5453,8 @@ namespace Forge.SolidWorks
                 durationMs: sw.ElapsedMilliseconds, swVersion: SwVer(), opsUsed: OpCounter.Count, questionType: "edit", questionSummary: spec.Name);
 
             if (o.Card != null) { o.Card["runId"] = _currentRunId; o.Card["handler"] = spec.Name; Send(o.Card); }
+            // Unverified but error-free: report the result HONESTLY — never a clean success claim.
+            else if (!o.Verified) Send(new { type = "answer", answer = (string.IsNullOrWhiteSpace(o.Info) ? "Ran, but nothing to show." : o.Info) + " (couldn't verify — check the model.)", runId = _currentRunId, handler = spec.Name });
             else Send(new { type = "answer", answer = o.Info, runId = _currentRunId, handler = spec.Name });
             return o;
         }
@@ -5462,14 +5499,14 @@ namespace Forge.SolidWorks
                 var nextSpec = Specs().Find(s => Array.IndexOf(s.Actions, action) >= 0);
                 if (nextSpec == null)
                 {
-                    Send(new { type = "answer", answer = "(also asked: \"" + action + "\" — Forge doesn't have a handler for that yet, skipped)" });
+                    Send(new { type = "answer", answer = "(also asked: \"" + action + "\" — Forge doesn't have a handler for that yet, skipped; rephrase it as explicit steps and resend)" });
                     incomplete.Add("\"" + action + "\": no handler, skipped");
                     continue;
                 }
                 bool isAsm = (int)liveDoc.GetType() == (int)swDocumentTypes_e.swDocASSEMBLY;
                 if (nextSpec.AssemblyOnly && !isAsm)
                 {
-                    Send(new { type = "answer", answer = "(also asked: \"" + action + "\" — needs the assembly open, skipped)" });
+                    Send(new { type = "answer", answer = "(also asked: \"" + action + "\" — needs the assembly open, skipped; open the assembly (.SLDASM) and resend)" });
                     incomplete.Add("\"" + action + "\": needs an assembly, skipped");
                     continue;
                 }
@@ -5549,6 +5586,7 @@ namespace Forge.SolidWorks
         //      compound (handled, or reported honestly); false lets the single-shape paths + guardrail keep their behaviour.
         private async Task<bool> TryRunCompoundCreate(string intent)
         {
+            if (IsEditPhrasing(intent)) return false; // "build up the flange and …": an edit, not a two-step from-scratch
             var comp = CompoundCreate.Parse(intent);
             if (comp == null || !comp.IsCompound || comp.Error != null) return false;
 
@@ -5556,7 +5594,7 @@ namespace Forge.SolidWorks
             var spec = action == null ? null : Specs().Find(s => Array.IndexOf(s.Actions, action) >= 0);
             if (spec == null)
             {
-                Send(new { type = "error", message = "I couldn't route the first step of \"" + comp.PrimaryIntent + "\" to a create handler." });
+                Send(new { type = "error", message = "I couldn't route the first step of \"" + comp.PrimaryIntent + "\" to a create handler — rephrase as explicit steps, then resend." });
                 return true;
             }
 
@@ -5573,7 +5611,7 @@ namespace Forge.SolidWorks
             var part = App?.ActiveDoc as IModelDoc2;
             if (part == null)
             {
-                Send(new { type = "answer", answer = "The primary was created but no part document is open to add the " + comp.SecondaryShape + " to — check the model.", runId = _currentRunId, handler = spec.Name + "+on_top" });
+                Send(new { type = "answer", answer = "The primary was created but no part document is open to add the " + comp.SecondaryShape + " to — open the created part, then ask for the " + comp.SecondaryShape + " again.", runId = _currentRunId, handler = spec.Name + "+on_top" });
                 return true;
             }
 
@@ -5591,6 +5629,182 @@ namespace Forge.SolidWorks
                 ? (so["info"] != null ? so["info"].Value<string>() : "added a " + comp.SecondaryShape + " on top")
                 : (secErr ?? "the " + comp.SecondaryShape + " on top couldn't be verified");
             Send(new { type = "answer", answer = "Done in two steps — " + first + " Then " + second, runId = _currentRunId, handler = spec.Name + "+on_top" });
+            return true;
+        }
+
+        // Streams an LLM's chain-of-thought into the panel live (Kilo-style thinking block):
+        // reasoning deltas are marshalled to the UI thread and flushed at most twice a second so a
+        // 50k-token think doesn't flood the WebView. On interrupt the partial block is left standing.
+        private class ThinkRelay
+        {
+            private readonly System.Threading.SynchronizationContext _ui;
+            private readonly Action<object> _send;
+            private readonly Func<bool> _alive; // superseded runs go silent: their deltas must not interleave the new run's thinking block
+            private readonly System.Diagnostics.Stopwatch _sw;
+            private readonly System.Text.StringBuilder _buf = new System.Text.StringBuilder();
+            private readonly string _label;
+            private DateTime _lastFlush = DateTime.MinValue;
+
+            public ThinkRelay(string label, Action<object> send, Func<bool> alive = null)
+            {
+                _label = label ?? "Thinking";
+                _send = send;
+                _alive = alive;
+                try { _ui = System.Threading.SynchronizationContext.Current; } catch { }
+                _sw = System.Diagnostics.Stopwatch.StartNew();
+            }
+            public void Start(string model)
+            {
+                Post(new { type = "thinkStart", model = model, label = _label });
+            }
+            private bool _ended; // End() won: late deltas are dropped, never posted after thinkEnd
+            public void OnDelta(string kind, string text)
+            {
+                if (kind != "reasoning" || string.IsNullOrEmpty(text)) return;
+                try { if (_alive != null && !_alive()) return; } catch { }
+                bool flush = false;
+                lock (_buf)
+                {
+                    if (_ended) return;
+                    _buf.Append(text);
+                    if ((DateTime.UtcNow - _lastFlush).TotalMilliseconds >= 500) { _lastFlush = DateTime.UtcNow; flush = true; }
+                }
+                if (flush) Flush();
+            }
+            public void Flush()
+            {
+                string chunk;
+                lock (_buf) { chunk = _buf.ToString(); _buf.Clear(); }
+                if (chunk.Length > 0) Post(new { type = "think", text = chunk });
+            }
+            public void End(bool interrupted)
+            {
+                lock (_buf) { if (_ended) return; _ended = true; } // idempotent: double-End sends one thinkEnd
+                Flush();
+                try { _sw.Stop(); } catch { }
+                Post(new { type = "thinkEnd", seconds = (int)_sw.Elapsed.TotalSeconds, interrupted = interrupted });
+            }
+            private void Post(object msg)
+            {
+                // Superseded runs stay silent: a stale thinkStart/think/thinkEnd must never
+                // interleave with (or close) the new run's thinking block.
+                try { if (_alive != null && !_alive()) return; } catch { return; }
+                try
+                {
+                    // Re-check inside the marshalled callback: the run can be superseded between
+                    // queueing and UI-thread execution, and the queued chunk must not land in the
+                    // new run's thinking block (nor close it, via a stale thinkEnd).
+                    if (_ui != null) _ui.Post(_ => { try { if (_alive != null && !_alive()) return; _send(msg); } catch { } }, null);
+                    else _send(msg);
+                }
+                catch { }
+            }
+        }
+
+        // RECIPE CREATE runner: refused-class creates (guardrail cue present, not a confident 2-step
+        // compound) are authored into a feature recipe by the user's own provider and built natively.
+        // Returns true when claimed (success OR honest error); false falls through to the existing
+        // deterministic create paths + guardrail refusal (bare primitives, keyless chat).
+        private async Task<bool> TryRunCreateRecipe(string intent, System.Threading.CancellationToken ct)
+        {
+            if (IsEditPhrasing(intent)) return false; // create-verb edit ("build up …", "make this thicker"): never a recipe
+            if (!CreateFromRecipe.IsRecipeCreate(intent)) return false;
+            if (ProviderFactoryAvailable() == false) return false;
+
+            string myIdR = _currentRunId; // a newer Generate owns the panel: stay silent when stale
+            try { PanelCapture.Log("parse", new { intent, action = "create_recipe", confidence = 1.0, routed = "create_recipe", source = "recipe-create" }); } catch { }
+            Func<string, string, string, string, Task> emitR = async (a, g, s, r) =>
+            { if (myIdR != _currentRunId) return; Send(new { type = "step", agent = a, gloss = g, state = s, result = r }); await Task.Delay(60); };
+            CreateFromRecipe.RecipeCreateOutcome rc;
+            try { rc = await CreateFromRecipe.Run(App, intent, emitR, ct); }
+            catch (OperationCanceledException) { if (myIdR == _currentRunId) Send(new { type = "answer", answer = "Interrupted — nothing was built. Edit and resend, or ↩ revert to an earlier prompt.", runId = _currentRunId, handler = "create_recipe" }); return true; }
+            catch (Exception ex) { if (myIdR == _currentRunId) Send(new { type = "answer", answer = "Recipe build failed (" + BoundDetail(ex.Message, 300) + ") — nothing was built; edit and resend.", runId = _currentRunId, handler = "create_recipe" }); return true; }
+            if (myIdR != _currentRunId) return true; // superseded: don't attribute our answer to the new run
+            if (rc == null || !rc.Attempted) return false; // no provider / not claimable: existing paths keep behaviour
+            if (!string.IsNullOrEmpty(rc.Error))
+            {
+                Send(new { type = "answer", answer = rc.Error, runId = _currentRunId, handler = "create_recipe" });
+                return true;
+            }
+            Send(new { type = "answer", answer = rc.Summary, runId = _currentRunId, handler = "create_recipe" });
+            return true;
+        }
+
+        private static bool ProviderFactoryAvailable()
+        {
+            try { return Forge.Providers.ProviderFactory.Resolve() != null; }
+            catch { return false; }
+        }
+
+        // MCP BUILD runner: explicit "mcp" asks, assembly from-scratch builds, and 3+-step compounds
+        // execute as LLM-authored tool plans against the SolidWorks-MCP server. True when claimed
+        // (success OR honest error); false falls through (bare/single-part -> recipe/deterministic paths).
+        private async Task<bool> TryRunMcpBuild(string intent, System.Threading.CancellationToken ct, string sid)
+        {
+            if (!McpBuild.IsMcpCreate(intent)) return false;
+            if (ProviderFactoryAvailable() == false) return false;
+
+            string myId = _currentRunId; // a newer Generate owns the panel: stay silent when stale
+            try { PanelCapture.Log("parse", new { intent, action = "mcp_build", confidence = 1.0, routed = "mcp_build", source = "mcp-build" }); } catch { }
+            Func<string, string, string, string, Task> emitM = async (a, g, s, r) =>
+            { if (myId != _currentRunId) return; Send(new { type = "step", agent = a, gloss = g, state = s, result = r }); await Task.Delay(60); };
+            var relay = new ThinkRelay("Planning", msg => Send(msg), () => myId == _currentRunId);
+            try { relay.Start(Forge.Providers.ProviderFactory.CurrentModel() ?? "the selected model"); } catch { }
+            McpBuild.McpBuildOutcome mc;
+            // The approval gate posts its cards through this sender: without it the panel never
+            // shows the approve/reject card and any gated tool hangs until stop. Stale-guarded so
+            // a superseded run's late card can't hijack the new run's approval flow.
+            var mySender = new Action<JObject>(card => { if (myId == _currentRunId) Send(card); });
+            McpBuild.CardSender = mySender;
+            try { mc = await McpBuild.RunAgent(intent, emitM, ct, relay.OnDelta, sid, mySender, () => myId == _currentRunId); relay.End(mc == null || mc.Error == "INTERRUPTED"); }
+            catch (OperationCanceledException)
+            {
+                relay.End(true);
+                if (myId == _currentRunId)
+                {
+                    if (!ct.IsCancellationRequested)
+                    {
+                        Send(new { type = "answer", answer = "Timed out after 10 minutes of thinking", runId = _currentRunId, handler = "mcp_build" });
+                        try { NotifyToast("Forge timed out", "Timed out after 10 minutes of thinking"); } catch { }
+                    }
+                    else
+                    {
+                        Send(new { type = "answer", answer = "Interrupted — partial thinking is kept above. ↩ revert a turn, or edit and resend.", runId = _currentRunId, handler = "mcp_build" });
+                        try { NotifyToast("Forge done", "Run interrupted — partial thinking is kept above."); } catch { }
+                    }
+                }
+                return true;
+            }
+                catch (Exception ex)
+                {
+                    try { relay.End(false); } catch { }
+                    string answer = "Build failed (" + BoundDetail(ex.Message, 300) + ") — what built so far stays open; edit and resend.";
+                    if (myId == _currentRunId)
+                    {
+                        Send(new { type = "answer", answer = answer, runId = _currentRunId, handler = "mcp_build" });
+                        try { NotifyToast("Forge failed", "Build failed (" + BoundDetail(ex.Message, 300) + ")"); } catch { }
+                    }
+                    return true;
+                }
+            finally { if (McpBuild.CardSender == mySender) McpBuild.CardSender = null; }
+            if (myId != _currentRunId) return true; // superseded: don't attribute our answer to the new run
+            if (mc == null || !mc.Attempted) return false; // no provider: existing paths keep behaviour
+            if (!string.IsNullOrEmpty(mc.Error))
+            {
+                if (mc.Error == "INTERRUPTED")
+                {
+                    Send(new { type = "answer", answer = "Interrupted — partial thinking is kept above. ↩ revert a turn, or edit and resend.", runId = _currentRunId, handler = "mcp_build" });
+                    try { NotifyToast("Forge done", "Run interrupted — partial thinking is kept above."); } catch { }
+                }
+                else
+                {
+                    Send(new { type = "answer", answer = mc.Error, runId = _currentRunId, handler = "mcp_build" });
+                    try { NotifyToast("Forge failed", mc.Error); } catch { }
+                }
+                return true;
+            }
+            Send(new { type = "answer", answer = mc.Summary, runId = _currentRunId, handler = "mcp_build" });
+            try { NotifyToast("Forge done", mc.Summary); } catch { }
             return true;
         }
 
@@ -5634,13 +5848,13 @@ namespace Forge.SolidWorks
             // "plate" word — still lands on the from-scratch plate solid offline. The ported CreatePlate.IsIntent stays
             // untouched. tube/pipe is claimed by create_tube (the widened create_cylinder matcher also fires on
             // tube|pipe), so the tube family MUST be tested before create_cylinder.
-            if (CreateSphere.IsIntent(i)) return "create_sphere";
-            if (CreateFlange.IsIntent(i)) return "create_flange";
-            if (CreateCone.IsIntent(i)) return "create_cone";
-            if (CreateTorus.IsIntent(i)) return "create_torus";
-            if (CreateTube.IsIntent(i)) return "create_tube";
-            if (CreateCylinder.IsIntent(i)) return "create_cylinder";
-            if (IsOfflinePlateIntent(i)) return "create_plate";
+            if (CreateSphere.IsIntent(i) && !IsEditPhrasing(i)) return "create_sphere";
+            if (CreateFlange.IsIntent(i) && !IsEditPhrasing(i)) return "create_flange";
+            if (CreateCone.IsIntent(i) && !IsEditPhrasing(i)) return "create_cone";
+            if (CreateTorus.IsIntent(i) && !IsEditPhrasing(i)) return "create_torus";
+            if (CreateTube.IsIntent(i) && !IsEditPhrasing(i)) return "create_tube";
+            if (CreateCylinder.IsIntent(i) && !IsEditPhrasing(i)) return "create_cylinder";
+            if (IsOfflinePlateIntent(i) && !IsEditPhrasing(i)) return "create_plate";
             // Reference-plane cue ("create/make a plane") — NOT a plate/block solid. Action value matches the
             // create_reference_plane HSpec's Actions[] exactly (CreateRefPlane.IsCreateRefPlaneIntent already
             // excludes remove/delete phrasing).
@@ -5867,6 +6081,24 @@ namespace Forge.SolidWorks
             return verb && noun;
         }
 
+        // Edit-flavored phrasing that still carries a create verb ("build up the flange",
+        // "make this thicker", "make the length 100mm"). The create-first hooks (recipe/compound/
+        // single-shape) must not claim these: a from-scratch create closes the current doc, so an
+        // edit misrouted here destroys context. Mirrors the McpBuild.IsMcpCreate exclusions; checked
+        // at the intercepts because the per-shape IsIntent matchers accept the same verbs. Narrow by
+        // construction (demonstrative + comparative, "the X thicker", "make it N"), so bare creates
+        // ("make the flange 40mm diameter", "create a thicker plate") keep routing.
+        private static bool IsEditPhrasing(string intent)
+        {
+            if (string.IsNullOrEmpty(intent)) return false;
+            if (Regex.IsMatch(intent, @"\bbuil[dt]\s+up\b", RegexOptions.IgnoreCase)) return true;
+            if (Regex.IsMatch(intent, @"\b(this|that|these|those|it)\b.{0,20}\b(thicker|thinner|taller|shorter|wider|narrower|larger|smaller|longer)\b", RegexOptions.IgnoreCase)) return true;
+            if (Regex.IsMatch(intent, @"\b(the|this|that)\b[^,.;]{0,25}\b(thicker|thinner)\b", RegexOptions.IgnoreCase)) return true;
+            if (Regex.IsMatch(intent, @"\bmake\s+it\s+\d", RegexOptions.IgnoreCase)) return true;
+            if (Regex.IsMatch(intent, @"\b(the|this|that|it|its)\s+(length|width|height|depth|diameter|radius|thickness)\b", RegexOptions.IgnoreCase)) return true;
+            return false;
+        }
+
         private static bool IsAffirmative(string s)
         {
             s = (s ?? "").Trim().ToLowerInvariant();
@@ -5884,20 +6116,6 @@ namespace Forge.SolidWorks
         {
             try { var a = doc as AssemblyDoc; if (a != null) return a.GetComponentCount(false); } catch { }
             return 0;
-        }
-        // Count sibling .slddrw files next to the open doc — the drawing-package preview needs a count without
-        // pulling in DrawingPkg internals.
-        private static int DrawingPkgCount(IModelDoc2 doc)
-        {
-            try
-            {
-                string p = doc.GetPathName();
-                if (string.IsNullOrEmpty(p)) return 0;
-                string dir = System.IO.Path.GetDirectoryName(p);
-                if (string.IsNullOrEmpty(dir) || !System.IO.Directory.Exists(dir)) return 0;
-                return System.IO.Directory.GetFiles(dir, "*.slddrw").Length;
-            }
-            catch { return 0; }
         }
         // Read-only handlers log as read_run (like scan): they never write the model.
         private static bool IsReadHandler(string name)

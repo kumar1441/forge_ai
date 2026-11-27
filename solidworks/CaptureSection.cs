@@ -76,7 +76,7 @@ namespace Forge.SolidWorks
         public static async Task<CaptureSectionResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new CaptureSectionResult();
-            if (model == null) { res.Error = "Open a part or assembly to capture a section view."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly (.SLDPRT/.SLDASM) to capture a section view."; return res; }
 
             int docType = 0; try { docType = model.GetType(); } catch { }
             if (docType == (int)swDocumentTypes_e.swDocDRAWING)

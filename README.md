@@ -71,7 +71,7 @@ Signed one-command installer coming.
 
 **DeepSeek** — the cheapest route to try Forge; new accounts get free starter credit.
 1. Sign up at `platform.deepseek.com`, then **API Keys → Create** and copy the key.
-2. In `config.json` set `provider` = `openai-compatible`, `baseUrl` = `https://api.deepseek.com/v1`, `model` = `deepseek-chat`.
+2. In `config.json` set `provider` = `openai-compatible`, `baseUrl` = `https://api.deepseek.com/v1`, `model` = `deepseek-flash`.
 3. Set the key: `setx FORGE_PROVIDER_KEY "sk-..."` (then restart SolidWorks).
 
 **OpenRouter** — one key, every model (Claude, GPT, Llama, DeepSeek…).

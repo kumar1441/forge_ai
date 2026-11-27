@@ -47,7 +47,7 @@ namespace Forge.SolidWorks
         public static async Task<GetRebuildErrorsResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new GetRebuildErrorsResult();
-            if (model == null) { res.Error = "Open a part or assembly to list its rebuild errors."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly (.SLDPRT/.SLDASM) to list its rebuild errors."; return res; }
             try { model.ForceRebuild3(false); } catch { }
 
             await emit("Sentinel", "reading rebuild status", "run", null);

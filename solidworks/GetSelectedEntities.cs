@@ -53,7 +53,7 @@ namespace Forge.SolidWorks
         public static async Task<GetSelectedEntitiesResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new GetSelectedEntitiesResult();
-            if (model == null) { res.Error = "Open a part or assembly first."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly first (.SLDPRT/.SLDASM) — open it, then resend."; return res; }
 
             await emit("Selector", "reading current selection", "run", null);
 

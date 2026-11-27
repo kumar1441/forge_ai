@@ -51,10 +51,10 @@ namespace Forge.SolidWorks
         public static async Task<GetFixtureCapacityResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new GetFixtureCapacityResult();
-            if (model == null) { res.Error = "Open a part or assembly to check capacity."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly (.SLDPRT/.SLDASM) to check capacity."; return res; }
             int docType = 0; try { docType = (int)model.GetType(); } catch { }
             if (docType != (int)swDocumentTypes_e.swDocPART && docType != (int)swDocumentTypes_e.swDocASSEMBLY)
-            { res.Error = "Open a part or assembly to check capacity."; return res; }
+            { res.Error = "Open a part or assembly (.SLDPRT/.SLDASM) to check capacity."; return res; }
 
             await emit("Tally", "looking for repeated clamp/pocket geometry", "run", null);
 

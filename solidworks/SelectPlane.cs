@@ -48,7 +48,7 @@ namespace Forge.SolidWorks
         public static async Task<SelectPlaneResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new SelectPlaneResult();
-            if (model == null) { res.Error = "Open a part or assembly to select a plane."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly (.SLDPRT/.SLDASM) to select a plane."; return res; }
 
             string query = ParseQuery(intent);
             if (string.IsNullOrEmpty(query))

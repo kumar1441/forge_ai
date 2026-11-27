@@ -37,13 +37,13 @@ namespace Forge.SolidWorks
         public static async Task<MassPropsResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new MassPropsResult();
-            if (model == null) { res.Error = "Open a part or assembly first — there's nothing to weigh."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly first (.SLDPRT/.SLDASM) — open it, then resend."; return res; }
 
-            await emit("Scale", "computing mass properties", "run", null);
+            await emit("Scale", "computing mass properties", "run", null).ConfigureAwait(false);
             try
             {
                 var mp = model.Extension.CreateMassProperty();
-                if (mp == null) { res.Error = "SolidWorks couldn't compute mass properties on this model."; await emit("Scale", null, "fail", "no mass property"); return res; }
+                if (mp == null) { res.Error = "SolidWorks couldn't compute mass properties on this model."; await emit("Scale", null, "fail", "no mass property").ConfigureAwait(false); return res; }
                 res.VolumeMm3 = mp.Volume * 1e9;          // m^3 -> mm^3
                 res.SurfaceAreaMm2 = mp.SurfaceArea * 1e6; // m^2 -> mm^2
                 var com = mp.CenterOfMass as double[];
@@ -59,21 +59,21 @@ namespace Forge.SolidWorks
             catch (Exception ex)
             {
                 res.Error = "Mass properties failed (" + ex.GetType().Name + ") — the model may have no solid body.";
-                await emit("Scale", null, "fail", ex.GetType().Name);
+                await emit("Scale", null, "fail", ex.GetType().Name).ConfigureAwait(false);
                 return res;
             }
 
             if (res.VolumeMm3 <= 0)
             {
                 res.Error = "No computable mass — this model has no solid body (a sketch/surface part, or an empty assembly).";
-                await emit("Scale", null, "done", "no solid mass to report");
+                await emit("Scale", null, "done", "no solid mass to report").ConfigureAwait(false);
                 return res;
             }
 
             res.Verified = true;
             res.Info = BuildInfo(res);
             await emit("Scale", null, "done",
-                (res.MaterialAssigned ? Grams(res.MassKg) : "mass unknown (no material)") + " · " + Trim(res.VolumeMm3) + " mm³");
+                (res.MaterialAssigned ? Grams(res.MassKg) : "mass unknown (no material)") + " · " + Trim(res.VolumeMm3) + " mm³").ConfigureAwait(false);
             return res;
         }
 

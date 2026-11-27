@@ -50,7 +50,7 @@ namespace Forge.SolidWorks
         public static async Task<ImpactResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new ImpactResult();
-            if (model == null) { res.Error = "Open a part or assembly first."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly first (.SLDPRT/.SLDASM) — open it, then resend."; return res; }
 
             await emit("Tracer", "finding what you're pointing at", "run", null);
 

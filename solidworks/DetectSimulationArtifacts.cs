@@ -56,7 +56,7 @@ namespace Forge.SolidWorks
         public static async Task<DetectSimulationArtifactsResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new DetectSimulationArtifactsResult();
-            if (model == null) { res.Error = "Open a part or assembly to check for simulation artifacts."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly (.SLDPRT/.SLDASM) to check for simulation artifacts."; return res; }
 
             await emit("Sentinel", "scanning the feature tree for weld-bead / belt-chain artifacts", "run", null);
 

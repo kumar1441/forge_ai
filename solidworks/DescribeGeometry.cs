@@ -68,7 +68,7 @@ namespace Forge.SolidWorks
         public static async Task<DescribeGeometryResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new DescribeGeometryResult();
-            if (model == null) { res.Error = "Open a part first."; return res; }
+            if (model == null) { res.Error = "Open a part first (.SLDPRT) — open it, then resend."; return res; }
             var part = model as PartDoc;
             if (part == null) { res.Error = "Describing geometry works on a part — open the .SLDPRT, not an assembly."; return res; }
 

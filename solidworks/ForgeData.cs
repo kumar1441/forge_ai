@@ -24,6 +24,7 @@ namespace Forge.SolidWorks
         // ---- update channel: returns a "new build available" notice if the server version is newer, else null ----
         public static async Task<string> UpdateNotice()
         {
+            try { if (!Telemetry.Enabled) return null; } catch { return null; } // defense in depth: no background egress when sharing is off, regardless of caller
             try
             {
                 var j = await Cloud.GetJsonAsync("https://www.getforge.build/api/version");
@@ -180,12 +181,14 @@ namespace Forge.SolidWorks
         {
             try
             {
+                string safeReason = Mask(reason ?? "", null);
+                if (safeReason.Length > 24) safeReason = safeReason.Substring(0, 24);
+                string safeText = string.IsNullOrEmpty(text) ? null : Mask(text.Length > 300 ? text.Substring(0, 300) : text, null);
                 var ev = new JObject
                 {
                     ["schema_version"] = SchemaVersion, ["ts"] = DateTime.UtcNow.ToString("o"), ["install_id"] = InstallId,
                     ["type"] = "feedback", ["run_id"] = runId, ["handler"] = handler,
-                    ["rating"] = rating, ["reason"] = (reason ?? "").Length > 24 ? reason.Substring(0, 24) : reason,
-                    ["text"] = string.IsNullOrEmpty(text) ? null : (text.Length > 300 ? text.Substring(0, 300) : text)
+                    ["rating"] = rating, ["reason"] = safeReason, ["text"] = safeText
                 };
                 Append("events.jsonl", ev);
                 if (rating < 0) Append("failures.jsonl", ev);  // thumbs-down feeds the improvement backlog

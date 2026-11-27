@@ -209,14 +209,14 @@ namespace Forge.SolidWorks
 
         // one cut attempt (sketch a centre rectangle at the face centroid, cut blind-to-depth or through-all). Returns
         // an error string on a hard failure (leaves cleanup to the caller's RollbackPocket), or null on a created cut.
-        private static async Task<string> TryCut(ISldWorks app, IModelDoc2 model, MathUtility mu, PlanarFace target, AddPocketResult res, bool reverse, Func<string, string, string, string, Task> emit)
+        private static Task<string> TryCut(ISldWorks app, IModelDoc2 model, MathUtility mu, PlanarFace target, AddPocketResult res, bool reverse, Func<string, string, string, string, Task> emit)
         {
             Feature cut = null;
             try
             {
                 try { model.ClearSelection2(true); } catch { }
                 bool sel = false; try { sel = ((Entity)target.Face).Select4(false, null); } catch { }
-                if (!sel) return "Couldn't select the target face to sketch on — the part geometry may be in an unexpected state.";
+                if (!sel) return Task.FromResult("Couldn't select the target face to sketch on — the part geometry may be in an unexpected state.");
 
                 var sk = model.SketchManager;
                 sk.InsertSketch(true);
@@ -228,7 +228,7 @@ namespace Forge.SolidWorks
                     try { model.ClearSelection2(true); } catch { }
                     var loose = model.FeatureByPositionReverse(0) as Feature;
                     if (loose != null) { try { loose.Select2(false, 0); model.EditDelete(); } catch { } }
-                    return "Couldn't project the face centre into the sketch — Forge left the part untouched.";
+                    return Task.FromResult("Couldn't project the face centre into the sketch — Forge left the part untouched.");
                 }
                 double halfW = res.WidthMm / 2.0 * MM;
                 double halfL = res.LengthMm / 2.0 * MM;
@@ -254,7 +254,7 @@ namespace Forge.SolidWorks
             }
             catch (Exception ex)
             {
-                return "The pocket cut couldn't be created (" + ex.GetType().Name + ") — Forge rolled back and left the part unchanged.";
+                return Task.FromResult("The pocket cut couldn't be created (" + ex.GetType().Name + ") — Forge rolled back and left the part unchanged.");
             }
 
             if (cut == null)
@@ -269,10 +269,10 @@ namespace Forge.SolidWorks
                 }
                 catch { }
                 try { model.ClearSelection2(true); } catch { }
-                return "SolidWorks refused the cut — the rectangle may not have landed on the solid. The part is unchanged.";
+                return Task.FromResult("SolidWorks refused the cut — the rectangle may not have landed on the solid. The part is unchanged.");
             }
             try { cut.Name = PocketFeatureName; } catch { }   // tag for idempotency (Rule #5)
-            return null;
+            return Task.FromResult<string>(null);
         }
 
         private static string BuildInfo(AddPocketResult r, double removed)

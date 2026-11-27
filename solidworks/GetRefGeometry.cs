@@ -34,7 +34,7 @@ namespace Forge.SolidWorks
         public static async Task<GetRefGeometryResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new GetRefGeometryResult();
-            if (model == null) { res.Error = "Open a part or assembly to list its reference geometry."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly (.SLDPRT/.SLDASM) to list its reference geometry."; return res; }
 
             await emit("Reader", "reading reference geometry", "run", null);
             var f = model.FirstFeature() as Feature;

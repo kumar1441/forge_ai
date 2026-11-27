@@ -34,7 +34,7 @@ namespace Forge.SolidWorks
         public static async Task<BoundingBoxResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new BoundingBoxResult();
-            if (model == null) { res.Error = "Open a part or assembly to measure its size."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly (.SLDPRT/.SLDASM) to measure its size."; return res; }
 
             await emit("Caliper", "measuring the overall size", "run", null);
             double[] box = null;

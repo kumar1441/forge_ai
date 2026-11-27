@@ -38,7 +38,7 @@ namespace Forge.SolidWorks
         public static async Task<SetCustomPropertyResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new SetCustomPropertyResult();
-            if (model == null) { res.Error = "Open a part or assembly to set a custom property."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly (.SLDPRT/.SLDASM) to set a custom property."; return res; }
             string txt = intent ?? "";
 
             // Parse name + value. Prefer quoted tokens; else "property <name> to <value>".

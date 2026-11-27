@@ -37,7 +37,7 @@ namespace Forge.SolidWorks
         public static async Task<CreateConfigurationResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new CreateConfigurationResult();
-            if (model == null) { res.Error = "Open a part or assembly to add a configuration."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly (.SLDPRT/.SLDASM) to add a configuration."; return res; }
 
             // parse the name: "called X" / "named X" / the last token
             string name = null;

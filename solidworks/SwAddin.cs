@@ -65,6 +65,7 @@ namespace Forge.SolidWorks
         public bool DisconnectFromSW()
         {
             Telemetry.Log("session_end");
+            try { McpBridge.Stop(); } catch { } // drop the MCP server child process with the session
             Forge.Cad.CadHost.Unregister(_cadAdapter);
             _cadAdapter = null;
             if (_taskpaneView != null)
@@ -73,6 +74,8 @@ namespace Forge.SolidWorks
                 Marshal.ReleaseComObject(_taskpaneView);
                 _taskpaneView = null;
             }
+            try { if (_panel != null) _panel.Shutdown(); } catch { } // hide + dispose tray icon, free owned HICON: no ghost icon after unload
+            try { if (_panel != null) _panel.Dispose(); } catch { } // fires Disposed (idempotent with Shutdown) + releases the WebView2 host
             _panel = null;
             SwApp = null;
             GC.Collect();
@@ -89,8 +92,18 @@ namespace Forge.SolidWorks
 
         private void CreateTaskPane()
         {
-            // Empty icon path is allowed; SolidWorks shows a default tab.
-            _taskpaneView = SwApp.CreateTaskpaneView2("", "Forge");
+            // Forge icon ships beside the DLL (forge.bmp, copied by the build). Missing file ->
+            // fall back to the default tab exactly as before.
+            string icon = "";
+            try
+            {
+                string bmp = System.IO.Path.Combine(
+                    System.IO.Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location),
+                    "forge.bmp");
+                if (System.IO.File.Exists(bmp)) icon = bmp;
+            }
+            catch { }
+            _taskpaneView = SwApp.CreateTaskpaneView2(icon, "Forge");
             _panel = (ForgePanel)_taskpaneView.AddControl(PanelProgId, "");
         }
 

@@ -36,7 +36,7 @@ namespace Forge.SolidWorks
         public static async Task<DeleteConfigurationResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new DeleteConfigurationResult();
-            if (model == null) { res.Error = "Open a part or assembly to delete a configuration."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly (.SLDPRT/.SLDASM) to delete a configuration."; return res; }
 
             string name = null;
             var m = Regex.Match(intent ?? "", @"(?:delete|remove|drop)\s+(?:the\s+)?([A-Za-z0-9_\-]+)", RegexOptions.IgnoreCase);

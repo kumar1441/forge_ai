@@ -63,7 +63,7 @@ namespace Forge.SolidWorks
         public static async Task<CountGearTeethResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new CountGearTeethResult();
-            if (model == null) { res.Error = "Open a part or assembly first."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly first (.SLDPRT/.SLDASM) — open it, then resend."; return res; }
 
             await emit("Gauge", "locating the gear body/bodies", "run", null);
             var targets = new List<Tuple<string, Body2>>();
@@ -114,7 +114,7 @@ namespace Forge.SolidWorks
                 string title = null; try { title = model.GetTitle(); } catch { }
                 targets.Add(Tuple.Create(title ?? "part", best));
             }
-            else { res.Error = "Open a part or assembly to count gear teeth."; return res; }
+            else { res.Error = "Open a part or assembly (.SLDPRT/.SLDASM) to count gear teeth."; return res; }
 
             await emit("Scribe", "scanning tooth-tip faces", "run", null);
             var lines = new List<string>();

@@ -46,7 +46,7 @@ namespace Forge.SolidWorks
         public static async Task<ClearSelectionResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new ClearSelectionResult();
-            if (model == null) { res.Error = "Open a part or assembly to clear the selection."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly (.SLDPRT/.SLDASM) to clear the selection."; return res; }
 
             await emit("Selector", "clearing selection", "run", null);
 

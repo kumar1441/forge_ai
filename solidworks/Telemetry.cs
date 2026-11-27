@@ -33,6 +33,17 @@ namespace Forge.SolidWorks
             return c;
         }
 
+        // Free-text fields can carry whatever the user typed (paths, dims, names) — redact
+        // file-like tokens and cap length so payloads stay anonymous even when ON.
+        private static string Scrub(string s, int max)
+        {
+            if (string.IsNullOrEmpty(s)) return s;
+            try { s = System.Text.RegularExpressions.Regex.Replace(s, @"[\w\-]+\.(sldprt|sldasm|slddrw|step|stp|iges|igs|x_t)\b", "<file>", System.Text.RegularExpressions.RegexOptions.IgnoreCase); } catch { }
+            s = s.Trim();
+            if (s.Length > max) s = s.Substring(0, max);
+            return s;
+        }
+
         public static void Log(
             string eventType,
             bool? success = null,
@@ -67,7 +78,7 @@ namespace Forge.SolidWorks
                     sw_version = swVersion,
                     error_code = errorCode,
                     sentiment,
-                    feedback,
+                    feedback = Scrub(feedback, 300),
                     tokens_in = tokensIn,
                     tokens_out = tokensOut,
                     model_name = modelName,
@@ -76,7 +87,7 @@ namespace Forge.SolidWorks
                     est_cost_usd = estCostUsd,
                     ops_used = opsUsed,
                     question_type = questionType,
-                    question_summary = questionSummary
+                    question_summary = Scrub(questionSummary, 120)
                 };
                 string json = JsonConvert.SerializeObject(payload);
 

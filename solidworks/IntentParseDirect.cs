@@ -40,7 +40,8 @@ namespace Forge.SolidWorks
             if (ctxText.Length > 12000) ctxText = ctxText.Substring(0, 12000);
             string user = "Context:\n" + ctxText + "\n\nUser said: \"" + (prompt ?? "").Trim() + "\"\n\nReturn the parse JSON.";
 
-            var opts = new ProviderOptions { MaxTokens = 1500, Temperature = 0 };
+            string parseModel = ProviderFactory.CurrentModel();
+            var opts = new ProviderOptions { MaxTokens = 1500, Model = parseModel, ReasoningEffort = ForgePanel.ConfiguredReasoningEffortFor(parseModel) };
             for (int attempt = 0; attempt < 2; attempt++) // one JSON-repair retry, then give up
             {
                 try
@@ -51,14 +52,14 @@ namespace Forge.SolidWorks
                         new ChatMessage { Role = "user", Content = attempt == 0 ? user : user + "\n\nOutput ONLY the JSON object. No markdown fences, no commentary." }
                     };
                     var res = await client.CompleteAsync(msgs, opts, CancellationToken.None).ConfigureAwait(false);
+                    try { if (res != null) IntentRate.Note(res.TokIn, res.TokOut); } catch { } // every response spends tokens, even garbage ones
                     var plan = ExtractJson(res != null ? res.Text : null);
                     if (plan == null) continue; // repair retry
                     if (!(plan["operations"] is JArray)) plan["operations"] = new JArray();
                     if (!(plan["ambiguities"] is JArray)) plan["ambiguities"] = new JArray();
                     if (plan["confidence"] == null || plan["confidence"].Type != JTokenType.Float && plan["confidence"].Type != JTokenType.Integer)
                         plan["confidence"] = ((JArray)plan["operations"]).Count > 0 ? 0.7 : 0.0;
-                    IntentRate.Note(res.TokIn, res.TokOut);
-                    GroundTruth.Trace?.Invoke("intent-parse: direct provider=" + client.Id + " model=" + res.Model);
+                    GroundTruth.Trace?.Invoke("intent-parse: direct provider=" + client.Id + " model=" + (res != null ? res.Model : "?"));
                     return plan;
                 }
                 catch (OperationCanceledException) { return null; }
