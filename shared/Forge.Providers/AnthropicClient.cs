@@ -40,6 +40,18 @@ namespace Forge.Providers
             return new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
         }
 
+        private static void ApplyCustomHeaders(HttpRequestMessage req, ProviderOptions opts)
+        {
+            if (opts == null || opts.Headers == null) return;
+            foreach (var kv in opts.Headers)
+            {
+                if (string.IsNullOrEmpty(kv.Key)) continue;
+                if (string.Equals(kv.Key, "x-api-key", StringComparison.OrdinalIgnoreCase))
+                    req.Headers.Remove("x-api-key");
+                req.Headers.TryAddWithoutValidation(kv.Key, kv.Value ?? "");
+            }
+        }
+
         public async Task<ProviderResult> CompleteAsync(IReadOnlyList<ChatMessage> messages, ProviderOptions opts, CancellationToken ct)
         {
             if (messages == null) throw new ArgumentNullException("messages");
@@ -68,6 +80,7 @@ namespace Forge.Providers
                     if (!string.IsNullOrEmpty(_apiKey))
                         req.Headers.TryAddWithoutValidation("x-api-key", _apiKey);
                     req.Headers.TryAddWithoutValidation("anthropic-version", ApiVersion);
+                    ApplyCustomHeaders(req, opts);
                     req.Content = new StringContent(body, Encoding.UTF8, "application/json");
 
                     HttpResponseMessage resp;
@@ -138,6 +151,7 @@ namespace Forge.Providers
                 if (!string.IsNullOrEmpty(_apiKey))
                     req0.Headers.TryAddWithoutValidation("x-api-key", _apiKey);
                 req0.Headers.TryAddWithoutValidation("anthropic-version", ApiVersion);
+                ApplyCustomHeaders(req0, opts);
                 req0.Content = new StringContent(body, Encoding.UTF8, "application/json");
                 try { resp = await Http.SendAsync(req0, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false); }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { try { req0.Dispose(); } catch { } throw; }
@@ -263,7 +277,9 @@ namespace Forge.Providers
                                         int idx = (int?)evt["index"] ?? 0;
                                         ToolCall part;
                                         if (!toolParts.TryGetValue(idx, out part)) { part = new ToolCall { ArgumentsJson = "" }; toolParts[idx] = part; }
-                                        if (part.ArgumentsJson == null || part.ArgumentsJson.Length < 100000) part.ArgumentsJson = (part.ArgumentsJson ?? "") + frag;
+                                        string existing = part.ArgumentsJson ?? "";
+                                        if (existing.Length < 100000)
+                                            part.ArgumentsJson = existing + (frag.Length > 100000 - existing.Length ? frag.Substring(0, 100000 - existing.Length) : frag);
                                     }
                                 }
                             }

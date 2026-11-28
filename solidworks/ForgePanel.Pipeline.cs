@@ -5777,7 +5777,7 @@ namespace Forge.SolidWorks
             }
                 catch (Exception ex)
                 {
-                    try { relay.End(false); } catch { }
+                    try { relay.End(true); } catch { }
                     string answer = "Build failed (" + BoundDetail(ex.Message, 300) + ") — what built so far stays open; edit and resend.";
                     if (myId == _currentRunId)
                     {

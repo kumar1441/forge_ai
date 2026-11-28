@@ -32,6 +32,7 @@ namespace Forge.SolidWorks
         private static string CurrentSid;
 
         public static string ReasoningEffort { get; set; }
+        public static Dictionary<string,string> ProviderHeaders;
 
         public static int AgentMsgCount { get; private set; }
         private static long _agentTokCount;
@@ -1314,7 +1315,7 @@ namespace Forge.SolidWorks
         /// <summary>Summarize (never silently drop) the oldest half once session context
         /// usage reaches the threshold % of the model's window. Falls back to the legacy
         /// message-count gate when no ctx sidecar data exists — never silently disables.</summary>
-        private static async Task CompactHistoryIfNeeded(IProviderClient client, string sid, string model, System.Threading.CancellationToken ct)
+        private static async Task CompactHistoryIfNeeded(IProviderClient client, string sid, string model, System.Threading.CancellationToken ct, string reasoningEffort)
         {
             bool on; int at; int reserved; int tail;
             lock (CompactCfgLock)
@@ -1356,7 +1357,11 @@ namespace Forge.SolidWorks
             if (cut < 1) cut = count - 30;
             if (cut < 2 || cut > count - 1) return;
             List<JObject> old;
-            lock (session.Msgs) { old = session.Msgs.GetRange(1, cut - 1); } // keep [0]=system
+            lock (session.Msgs)
+            {
+                if (session.Msgs.Count < cut) return;
+                old = session.Msgs.GetRange(1, cut - 1); // keep [0]=system
+            }
             string summary = null;
             try
             {
@@ -1372,7 +1377,7 @@ namespace Forge.SolidWorks
                     new ChatMessage { Role = "user", Content = oldJson }
                 };
                     var res = await client.CompleteAsync(msgs,
-                        new ProviderOptions { MaxTokens = 800, Model = ProviderFactory.SmallModelForCurrentConfig() ?? model, ReasoningEffort = ReasoningEffort },
+                        new ProviderOptions { MaxTokens = 800, Model = ProviderFactory.SmallModelForCurrentConfig() ?? model, ReasoningEffort = reasoningEffort, Headers = ProviderHeaders },
                         ct);
                 summary = res != null ? res.Text : null;
                 try { if (res != null) { IntentRate.Note(res.TokIn, res.TokOut); NoteCtx(sid, res.TokIn, res.TokOut); } } catch { }
@@ -1514,6 +1519,7 @@ namespace Forge.SolidWorks
         public static async Task<McpBuildOutcome> Run(string intent, Func<string, string, string, string, Task> emit, System.Threading.CancellationToken ct, Action<string, string> onThink, Action<JObject> cardSender = null, Func<bool> isCurrent = null)
         {
             var outcome = new McpBuildOutcome();
+            string effort = ReasoningEffort;
             if (!IsMcpCreate(intent)) return outcome;
 
             IProviderClient client;
@@ -1571,7 +1577,7 @@ namespace Forge.SolidWorks
             bool hideInstructions = AllToolsDenied(route, tools);
             await emit("Builder", "planning " + lines.Count + " available modelling tools", "run", null);
             Tuple<JObject, string> authored;
-            try { authored = await AuthorPlan(client, intent, planModel, lines, hideInstructions ? "" : ServerInstructionsSection(route), ct, onThink); }
+            try { authored = await AuthorPlan(client, intent, planModel, lines, hideInstructions ? "" : ServerInstructionsSection(route), ct, onThink, effort); }
             catch (OperationCanceledException) { outcome.Error = "INTERRUPTED"; return outcome; }
             catch (Exception ex)
             {
@@ -1675,6 +1681,7 @@ namespace Forge.SolidWorks
             string intent, Func<string, string, string, string, Task> emit, System.Threading.CancellationToken ct, Action<string, string> onThink, string sid, Action<JObject> cardSender = null, Func<bool> isCurrent = null)
         {
             var outcome = new McpBuildOutcome();
+            string effort = ReasoningEffort;
             if (!IsMcpCreate(intent)) return outcome;
 
             IProviderClient client;
@@ -1762,9 +1769,9 @@ namespace Forge.SolidWorks
                 AgentMsgCount = session.Msgs.Count;
             }
             SaveSession(sid);
-            await CompactHistoryIfNeeded(client, sid, model, ct);
+            await CompactHistoryIfNeeded(client, sid, model, ct, effort);
 
-            var opts = new ProviderOptions { MaxTokens = 16000, Model = model, ToolsJson = toolsJson, ToolChoice = "auto", ReasoningEffort = ReasoningEffort };
+            var opts = new ProviderOptions { MaxTokens = 16000, Model = model, ToolsJson = toolsJson, ToolChoice = "auto", ReasoningEffort = effort, Headers = ProviderHeaders };
             var log = new List<string>();
             int executed = 0;
             int succeeded = 0; // tool calls that returned Ok: the success line reports these, never attempts
@@ -1789,7 +1796,7 @@ namespace Forge.SolidWorks
                         SaveSession(sid);
                         return outcome;
                     }
-                    if (iter % 5 == 0) await CompactHistoryIfNeeded(client, sid, model, ct);
+                    if (iter % 5 == 0) await CompactHistoryIfNeeded(client, sid, model, ct, effort);
                     try { await emit("Builder", "thinking through the build (step " + iter + ")", "run", null); }
                     catch { /* dead panel: the loop still runs, the user just sees nothing */ }
                     List<JObject> hist;
@@ -2262,13 +2269,13 @@ namespace Forge.SolidWorks
             return null;
         }
 
-        private static async Task<Tuple<JObject, string>> AuthorPlan(IProviderClient client, string intent, string model, List<string> catalog, string instructions, System.Threading.CancellationToken ct, Action<string, string> onThink)
+        private static async Task<Tuple<JObject, string>> AuthorPlan(IProviderClient client, string intent, string model, List<string> catalog, string instructions, System.Threading.CancellationToken ct, Action<string, string> onThink, string reasoningEffort)
         {
             // Finite cap: uncapped lets reasoning models think forever and the call never returns.
             // Verified live: capped calls complete; uncapped hang past the 10-minute timeout.
             // Model is the run's snapshot (caller's Resolve), never a fresh CurrentModel read.
             // No Temperature: provider default, like Kilo (temp only forced for enhance rewrites).
-            var opts = new ProviderOptions { MaxTokens = 32000, Model = model, ReasoningEffort = ReasoningEffort };
+            var opts = new ProviderOptions { MaxTokens = 32000, Model = model, ReasoningEffort = reasoningEffort, Headers = ProviderHeaders };
             // The intent is untrusted data (framed as such below, dims verbatim — even inch
             // marks survive); the 2000-char cap keeps a pasted blob from becoming a token blowup.
             string safe = (intent ?? "").Trim();

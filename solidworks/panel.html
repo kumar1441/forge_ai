@@ -714,7 +714,7 @@
           </div>
         </div>
         <div class="srow"><label>Timeout</label>
-          <span class="skeywrap"><input type="number" id="mcpaddtimeout" min="30" step="30" value="300" title="Per-tool-call timeout in seconds" /><span style="font-size:11px;color:var(--faint)">sec</span></span>
+          <span class="skeywrap"><input type="number" id="mcpaddtimeout" min="1" step="1" value="300" title="Per-tool-call timeout in seconds — 1s minimum (stdio default 300s, HTTP default 15s)" /><span style="font-size:11px;color:var(--faint)">sec</span></span>
         </div>
         <div class="srow"><label></label>
           <span class="skeywrap"><button id="mcpaddgo" title="Save the new server">Add server</button><button id="mcpaddcancel" title="Close without adding">Cancel</button></span>
@@ -839,11 +839,12 @@
   const intent = $("intent");
   const escHtml = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   const EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"];
-  const INFORMATIONAL_TYPES = new Set(["models", "model", "provider", "mcpConfig", "mcpStatus", "toolPolicy", "rules", "usage", "notifyConfig", "variants", "files", "status", "queued", "queueState", "workStyle", "reasoningEffort", "compactConfig", "mcpLog", "attached", "attachCleared", "enhanced", "historyLoaded", "diff", "timeline", "shared", "forked", "continued", "initContext", "firstrun", "telemetryState", "compacted", "bifrost"]);
+  const INFORMATIONAL_TYPES = new Set(["models", "model", "provider", "mcpConfig", "mcpStatus", "mcpToolsChanged", "toolPolicy", "rules", "usage", "notifyConfig", "variants", "files", "status", "queued", "queueState", "workStyle", "reasoningEffort", "compactConfig", "mcpLog", "attached", "attachCleared", "enhanced", "historyLoaded", "diff", "timeline", "shared", "forked", "continued", "initContext", "firstrun", "telemetryState", "compacted", "bifrost"]);
   let queue = [], queuePaused = false, queueSid = null;
   let workStyle = null, reasoningEffort = null, reasoningEffortSupported = false, reasoningEffortCapability = null;
   let modelMetaMap = {}, freeOnly = false;
   let runInterrupted = false, continuation = false;
+  const turnPrompts = new WeakMap();
 
   // rotating mechanical "thinking" words — one shared pool
   const WORDS = ["Mating","Fastening","Threading","Torquing","Bolting","Calibrating",
@@ -1081,6 +1082,11 @@
     return Object.keys(obj).filter(k => typeof k === "string" && k).map(k => k + "=" + (obj[k] == null ? "" : obj[k])).join("\n");
   }
   function mcpTypeOf(s) { return s && s.type === "http" ? "http" : "stdio"; }
+  function mcpDefaultSecs(s) { return mcpTypeOf(s) === "http" ? 15 : 300; }
+  function mcpSecsOf(s) {
+    const ms = s && Number(s.timeoutMs);
+    return (ms != null && !isNaN(ms) && ms >= 1000) ? Math.max(1, Math.round(ms / 1000)) : mcpDefaultSecs(s);
+  }
   function mcpFields(action, name, type, command, args, cwd, url, envTa, headersTa, secs, alwaysAllowTa, disabledTa, watchTa) {
     const p = { action: action, name: name, type: type, command: String(command || "").trim(), args: String(args || "").trim(), cwd: String(cwd || "").trim(), url: String(url || "").trim(), timeoutMs: secs * 1000 };
     const env = type === "stdio" ? mcpKvRead(envTa) : {}; if (Object.keys(env).length) p.env = env;
@@ -1139,9 +1145,9 @@
     const headers = mcpKvBox(mcpKvText(s && s.headers), "KEY=VALUE per line");
     http.appendChild(mcpRow("URL", url)); http.appendChild(mcpRow("Headers", headers));
     form.appendChild(http);
-    const tmo = document.createElement("input"); tmo.type = "number"; tmo.min = "30"; tmo.step = "30";
-    tmo.value = Math.max(30, Math.round(((s && s.timeoutMs) || 300000) / 1000));
-    tmo.title = "Per-tool-call timeout in seconds";
+    const tmo = document.createElement("input"); tmo.type = "number"; tmo.min = "1"; tmo.step = "1";
+    tmo.value = mcpSecsOf(s);
+    tmo.title = "Per-tool-call timeout in seconds — 1s minimum (stdio default 300s, HTTP default 15s)";
     const tmoWrap = document.createElement("span"); tmoWrap.className = "skeywrap"; tmoWrap.appendChild(tmo);
     const unit = document.createElement("span"); unit.style.fontSize = "11px"; unit.style.color = "var(--faint)"; unit.textContent = "sec";
     tmoWrap.appendChild(unit); form.appendChild(mcpRow("Timeout", tmoWrap));
@@ -1154,7 +1160,7 @@
     const acts = document.createElement("span"); acts.className = "skeywrap";
     const save = document.createElement("button"); save.textContent = "Save"; save.title = "Save changes to " + name;
     save.addEventListener("click", () => {
-      let secs = parseInt(tmo.value, 10); if (isNaN(secs) || secs < 30) secs = 30; tmo.value = secs;
+      let secs = parseInt(tmo.value, 10); if (isNaN(secs) || secs < 1) secs = 1; tmo.value = secs;
       post(mcpFields("mcpUpdate", name, cur, cmd.value, args.value, cwd.value, url.value, env, headers, secs, alwaysAllow, disabled, watch));
       onSaved();
     });
@@ -1182,11 +1188,11 @@
       tgl.style.width = "auto";
       tgl.addEventListener("change", () => { post({ action: "mcpSet", name: name, enabled: tgl.checked }); });
       wrap.appendChild(tgl);
-      const tmo = document.createElement("input"); tmo.type = "number"; tmo.min = "30"; tmo.step = "30";
-      tmo.value = Math.max(30, Math.round(((s && s.timeoutMs) || 300000) / 1000));
-      tmo.title = "Per-tool-call timeout in seconds";
+      const tmo = document.createElement("input"); tmo.type = "number"; tmo.min = "1"; tmo.step = "1";
+      tmo.value = mcpSecsOf(s);
+      tmo.title = "Per-tool-call timeout in seconds — 1s minimum (stdio default 300s, HTTP default 15s)";
       tmo.addEventListener("change", () => {
-        let secs = parseInt(tmo.value, 10); if (isNaN(secs) || secs < 30) secs = 30; tmo.value = secs;
+        let secs = parseInt(tmo.value, 10); if (isNaN(secs) || secs < 1) secs = 1; tmo.value = secs;
         post({ action: "mcpSet", name: name, timeoutMs: secs * 1000 });
       });
       wrap.appendChild(tmo);
@@ -1226,11 +1232,16 @@
     const sio = $("mcpsstdio"), ht = $("mcpshttp");
     if (sio) sio.style.display = mcpAddType === "stdio" ? "" : "none";
     if (ht) ht.style.display = mcpAddType === "http" ? "" : "none";
+    const t = $("mcpaddtimeout");
+    if (t) {
+      const other = mcpAddType === "http" ? 300 : 15;
+      if (parseInt(t.value, 10) === other) t.value = mcpAddType === "http" ? 15 : 300;
+    }
   });
   if ($("mcpaddgo")) $("mcpaddgo").addEventListener("click", () => {
     const name = $("mcpname") ? $("mcpname").value.trim() : "";
-    let secs = $("mcpaddtimeout") ? parseInt($("mcpaddtimeout").value, 10) : 300;
-    if (isNaN(secs) || secs < 30) secs = 30;
+    let secs = $("mcpaddtimeout") ? parseInt($("mcpaddtimeout").value, 10) : (mcpAddType === "http" ? 15 : 300);
+    if (isNaN(secs) || secs < 1) secs = 1;
     if (!name) return;
     const command = mcpAddType === "stdio" ? (($("mcpcmd") && $("mcpcmd").value.trim()) || "uvx") : "";
     post(mcpFields("mcpAdd", name, mcpAddType, command,
@@ -1265,10 +1276,13 @@
     try {
       const on = safeGet("forge_compact_on");
       const at = safeGet("forge_compact_at");
-      let atn = at === null ? 60 : parseInt(at, 10); if (isNaN(atn) || atn < 10 || atn > 95) atn = 60;
-      let rv = parseInt(safeGet("forge_compact_reserved"), 10); if (isNaN(rv) || rv < 0) rv = 0;
-      let tt = parseInt(safeGet("forge_compact_tail"), 10); if (isNaN(tt) || tt < 0) tt = 0;
-      post({ action: "setCompact", on: on === null ? true : on === "1", at: atn, thresholdPct: atn, reservedTokens: rv, tailTurns: tt });
+      let atn = at === null ? 60 : parseInt(at, 10); if (isNaN(atn)) atn = 60; if (atn < 10) atn = 10; if (atn > 95) atn = 95;
+      const init = { action: "setCompact", on: on === null ? true : on === "1", at: atn, thresholdPct: atn };
+      const rvRaw = safeGet("forge_compact_reserved");
+      if (rvRaw !== null) { const rv = parseInt(rvRaw, 10); if (!isNaN(rv) && rv >= 0) init.reservedTokens = rv; }
+      const ttRaw = safeGet("forge_compact_tail");
+      if (ttRaw !== null) { const tt = parseInt(ttRaw, 10); if (!isNaN(tt) && tt >= 0) init.tailTurns = tt; }
+      post(init);
     } catch (e2) {}
     renderCtx();
   }
@@ -1669,7 +1683,7 @@
       const at = safeGet("forge_compact_at");
       $("compacttgl").checked = on === null ? true : on === "1";
       let n = at === null ? 60 : parseInt(at, 10);
-      if (isNaN(n) || n < 10 || n > 95) n = 60;
+      if (isNaN(n)) n = 60; if (n < 10) n = 10; if (n > 95) n = 95;
       $("compactat").value = n;
       let rv = parseInt(safeGet("forge_compact_reserved"), 10); if (isNaN(rv) || rv < 0) rv = 0;
       let tt = parseInt(safeGet("forge_compact_tail"), 10); if (isNaN(tt) || tt < 0) tt = 0;
@@ -2244,6 +2258,7 @@
       const d = document.createElement("div"); d.className = "turn";
       const u = document.createElement("div"); u.className = "bubble user"; u.textContent = (t && t.q) || "";
       const f = document.createElement("div"); f.className = "forge"; f.innerHTML = (t && t.a) || "";
+      try { const act = f.querySelector(".turnact"); if (act && t && t.q) turnPrompts.set(act, t.q); } catch (e) {}
       d.append(u, f);
       if (!f.querySelector(".turnact")) {
         const rv = document.createElement("button"); rv.className = "revertbtn"; rv.title = "Revert to here — edit and resend from this point (/unrevert restores this once)"; rv.textContent = "↩ revert";
@@ -2452,7 +2467,7 @@
           function esc(s) { return String(s == null ? "" : s).replace(/</g, "&lt;"); }
           function usage(msg) {
             var list = names.length ? "<br>Servers: <b>" + names.map(esc).join(", ") + "</b>" : "";
-            systemCard((msg ? esc(msg) + "<br>" : "") + "Usage: <b>/mcps</b> · <b>/mcps enable|disable|start|stop &lt;name&gt;</b> · <b>/mcps timeout &lt;name&gt; &lt;secs&gt;</b> (≥30s)" + list);
+            systemCard((msg ? esc(msg) + "<br>" : "") + "Usage: <b>/mcps</b> · <b>/mcps enable|disable|start|stop &lt;name&gt;</b> · <b>/mcps timeout &lt;name&gt; &lt;secs&gt;</b> (≥1s)" + list);
           }
           function resolve(raw) {
             var t = (raw || "").trim();
@@ -2484,7 +2499,7 @@
             var tn = resolve(args[1]);
             if (!tn) return;
             var secs = parseInt(args[2], 10);
-            if (isNaN(secs) || secs < 30) { usage("Timeout must be \u226530 seconds."); return; }
+            if (isNaN(secs) || secs < 1) { usage("Timeout must be \u22651 second."); return; }
             post({ action: "mcpSet", name: tn, timeoutMs: secs * 1000 });
             return;
           }
@@ -2915,6 +2930,21 @@
     else done(fallbackCopy(text));
   });
 
+  let mcpNoteEl = null, mcpNoteTimer = null;
+  function mcpToolsNote(name) {
+    try {
+      if (!mcpNoteEl) {
+        mcpNoteEl = document.createElement("div");
+        mcpNoteEl.setAttribute("role", "status");
+        mcpNoteEl.style.cssText = "position:fixed;left:50%;bottom:18px;transform:translateX(-50%);max-width:min(92%,440px);padding:8px 13px;border:1px solid var(--line);border-radius:9px;background:var(--raised);color:var(--ink);font-size:12px;line-height:1.45;box-shadow:0 6px 20px rgba(0,0,0,.35);z-index:9999;pointer-events:none;opacity:0;transition:opacity .18s ease";
+        (document.body || document.documentElement).appendChild(mcpNoteEl);
+      }
+      mcpNoteEl.textContent = "MCP server " + String(name || "") + " changed its tools — the next run will use the new list.";
+      mcpNoteEl.style.opacity = "1";
+      if (mcpNoteTimer) clearTimeout(mcpNoteTimer);
+      mcpNoteTimer = setTimeout(() => { if (mcpNoteEl) mcpNoteEl.style.opacity = "0"; }, 6000);
+    } catch (e) {}
+  }
   function handle(m) {
     if (m && m.type === "historyLoaded") {
       loadHistorySid = null;
@@ -3363,7 +3393,7 @@
       try {
         if (typeof m.on === "boolean") { $("compacttgl").checked = m.on; safeSet("forge_compact_on", m.on ? "1" : "0"); }
         const pct = parseInt(m.thresholdPct, 10);
-        if (!isNaN(pct) && pct >= 10 && pct <= 95) { $("compactat").value = pct; safeSet("forge_compact_at", String(pct)); }
+        if (!isNaN(pct)) { let p = pct; if (p < 10) p = 10; if (p > 95) p = 95; $("compactat").value = p; safeSet("forge_compact_at", String(p)); }
         const rv = parseInt(m.reservedTokens, 10);
         if (!isNaN(rv) && rv >= 0 && $("compactreserved")) { $("compactreserved").value = rv; safeSet("forge_compact_reserved", String(rv)); }
         const tt = parseInt(m.tailTurns, 10);
@@ -3378,6 +3408,7 @@
       const txt = String(m.text == null ? "" : m.text);
       $("mcplog").textContent = txt.length > 8192 ? "…" + txt.slice(txt.length - 8192) : txt;
     }
+    else if (m.type === "mcpToolsChanged") { mcpToolsNote(m.name); }
     // safety net: an unknown TERMINAL card must still stop the gerund + end the turn (never leave it looping).
     // Known informational traffic is ignored instead — it must never abort a live run.
     else if (working && !INFORMATIONAL_TYPES.has(String(m.type || ""))) { finish(m.info ? `<div class="card ok"><div class="sub">${String(m.info).replace(/</g,"<")}</div></div>` : ""); }
@@ -3739,6 +3770,7 @@
       row.append(rv, rs, cp, fk, ct);
     } else row.append(rv, rs, cp, fk);
     row.setAttribute("data-q", q);
+    turnPrompts.set(row, q);
     return row;
   }
   function copyText(text) {
@@ -3759,8 +3791,9 @@
     intent.focus(); scroll(true);
   });
   const turnIndexOf = (el) => {
-    const flat = [...transcript.querySelectorAll(".turn")].filter(x => x.querySelector(":scope > .bubble.user:not(.cont)"));
-    return Math.max(0, flat.indexOf(el));
+    const bubbles = [...transcript.querySelectorAll(".bubble.user")];
+    const mine = el ? el.querySelector(":scope > .bubble.user") : null;
+    return Math.max(0, bubbles.indexOf(mine));
   };
   transcript.addEventListener("click", (e) => {
     const ct = e.target.closest(".turnact .continuebtn");
@@ -3780,7 +3813,7 @@
     if (rb) {
       if (working) { systemCard("Still working — wait for this run (or Esc to stop it), then ↻ resend re-runs it."); return; }
       const row = rb.closest(".turnact");
-      const q = row ? row.getAttribute("data-q") : "";
+      const q = row ? (turnPrompts.has(row) ? turnPrompts.get(row) : (row.getAttribute("data-q") || "")) : "";
       const turnEl = rb.closest(".turn");
       if (!turnEl || !q) return;
       revertBookkeeping(turnEl);

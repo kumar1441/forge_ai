@@ -109,6 +109,7 @@ namespace Forge.SolidWorks
             LoadAutoApprove();
             LoadHostPreferences();
             try { McpBuild.NotifyHook = (tool, args) => { try { NotifyToast("Forge approval needed", tool); } catch { } }; } catch { }
+            try { McpBridge.ServerToolsChanged += name => { try { Send(new { type = "mcpToolsChanged", name }); } catch { } }; } catch { }
         }
 
         private Timer _harness;
@@ -140,6 +141,7 @@ namespace Forge.SolidWorks
         private static readonly Dictionary<string, string> LastIntentBySid = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private static readonly Dictionary<string, bool> InterruptedBySid = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         private static string _lastRunSid;
+        private static string _activeRunSid;
         private static int CompactReservedTokens = 16000;
         private static int CompactTailTurns = 2;
         private const int McpMinTimeoutMs = 1000;
@@ -309,7 +311,7 @@ namespace Forge.SolidWorks
             try { action = (string)msg.action; }
             catch { return; }
             if (string.IsNullOrEmpty(action)) return;
-            SyncMcpProjectScope();
+            if (action == "mcpSet" || action == "mcpAdd" || action == "mcpUpdate" || action == "mcpRemove" || action == "mcpStart" || action == "mcpStop") SyncMcpProjectScope();
             try { PanelCapture.Log("in", new { action, raw }); } catch { }
             try
             {
@@ -416,8 +418,7 @@ namespace Forge.SolidWorks
                     try { agentTurn = McpBuild.IsMcpCreate(last); } catch { }
                     if (interrupted && agentTurn)
                     {
-                        try { McpBuild.StripLastUserTurn(csid); }
-                        catch { try { McpBuildRemoveLastUserTurnByReflection(csid); } catch { } }
+                        try { TryStripLastUserTurn(csid); } catch { }
                     }
                     lock (InterruptedBySid) { InterruptedBySid[csid] = false; }
                     Send(new { type = "continued", sid = csid, interrupted });
@@ -502,7 +503,7 @@ namespace Forge.SolidWorks
                         string compactUseModel = ProviderFactory.SmallModelForCurrentConfig() ?? compactModel;
                         try { McpBuild.ReasoningEffort = ConfiguredReasoningEffortFor(compactUseModel); } catch { }
                         var res = await c2.CompleteAsync(msgs,
-                            new ProviderOptions { MaxTokens = 1000, Model = compactUseModel, ReasoningEffort = ConfiguredReasoningEffort(compactUseModel) },
+                            new ProviderOptions { MaxTokens = 1000, Model = compactUseModel, ReasoningEffort = ConfiguredReasoningEffort(compactUseModel), Headers = ExpandedHeaderDictionary(CurrentProviderSlug()) },
                             compactCt);
                         if (myRun != _currentRunId) return; // superseded while awaiting: the new run owns the panel
                         string s = res != null ? res.Text : null;
@@ -534,15 +535,20 @@ namespace Forge.SolidWorks
                 {
                     try
                     {
-                        bool on = true; int at = 60;
+                        bool on = true; int at = 0;
                         try { on = (bool)msg.on; } catch { }
-                        try { at = Convert.ToInt32((object)msg.at); } catch { }
-                        if (at < 1) at = 1; if (at > 100) at = 100;
+                        try { var av = msg.at; if (av != null) at = Convert.ToInt32((object)av); } catch { }
+                        if (at <= 0)
+                        {
+                            try { at = Convert.ToInt32((object)ReadForgeConfig()["compactThresholdPct"]); } catch { at = 0; }
+                            if (at <= 0) { try { at = McpBuild.CompactAt; } catch { at = 0; } }
+                        }
+                        if (at <= 0) at = 60;
+                        if (at < 10) at = 10; if (at > 95) at = 95;
                         int reserve = CompactReservedTokens, tail = CompactTailTurns;
-                        try { var rv = msg.reservedTokens; if (rv != null) reserve = Convert.ToInt32((object)rv); } catch { }
-                        try { var tv = msg.tailTurns; if (tv != null) tail = Convert.ToInt32((object)tv); } catch { }
-                        if (reserve < 0) reserve = 0;
-                        if (tail < 0) tail = 0; if (tail > 10) tail = 10;
+                        try { var rv = msg.reservedTokens; if (rv != null) { int v = Convert.ToInt32((object)rv); if (v > 0) reserve = v; } } catch { }
+                        try { var tv = msg.tailTurns; if (tv != null) { int v = Convert.ToInt32((object)tv); if (v > 0) tail = v; } } catch { }
+                        if (tail > 10) tail = 10;
                         McpBuild.ConfigureCompaction(on, at, reserve, tail);
                         CompactReservedTokens = reserve;
                         CompactTailTurns = tail;
@@ -785,7 +791,12 @@ namespace Forge.SolidWorks
                     try { if (_runCts != null) _runCts.Cancel(); } catch { }
                     try { if (_enhanceCts != null) _enhanceCts.Cancel(); } catch { }
                     try { if (_compactCts != null) _compactCts.Cancel(); } catch { }
-                    try { if (!string.IsNullOrWhiteSpace(_lastRunSid)) lock (InterruptedBySid) { InterruptedBySid[_lastRunSid] = true; } } catch { }
+                    try
+                    {
+                        string stopSid = !string.IsNullOrWhiteSpace(_activeRunSid) ? _activeRunSid : _lastRunSid;
+                        if (!string.IsNullOrWhiteSpace(stopSid)) { _lastRunSid = stopSid; lock (InterruptedBySid) { InterruptedBySid[stopSid] = true; } }
+                    }
+                    catch { }
                     _pendingIntent = null; _pendingConfirm = null; _attachedFile = null;
                 }
                 else if (action == "revert")   // Kilo-style revert: drop the pending thread + truncate the agent chat so the resent prompt starts clean
@@ -1344,7 +1355,7 @@ namespace Forge.SolidWorks
                     {
                         var missing = new List<string>();
                         string xurl = ExpandEnvTokens(purl, missing);
-                        Newtonsoft.Json.Linq.JObject xheaders = ParseProviderHeaders(msg, missing);
+                        Newtonsoft.Json.Linq.JObject xheaders = ParseProviderHeaders(msg);
                         var list = CustomProviderAdd(pslug, plabel, pkind, xurl, false, xheaders);
                         var cfg = ReadForgeConfig();
                         string sp = (string)cfg["provider"], sbu = (string)cfg["baseUrl"];
@@ -1371,7 +1382,7 @@ namespace Forge.SolidWorks
                     {
                         var missing = new List<string>();
                         string xurl = ExpandEnvTokens(purl, missing);
-                        Newtonsoft.Json.Linq.JObject xheaders = ParseProviderHeaders(msg, missing);
+                        Newtonsoft.Json.Linq.JObject xheaders = ParseProviderHeaders(msg);
                         var list = CustomProviderAdd(pslug, plabel, pkind, xurl, true, xheaders);
                         var cfg = ReadForgeConfig();
                         string sp = (string)cfg["provider"], sbu = (string)cfg["baseUrl"];
@@ -1582,56 +1593,6 @@ namespace Forge.SolidWorks
             return true;
         }
 
-        private static object McpCoerce(object value, System.Type target)
-        {
-            try
-            {
-                if (value == null) return null;
-                if (target.IsInstanceOfType(value)) return value;
-                var d = value as System.Collections.Generic.Dictionary<string, string>;
-                if (d != null)
-                {
-                    if (target == typeof(Newtonsoft.Json.Linq.JObject)) return Newtonsoft.Json.Linq.JObject.FromObject(d);
-                    if (typeof(System.Collections.Generic.IDictionary<string, string>).IsAssignableFrom(target))
-                        return new System.Collections.Generic.Dictionary<string, string>(d, System.StringComparer.OrdinalIgnoreCase);
-                }
-                var s = value as string;
-                if (s != null && target == typeof(string)) return s;
-                return System.Convert.ChangeType(value, target);
-            }
-            catch { return value; }
-        }
-
-        private static bool McpSetMember(object target, string memberName, object value)
-        {
-            try
-            {
-                var t = target.GetType();
-                const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase;
-                var f = t.GetField(memberName, flags);
-                if (f != null && !f.IsInitOnly) { f.SetValue(target, McpCoerce(value, f.FieldType)); return true; }
-                var p = t.GetProperty(memberName, flags);
-                if (p != null && p.CanWrite) { p.SetValue(target, McpCoerce(value, p.PropertyType), null); return true; }
-                return false;
-            }
-            catch { return false; }
-        }
-
-        private static string McpGetString(object target, string memberName)
-        {
-            try
-            {
-                var t = target.GetType();
-                const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase;
-                var f = t.GetField(memberName, flags);
-                if (f != null) return f.GetValue(target) as string;
-                var p = t.GetProperty(memberName, flags);
-                if (p != null) return p.GetValue(target, null) as string;
-            }
-            catch { }
-            return null;
-        }
-
         /// <summary>Fetch the existing server, patch only fields the panel sent, then save through McpBridge (unknown fields survive). Returns an error message, or null on success.</summary>
         private static string McpWriteServer(dynamic msg, string rawName, bool createIfMissing, out string canonical)
         {
@@ -1662,17 +1623,15 @@ namespace Forge.SolidWorks
                 if (McpHas(msg, "type"))
                 {
                     s = McpStr(msg, "type");
-                    if (!string.IsNullOrWhiteSpace(s))
-                    {
-                        s = s.Trim().ToLowerInvariant();
-                        if (s != "stdio" && s != "http") return "MCP server 'type' must be 'stdio' or 'http'.";
-                        McpSetMember(entry, "Type", s);
-                    }
+                    if (string.IsNullOrWhiteSpace(s)) return "MCP server 'type' must be 'stdio' or 'http'.";
+                    s = s.Trim().ToLowerInvariant();
+                    if (s != "stdio" && s != "http") return "MCP server 'type' must be 'stdio' or 'http'.";
+                    entry.Type = s;
                 }
-                else if (createIfMissing) McpSetMember(entry, "Type", "stdio");
+                else if (createIfMissing) entry.Type = "stdio";
 
-                if (McpHas(msg, "url")) McpSetMember(entry, "Url", McpStr(msg, "url") ?? "");
-                if (McpHas(msg, "cwd")) McpSetMember(entry, "Cwd", McpStr(msg, "cwd") ?? "");
+                if (McpHas(msg, "url")) entry.Url = McpStr(msg, "url") ?? "";
+                if (McpHas(msg, "cwd")) entry.Cwd = McpStr(msg, "cwd") ?? "";
 
                 System.Collections.Generic.Dictionary<string, string> map;
                 Newtonsoft.Json.Linq.JToken tok;
@@ -1682,7 +1641,7 @@ namespace Forge.SolidWorks
                     if (tok != null && tok.Type != Newtonsoft.Json.Linq.JTokenType.Null)
                     {
                         if (!McpTryStringMap(tok, out map)) return "MCP 'headers' must be an object of string values.";
-                        McpSetMember(entry, "Headers", map);
+                        entry.Headers = map;
                     }
                 }
                 if (McpHas(msg, "env"))
@@ -1691,7 +1650,7 @@ namespace Forge.SolidWorks
                     if (tok != null && tok.Type != Newtonsoft.Json.Linq.JTokenType.Null)
                     {
                         if (!McpTryStringMap(tok, out map)) return "MCP 'env' must be an object of string values.";
-                        McpSetMember(entry, "Env", map);
+                        entry.Env = map;
                     }
                 }
 
@@ -1704,27 +1663,40 @@ namespace Forge.SolidWorks
                 if (args != null && args.Length > 0) entry.Args = args;
 
                 if (McpHas(msg, "enabled"))
-                { try { entry.Enabled = Convert.ToBoolean((object)McpTok(msg, "enabled")); } catch { } }
+                {
+                    tok = McpTok(msg, "enabled");
+                    if (tok == null || tok.Type != Newtonsoft.Json.Linq.JTokenType.Boolean) return "MCP 'enabled' must be true or false.";
+                    entry.Enabled = (bool)tok;
+                }
                 if (McpHas(msg, "timeoutMs"))
-                { int v = 0; try { v = Convert.ToInt32((object)McpTok(msg, "timeoutMs")); } catch { } if (v >= McpMinTimeoutMs) entry.TimeoutMs = v; }
+                {
+                    tok = McpTok(msg, "timeoutMs");
+                    int v;
+                    if (tok == null || tok.Type != Newtonsoft.Json.Linq.JTokenType.Integer || !int.TryParse(tok.ToString(), out v) || v < McpMinTimeoutMs)
+                        return "MCP 'timeoutMs' must be a number in milliseconds (≥1000).";
+                    entry.TimeoutMs = v;
+                }
                 if (McpHas(msg, "startTimeoutMs"))
-                { int v = 0; try { v = Convert.ToInt32((object)McpTok(msg, "startTimeoutMs")); } catch { } entry.StartTimeoutMs = v >= McpMinTimeoutMs ? v : 0; }
+                {
+                    tok = McpTok(msg, "startTimeoutMs");
+                    int v;
+                    if (tok == null || tok.Type != Newtonsoft.Json.Linq.JTokenType.Integer || !int.TryParse(tok.ToString(), out v) || v < McpMinTimeoutMs)
+                        return "MCP 'startTimeoutMs' must be a number in milliseconds (≥1000).";
+                    entry.StartTimeoutMs = v;
+                }
 
-                string ty = McpGetString(entry, "Type");
-                if (string.IsNullOrWhiteSpace(ty)) ty = McpStr(msg, "type");
+                string ty = entry.Type;
                 if (string.IsNullOrWhiteSpace(ty)) ty = "stdio";
                 if (string.Equals(ty, "http", System.StringComparison.OrdinalIgnoreCase))
                 {
-                    string url = McpGetString(entry, "Url");
-                    if (string.IsNullOrWhiteSpace(url)) url = McpStr(msg, "url");
-                    if (string.IsNullOrWhiteSpace(url)) return "HTTP MCP servers need a url — set \"url\" in the server entry and try again.";
+                    if (string.IsNullOrWhiteSpace(entry.Url)) return "HTTP MCP servers need a url — set \"url\" in the server entry and try again.";
                 }
                 else if (string.IsNullOrWhiteSpace(entry.Command))
                     return "stdio MCP servers need a command — set \"command\" in the server entry and try again.";
 
-                if (McpHas(msg, "watchPaths")) McpSetMember(entry, "WatchPaths", McpStringArray(McpTok(msg, "watchPaths")));
-                if (McpHas(msg, "alwaysAllow")) McpSetMember(entry, "AlwaysAllow", McpStringArray(McpTok(msg, "alwaysAllow")));
-                if (McpHas(msg, "disabledTools")) McpSetMember(entry, "DisabledTools", McpStringArray(McpTok(msg, "disabledTools")));
+                if (McpHas(msg, "watchPaths")) entry.WatchPaths = McpStringArray(McpTok(msg, "watchPaths"));
+                if (McpHas(msg, "alwaysAllow")) entry.AlwaysAllow = McpStringArray(McpTok(msg, "alwaysAllow"));
+                if (McpHas(msg, "disabledTools")) entry.DisabledTools = McpStringArray(McpTok(msg, "disabledTools"));
                 if (scoped) McpBridge.SaveServersForProject(scopeKey, list);
                 else McpBridge.SaveServers(list);
                 return null;
@@ -1879,14 +1851,43 @@ namespace Forge.SolidWorks
             foreach (char c in Path.GetInvalidFileNameChars()) s = s.Replace(c.ToString(), "_");
             s = s.Trim();
             if (s.Length == 0 || s == "." || s == "..") s = "paste.bin";
-            if (s.Length > 80) s = s.Substring(s.Length - 80);
+            if (s.Length > 80)
+            {
+                string ext = Path.GetExtension(s);
+                string stem = s.Substring(0, s.Length - ext.Length);
+                int keep = Math.Max(1, 80 - ext.Length);
+                if (stem.Length > keep) stem = stem.Substring(stem.Length - keep);
+                s = stem + ext;
+            }
             return s;
+        }
+
+        private static string UniquePasteName(string safeName)
+        {
+            string ext = Path.GetExtension(safeName) ?? "";
+            string stem = ext.Length > 0 ? safeName.Substring(0, safeName.Length - ext.Length) : safeName;
+            return stem + "-" + Guid.NewGuid().ToString("N").Substring(0, 12) + ext;
+        }
+
+        private static void PruneOldPastes(string dir)
+        {
+            try
+            {
+                if (!Directory.Exists(dir)) return;
+                var cutoff = DateTime.UtcNow.AddHours(-24);
+                foreach (var f in Directory.GetFiles(dir))
+                {
+                    try { if (File.GetLastWriteTimeUtc(f) < cutoff) File.Delete(f); } catch { }
+                }
+            }
+            catch { }
         }
 
         private void ApplyPasteAttach(JArray files)
         {
             if (files == null || files.Count == 0) { Send(new { type = "error", message = "Nothing to attach — no files were pasted." }); return; }
             string dir = Path.Combine(Path.GetTempPath(), "Forge-paste");
+            PruneOldPastes(dir);
             int taken = 0;
             foreach (var item in files)
             {
@@ -1910,7 +1911,7 @@ namespace Forge.SolidWorks
                 try
                 {
                     Directory.CreateDirectory(dir);
-                    string target = Path.Combine(dir, SafePasteName(name));
+                    string target = Path.Combine(dir, UniquePasteName(SafePasteName(name)));
                     File.WriteAllBytes(target, bytes);
                     SetAttachedFile(target);
                     taken++;
@@ -2274,7 +2275,9 @@ namespace Forge.SolidWorks
         }
 
         // ---- User-defined custom providers (config.json customProviders) ----
-        // Shape: {"customProviders":[{"slug":"corp-gw","label":"Corp gateway","kind":"openai-compatible","baseUrl":"https://..."}]}
+        // Shape: {"customProviders":[{"slug":"corp-gw","label":"Corp gateway","kind":"openai-compatible","baseUrl":"https://...","headers":{"X-Key":"{env:MY_TOKEN}"}}]}
+        // headers are stored as RAW templates ({env:VAR}/${VAR}/%VAR%) and expanded at USE time against
+        // the process environment into ProviderOptions.Headers / McpBuild.ProviderHeaders — never at save.
         // kind picks the wire client (OpenAiCompatibleClient incl. reasoning fallback, or
         // AnthropicClient — retries/temperature/small-model follow the kind automatically);
         // the slug keys KeyStore + customModels exactly like a built-in slug. Corrupt entries
@@ -2865,7 +2868,7 @@ namespace Forge.SolidWorks
                 try
                 {
                     res = await client.CompleteStreamingAsync(msgs,
-                        new ProviderOptions { MaxTokens = 32000, Temperature = enhanceTemp, Model = useModel, ReasoningEffort = enhanceEffort },
+                        new ProviderOptions { MaxTokens = 32000, Temperature = enhanceTemp, Model = useModel, ReasoningEffort = enhanceEffort, Headers = ExpandedHeaderDictionary(CurrentProviderSlug()) },
                         ect,
                         (kind, delta) =>
                         {
@@ -2883,7 +2886,7 @@ namespace Forge.SolidWorks
                 {
                     // Non-streaming backends (Anthropic): same prompt as one unary call, no live deltas.
                     res = await client.CompleteAsync(msgs,
-                        new ProviderOptions { MaxTokens = 32000, Temperature = enhanceTemp, Model = useModel, ReasoningEffort = enhanceEffort },
+                        new ProviderOptions { MaxTokens = 32000, Temperature = enhanceTemp, Model = useModel, ReasoningEffort = enhanceEffort, Headers = ExpandedHeaderDictionary(CurrentProviderSlug()) },
                         ect);
                 }
                 watch.Stop();
@@ -3033,6 +3036,7 @@ namespace Forge.SolidWorks
         private async Task Generate(string intent, string sid, Newtonsoft.Json.Linq.JArray postedPaths)
         {
             SyncMcpProjectScope();
+            try { McpBuild.ProviderHeaders = ExpandedHeaderDictionary(CurrentProviderSlug()); } catch { McpBuild.ProviderHeaders = null; }
             try { McpBuild.ReasoningEffort = ConfiguredReasoningEffortFor(ProviderFactory.CurrentModel()); } catch { McpBuild.ReasoningEffort = null; }
             if (string.IsNullOrWhiteSpace(intent)) intent = "";
             // A pasted blob (50KB dumps, emoji walls, log files) must fail closed here: no regex
@@ -4046,8 +4050,11 @@ namespace Forge.SolidWorks
             return null;
         }
 
-        private void McpBuildRemoveLastUserTurnByReflection(string sid)
+        private static void TryStripLastUserTurn(string sid)
         {
+            bool hasApi = false;
+            try { hasApi = typeof(McpBuild).GetMethod("StripLastUserTurn", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static) != null; } catch { }
+            if (hasApi) { try { McpBuild.StripLastUserTurn(sid); } catch { } return; }
             try
             {
                 McpBuild.EnsureSessionPublic(sid);
@@ -4100,13 +4107,24 @@ namespace Forge.SolidWorks
             sid = SafeSidLocal(sid);
             lock (LastIntentBySid) { LastIntentBySid[sid] = intent ?? ""; }
             _lastRunSid = sid;
+            _activeRunSid = sid;
             if (continued) lock (InterruptedBySid) { InterruptedBySid[sid] = false; }
+            Func<string> priorSidProvider = null;
+            try
+            {
+                priorSidProvider = OpenAiCompatibleClient.SessionIdProvider;
+                string capturedSid = sid;
+                OpenAiCompatibleClient.SessionIdProvider = () => capturedSid;
+            }
+            catch { }
             System.Threading.Interlocked.Increment(ref _activeRuns);
             try { await Generate(intent, sid, paths); }
             catch (OperationCanceledException) { }
             catch (Exception ex) { Send(new { type = "error", message = "Run failed (" + BoundDetail(ex.Message, 300) + ") — check the model for partial changes." }); }
             finally
             {
+                try { if (priorSidProvider != null) OpenAiCompatibleClient.SessionIdProvider = priorSidProvider; } catch { }
+                if (string.Equals(_activeRunSid, sid, StringComparison.OrdinalIgnoreCase)) _activeRunSid = null;
                 System.Threading.Interlocked.Decrement(ref _activeRuns);
                 if (dispatchOwner) lock (QueueLock) { Dispatching.Remove(sid); }
                 try { SendQueued(sid); } catch { }
@@ -4421,7 +4439,7 @@ namespace Forge.SolidWorks
             return original;
         }
 
-        private static JObject ParseProviderHeaders(dynamic msg, List<string> missing)
+        private static JObject ParseProviderHeaders(dynamic msg)
         {
             JObject raw = null;
             try { raw = msg.headers as JObject; } catch { }
@@ -4432,9 +4450,53 @@ namespace Forge.SolidWorks
                 string v = null;
                 try { v = (string)pr.Value; } catch { }
                 if (v == null) continue;
-                clean[pr.Name] = ExpandEnvTokens(v, missing);
+                clean[pr.Name] = v;
             }
             return clean.Count > 0 ? clean : null;
+        }
+
+        public static string CurrentProviderSlug()
+        {
+            try { var cfg = ReadForgeConfig(); return PresetSlugFor((string)cfg["provider"], (string)cfg["baseUrl"]); }
+            catch { return null; }
+        }
+
+        private static JObject ExpandedProviderHeaders(string slug)
+        {
+            var result = new JObject();
+            try
+            {
+                var p = FindCustomProvider(slug);
+                var hh = p == null ? null : p["headers"] as JObject;
+                if (hh == null) return null;
+                var missing = new List<string>();
+                foreach (var pr in hh.Properties())
+                {
+                    string v = null;
+                    try { v = (string)pr.Value; } catch { }
+                    if (v == null) continue;
+                    result[pr.Name] = ExpandEnvTokens(v, missing);
+                }
+            }
+            catch { }
+            return result.Count > 0 ? result : null;
+        }
+
+        private static Dictionary<string, string> ExpandedHeaderDictionary(string slug)
+        {
+            var jo = ExpandedProviderHeaders(slug);
+            if (jo == null) return null;
+            try { return jo.ToObject<Dictionary<string, string>>(); } catch { return null; }
+        }
+
+        public static System.Collections.Generic.Dictionary<string, string> ExpandedProviderHeadersFor(string slug)
+        {
+            try
+            {
+                var d = ExpandedHeaderDictionary(slug);
+                return (d != null && d.Count > 0) ? d : null;
+            }
+            catch { return null; }
         }
 
         private static string[] McpStringArray(JToken tok)
@@ -4538,12 +4600,25 @@ namespace Forge.SolidWorks
 
         private static object WithModelMeta(object payload)
         {
-            Newtonsoft.Json.Linq.JObject jo = payload as Newtonsoft.Json.Linq.JObject;
+            var joIn = payload as Newtonsoft.Json.Linq.JObject;
+            string t = null;
+            if (joIn != null)
+            {
+                try { t = (string)joIn["type"]; } catch { return payload; }
+            }
+            else
+            {
+                try
+                {
+                    var tp = payload.GetType().GetProperty("type", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                    if (tp != null) t = tp.GetValue(payload, null) as string;
+                }
+                catch { return payload; }
+            }
+            if (t != "models" && t != "provider") return payload;
+            Newtonsoft.Json.Linq.JObject jo = joIn;
             if (jo == null) { try { jo = Newtonsoft.Json.Linq.JObject.FromObject(payload); } catch { return payload; } }
             else { try { jo = (Newtonsoft.Json.Linq.JObject)jo.DeepClone(); } catch { return payload; } }
-            string t = null;
-            try { t = (string)jo["type"]; } catch { return payload; }
-            if (t != "models" && t != "provider") return payload;
             try
             {
                 var metas = new JArray();

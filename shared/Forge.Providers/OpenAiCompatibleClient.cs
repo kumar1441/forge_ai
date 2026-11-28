@@ -64,6 +64,18 @@ namespace Forge.Providers
             req.Headers.TryAddWithoutValidation("User-Agent", "Forge/1.0 (+SolidWorks add-in)");
         }
 
+        private static void ApplyCustomHeaders(HttpRequestMessage req, ProviderOptions opts)
+        {
+            if (opts == null || opts.Headers == null) return;
+            foreach (var kv in opts.Headers)
+            {
+                if (string.IsNullOrEmpty(kv.Key)) continue;
+                if (string.Equals(kv.Key, "Authorization", StringComparison.OrdinalIgnoreCase))
+                    req.Headers.Remove("Authorization");
+                req.Headers.TryAddWithoutValidation(kv.Key, kv.Value ?? "");
+            }
+        }
+
         public async Task<ProviderResult> CompleteAsync(IReadOnlyList<ChatMessage> messages, ProviderOptions opts, CancellationToken ct)
         {
             if (messages == null) throw new ArgumentNullException("messages");
@@ -93,6 +105,7 @@ namespace Forge.Providers
                     if (!string.IsNullOrEmpty(_apiKey))
                         req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + _apiKey);
                     ApplyZenGoHeaders(req, url);
+                    ApplyCustomHeaders(req, opts);
                     req.Content = new StringContent(body, Encoding.UTF8, "application/json");
 
                     HttpResponseMessage resp;
@@ -282,8 +295,6 @@ namespace Forge.Providers
             string gotModel = null;
             int tokIn = 0, tokOut = 0;
             string finishReason = null;
-            bool sawDone = false;
-            bool sawDelta = false;
 
             // Transient overload on the initial response retries with backoff (same policy as unary).
             // A fresh request per attempt: Framework HttpClient won't resend a used message.
@@ -296,6 +307,7 @@ namespace Forge.Providers
                 if (!string.IsNullOrEmpty(_apiKey))
                     req0.Headers.TryAddWithoutValidation("Authorization", "Bearer " + _apiKey);
                 ApplyZenGoHeaders(req0, url);
+                ApplyCustomHeaders(req0, opts);
                 req0.Content = new StringContent(body, Encoding.UTF8, "application/json");
                 try { resp = await Http.SendAsync(req0, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false); }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { try { req0.Dispose(); } catch { } throw; }
@@ -377,7 +389,7 @@ namespace Forge.Providers
                             }
                             string data = line.Substring(5).Trim().TrimStart((char)0xFEFF);
                             if (data.Length == 0) continue; // keepalive
-                            if (data == "[DONE]") { sawDone = true; break; }
+                            if (data == "[DONE]") break;
                             if (pendingFrag != null) { data = pendingFrag + data; pendingFrag = null; }
                             JObject evt;
                             try { evt = JObject.Parse(data); }
@@ -425,7 +437,6 @@ namespace Forge.Providers
                             JObject msgObj = choice != null ? choice["message"] as JObject : null;
                             JObject src = delta ?? msgObj;
                             if (src == null) continue;
-                            sawDelta = true;
                             string dc = (string)src["content"];
                             string dr = (string)src["reasoning_content"] ?? (string)src["reasoning"];
                             // Accumulator caps: a runaway stream must degrade to truncation, never OOM.
@@ -478,9 +489,6 @@ namespace Forge.Providers
                         catch (IOException) when (ct.IsCancellationRequested) { throw new OperationCanceledException(ct); }
                     }
                 }
-
-            if (!sawDone && sawDelta)
-                throw new ProviderException("Provider stream ended unexpectedly mid-response.");
 
             string content = contentAcc.ToString();
             string reasoning = reasonAcc.ToString();

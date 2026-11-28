@@ -41,7 +41,7 @@ namespace Forge.SolidWorks
             string user = "Context:\n" + ctxText + "\n\nUser said: \"" + (prompt ?? "").Trim() + "\"\n\nReturn the parse JSON.";
 
             string parseModel = ProviderFactory.CurrentModel();
-            var opts = new ProviderOptions { MaxTokens = 1500, Model = parseModel, ReasoningEffort = ForgePanel.ConfiguredReasoningEffortFor(parseModel) };
+            var opts = new ProviderOptions { MaxTokens = 1500, Model = parseModel, ReasoningEffort = ForgePanel.ConfiguredReasoningEffortFor(parseModel), Headers = ForgePanel.ExpandedProviderHeadersFor(ForgePanel.CurrentProviderSlug()) };
             for (int attempt = 0; attempt < 2; attempt++) // one JSON-repair retry, then give up
             {
                 try

@@ -22,6 +22,7 @@ namespace Forge.Providers
         public string ToolsJson;
         public string ToolChoice;
         public string ReasoningEffort;
+        public Dictionary<string,string> Headers;
     }
 
     /// <summary>A single function call requested by the model in an agentic loop turn.</summary>

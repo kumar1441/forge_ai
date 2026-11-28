@@ -168,7 +168,8 @@ namespace Forge.Providers
         public static bool AcceptsReasoningEffort(string baseUrl, string model)
         {
             string bu = (baseUrl ?? "").Trim().ToLowerInvariant();
-            if (bu.Contains("deepseek")) return false;
+            if (bu.Contains("deepseek") || bu.Contains("anthropic") || bu.Contains("ollama")
+                || bu.Contains("nvidia") || bu.Contains("opencode")) return false;
             string slug = null;
             try { slug = SlugFor(null, bu); } catch { slug = null; }
             string sl = (slug ?? "").Trim().ToLowerInvariant();
@@ -177,7 +178,8 @@ namespace Forge.Providers
             string m = (model ?? "").Trim().ToLowerInvariant();
             if (m.Contains("deepseek")) return false;
             if (m.Contains("grok")) return true;
-            return System.Text.RegularExpressions.Regex.IsMatch(m, @"(^|[^a-z0-9])(o[1-9]|gpt-[56]|codex)([^a-z0-9]|$)");
+            if (System.Text.RegularExpressions.Regex.IsMatch(m, @"(^|[^a-z0-9])(o[1-9]|gpt-[56]|codex)([^a-z0-9]|$)")) return true;
+            return string.IsNullOrEmpty(sl);
         }
 
         public static bool SupportsExtendedThinking(string model)
@@ -265,7 +267,7 @@ namespace Forge.Providers
                 if (m.Contains("gpt-5")) return Tuple.Create(400000, true);
                 if (m.Contains("gpt-3.5")) return Tuple.Create(16000, true);
                 if (m.Contains("gpt-4") || System.Text.RegularExpressions.Regex.IsMatch(m, @"(^|[^a-z0-9])o[1-9]([^a-z0-9]|$)")) return Tuple.Create(128000, true); // 4-class, o-series
-                if (m.Contains("deepseek")) return Tuple.Create(1000000, true);
+                if (m.Contains("deepseek")) return Tuple.Create(1000000, System.Text.RegularExpressions.Regex.IsMatch(m, @"(^|[^a-z0-9])v4([^a-z0-9]|$)"));
                 if (m.Contains("gemini")) return Tuple.Create(1000000, false);
                 if (m.Contains("kimi-k3") || (m.Contains("moonshot") && m.Contains("k3"))) return Tuple.Create(1048576, false);
                 if (m.Contains("kimi") || m.Contains("moonshot")) return Tuple.Create(262144, false);

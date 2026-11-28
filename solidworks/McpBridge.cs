@@ -24,18 +24,26 @@ namespace Forge.SolidWorks
     public static class McpBridge
     {
         public const int ServerLogTailChars = 8000;
-        private const int CatalogPerServerTimeoutMs = 20000;
-        private const int DefaultStdioTimeoutMs = 30000;
+        private const int CatalogPerServerTimeoutMs = 60000;
+        private const int DefaultStdioTimeoutMs = 300000;
         private const int DefaultHttpTimeoutMs = 15000;
         private const int MinConfiguredTimeoutMs = 1000;
         private const int WatchPollMs = 2000;
+        private const int EffectiveServersCacheTtlMs = 3000;
 
         private static string _projectKey = "";
         public static string ProjectKey
         {
             get { return _projectKey ?? ""; }
-            set { _projectKey = value ?? ""; }
+            set { _projectKey = value ?? ""; InvalidateEffectiveServersCache(); }
         }
+
+        private static readonly object ConfigCacheGate = new object();
+        private static List<McpServerConfig> _effectiveServersCache;
+        private static string _effectiveServersCacheKey;
+        private static DateTime _effectiveServersCacheAt;
+        private static readonly Dictionary<HttpClient, int> HttpInFlight = new Dictionary<HttpClient, int>();
+        private static readonly HashSet<HttpClient> DetachedHttpClients = new HashSet<HttpClient>();
 
         private static readonly object Gate = new object();
         private static readonly Dictionary<string, McpConn> Conns =
@@ -201,12 +209,12 @@ namespace Forge.SolidWorks
                 catch { return global; }
                 if (j == null) return global;
                 var project = ParseServersObject(j);
-                return MergeProjectServersOverGlobalByServerName(global, project);
+                return MergeProjectServersOverGlobalByServerNameFieldWise(global, project);
             }
             catch { return global; }
         }
 
-        private static List<McpServerConfig> MergeProjectServersOverGlobalByServerName(List<McpServerConfig> global, List<McpServerConfig> project)
+        private static List<McpServerConfig> MergeProjectServersOverGlobalByServerNameFieldWise(List<McpServerConfig> global, List<McpServerConfig> project)
         {
             var merged = new List<McpServerConfig>();
             var gs = global ?? new List<McpServerConfig>();
@@ -219,7 +227,7 @@ namespace Forge.SolidWorks
                 {
                     if (p != null && string.Equals(g.Name, p.Name, StringComparison.OrdinalIgnoreCase)) { overrideEntry = p; break; }
                 }
-                merged.Add(overrideEntry ?? g);
+                merged.Add(overrideEntry == null ? g : MergeServerFieldsFieldWise(CloneServerConfig(g), overrideEntry));
             }
             foreach (var p in ps)
             {
@@ -234,6 +242,58 @@ namespace Forge.SolidWorks
             return merged;
         }
 
+        private static McpServerConfig CloneServerConfig(McpServerConfig s)
+        {
+            var c = new McpServerConfig();
+            c.Name = s.Name;
+            c.Command = s.Command;
+            c.Args = s.Args != null ? (string[])s.Args.Clone() : new string[0];
+            c.StartTimeoutMs = s.StartTimeoutMs;
+            c.Enabled = s.Enabled;
+            c.TimeoutMs = s.TimeoutMs;
+            c.Type = s.Type;
+            c.Url = s.Url;
+            c.Headers = s.Headers != null ? new Dictionary<string, string>(s.Headers, StringComparer.OrdinalIgnoreCase) : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            c.Env = s.Env != null ? new Dictionary<string, string>(s.Env, StringComparer.OrdinalIgnoreCase) : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            c.Cwd = s.Cwd;
+            c.WatchPaths = s.WatchPaths != null ? (string[])s.WatchPaths.Clone() : new string[0];
+            c.AlwaysAllow = s.AlwaysAllow != null ? (string[])s.AlwaysAllow.Clone() : new string[0];
+            c.DisabledTools = s.DisabledTools != null ? (string[])s.DisabledTools.Clone() : new string[0];
+            return c;
+        }
+
+        private static bool IsDefaultArgs(string[] args)
+        {
+            return args != null && args.Length == 1 && string.Equals(args[0], "solidworks-mcp", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static McpServerConfig MergeServerFieldsFieldWise(McpServerConfig g, McpServerConfig p)
+        {
+            if (!string.IsNullOrWhiteSpace(p.Command) && !string.Equals(p.Command.Trim(), "uvx", StringComparison.OrdinalIgnoreCase)) g.Command = p.Command.Trim();
+            if (p.Args != null && p.Args.Length > 0 && !IsDefaultArgs(p.Args)) g.Args = (string[])p.Args.Clone();
+            if (p.StartTimeoutMs >= MinConfiguredTimeoutMs) g.StartTimeoutMs = p.StartTimeoutMs;
+            if (!p.Enabled) g.Enabled = false;
+            int projectDefaultTimeout = p.IsHttp ? DefaultHttpTimeoutMs : DefaultStdioTimeoutMs;
+            if (p.TimeoutMs >= MinConfiguredTimeoutMs && p.TimeoutMs != projectDefaultTimeout) g.TimeoutMs = p.TimeoutMs;
+            if (p.IsHttp)
+            {
+                g.Type = "http";
+                if (!string.IsNullOrWhiteSpace(p.Url)) g.Url = p.Url.Trim();
+                if (p.Headers != null && p.Headers.Count > 0)
+                    g.Headers = new Dictionary<string, string>(p.Headers, StringComparer.OrdinalIgnoreCase);
+            }
+            else
+            {
+                if (p.Env != null && p.Env.Count > 0)
+                    g.Env = new Dictionary<string, string>(p.Env, StringComparer.OrdinalIgnoreCase);
+                if (!string.IsNullOrWhiteSpace(p.Cwd)) g.Cwd = p.Cwd.Trim();
+            }
+            if (p.WatchPaths != null && p.WatchPaths.Length > 0) g.WatchPaths = (string[])p.WatchPaths.Clone();
+            if (p.AlwaysAllow != null && p.AlwaysAllow.Length > 0) g.AlwaysAllow = (string[])p.AlwaysAllow.Clone();
+            if (p.DisabledTools != null && p.DisabledTools.Length > 0) g.DisabledTools = (string[])p.DisabledTools.Clone();
+            return g;
+        }
+
         public static void SaveServersForProject(string projectKey, List<McpServerConfig> servers)
         {
             try
@@ -242,13 +302,39 @@ namespace Forge.SolidWorks
                 string p = ProjectConfigPath(projectKey);
                 try { Directory.CreateDirectory(Path.GetDirectoryName(p)); } catch { }
                 File.WriteAllText(p, SerializeServers(servers).ToString(Newtonsoft.Json.Formatting.None));
+                InvalidateEffectiveServersCache();
             }
             catch { }
         }
 
         public static List<McpServerConfig> LoadEffectiveServers()
         {
-            return LoadServersForProject(ProjectKey);
+            string key = ProjectKey ?? "";
+            lock (ConfigCacheGate)
+            {
+                if (_effectiveServersCache != null &&
+                    string.Equals(_effectiveServersCacheKey, key, StringComparison.Ordinal) &&
+                    (DateTime.UtcNow - _effectiveServersCacheAt).TotalMilliseconds < EffectiveServersCacheTtlMs)
+                    return new List<McpServerConfig>(_effectiveServersCache);
+            }
+            var list = LoadServersForProject(key);
+            lock (ConfigCacheGate)
+            {
+                _effectiveServersCache = list;
+                _effectiveServersCacheKey = key;
+                _effectiveServersCacheAt = DateTime.UtcNow;
+            }
+            return new List<McpServerConfig>(list);
+        }
+
+        private static void InvalidateEffectiveServersCache()
+        {
+            lock (ConfigCacheGate)
+            {
+                _effectiveServersCache = null;
+                _effectiveServersCacheKey = null;
+                _effectiveServersCacheAt = DateTime.MinValue;
+            }
         }
 
         public static McpServerConfig ConfigForServer(string serverName)
@@ -525,6 +611,7 @@ namespace Forge.SolidWorks
                 string p = ConfigPath();
                 try { Directory.CreateDirectory(Path.GetDirectoryName(p)); } catch { }
                 File.WriteAllText(p, SerializeServers(servers).ToString(Newtonsoft.Json.Formatting.None));
+                InvalidateEffectiveServersCache();
             }
             catch { }
         }
@@ -966,7 +1053,7 @@ namespace Forge.SolidWorks
             try
             {
                 int want = timeoutMs > 0 ? timeoutMs : cfg.EffectiveStartTimeoutMs;
-                if (want < 30000) want = 60000;
+                if (want <= 30000) want = 60000;
                 initTimeout = want;
                 var init = new JObject
                 {
@@ -1379,8 +1466,19 @@ namespace Forge.SolidWorks
             conn.IsHttp = false;
             conn.Url = null;
             conn.Headers = null;
-            try { if (conn.Http != null) conn.Http.Dispose(); } catch { }
+            var oldHttp = conn.Http;
             conn.Http = null;
+            if (oldHttp != null)
+            {
+                bool inFlight;
+                lock (Gate)
+                {
+                    int n;
+                    inFlight = HttpInFlight.TryGetValue(oldHttp, out n) && n > 0;
+                    if (inFlight) DetachedHttpClients.Add(oldHttp);
+                }
+                if (!inFlight) { try { oldHttp.Dispose(); } catch { } }
+            }
             foreach (var kv in conn.Pending)
             {
                 TaskCompletionSource<string> tcs;
@@ -1623,75 +1721,47 @@ namespace Forge.SolidWorks
         private static async Task<JObject> HttpPostAsync(string name, string method, string body, int timeoutMs, CancellationToken ct)
         {
             McpConn conn;
-            lock (Gate) { conn = GetConnLocked(name); EnsureHttpClientLocked(conn); }
-            string url = conn.Url;
+            HttpClient http;
+            string url;
             string sid;
             Dictionary<string, string> hdrs;
-            lock (Gate) { sid = conn.SessionId; hdrs = conn.Headers; }
-            if (string.IsNullOrWhiteSpace(url)) throw new McpException("MCP server '" + name + "' has no URL configured — add a URL in Settings → MCP servers, then retry.");
-            bool isNotification = method != null && method.StartsWith("notifications/", StringComparison.Ordinal);
-            using (var timeoutCts = new CancellationTokenSource(timeoutMs))
-            using (var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token))
+            lock (Gate)
             {
-                HttpResponseMessage respMsg = null;
-                try
+                conn = GetConnLocked(name);
+                EnsureHttpClientLocked(conn);
+                http = conn.Http;
+                url = conn.Url;
+                sid = conn.SessionId;
+                hdrs = conn.Headers;
+                int n;
+                HttpInFlight.TryGetValue(http, out n);
+                HttpInFlight[http] = n + 1;
+            }
+            try
+            {
+                if (string.IsNullOrWhiteSpace(url)) throw new McpException("MCP server '" + name + "' has no URL configured — add a URL in Settings → MCP servers, then retry.");
+                bool isNotification = method != null && method.StartsWith("notifications/", StringComparison.Ordinal);
+                using (var timeoutCts = new CancellationTokenSource(timeoutMs))
+                using (var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token))
                 {
-                    using (var req = new HttpRequestMessage(HttpMethod.Post, url))
-                    {
-                        req.Content = new StringContent(body, Encoding.UTF8);
-                        req.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
-                        req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-                        req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
-                        if (hdrs != null)
-                            foreach (var kv in hdrs)
-                            {
-                                if (string.IsNullOrEmpty(kv.Key) || kv.Value == null) continue;
-                                if (!req.Headers.TryAddWithoutValidation(kv.Key, kv.Value))
-                                    req.Content.Headers.TryAddWithoutValidation(kv.Key, kv.Value);
-                            }
-                        if (!string.IsNullOrEmpty(sid)) req.Headers.TryAddWithoutValidation("Mcp-Session-Id", sid);
-                        respMsg = await conn.Http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, linked.Token).ConfigureAwait(false);
-                    }
-                }
-                catch (OperationCanceledException)
-                {
-                    if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
-                    MarkHttpFailed(conn);
-                    throw new McpException("MCP server '" + name + "' timed out on `" + method + "` after " + (timeoutMs / 1000) + "s — check its URL/logs, then retry.");
-                }
-                catch (Exception ex)
-                {
-                    MarkHttpFailed(conn);
-                    throw new McpException("MCP server '" + name + "' unavailable (" + ex.Message + ") — check its URL/command and retry.");
-                }
-                using (respMsg)
-                {
+                    HttpResponseMessage respMsg = null;
                     try
                     {
-                        IEnumerable<string> vals;
-                        if (respMsg.Headers.TryGetValues("Mcp-Session-Id", out vals))
+                        using (var req = new HttpRequestMessage(HttpMethod.Post, url))
                         {
-                            var got = vals.FirstOrDefault();
-                            if (!string.IsNullOrEmpty(got)) lock (Gate) { conn.SessionId = got; }
-                        }
-                    }
-                    catch { }
-                    string text;
-                    try
-                    {
-                        using (var stream = await respMsg.Content.ReadAsStreamAsync().ConfigureAwait(false))
-                        using (var reader = new StreamReader(stream, Encoding.UTF8, true))
-                        {
-                            var sb = new StringBuilder();
-                            char[] buf = new char[8192];
-                            int n;
-                            while ((n = await reader.ReadAsync(buf, 0, buf.Length).ConfigureAwait(false)) > 0)
-                            {
-                                linked.Token.ThrowIfCancellationRequested();
-                                if (sb.Length + n > 16 * 1024 * 1024) break;
-                                sb.Append(buf, 0, n);
-                            }
-                            text = sb.ToString();
+                            req.Content = new StringContent(body, Encoding.UTF8);
+                            req.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+                            req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+                            req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+                            if (hdrs != null)
+                                foreach (var kv in hdrs)
+                                {
+                                    if (string.IsNullOrEmpty(kv.Key) || kv.Value == null) continue;
+                                    if (!req.Headers.TryAddWithoutValidation(kv.Key, kv.Value))
+                                        req.Content.Headers.TryAddWithoutValidation(kv.Key, kv.Value);
+                                }
+                            if (!string.IsNullOrEmpty(sid)) req.Headers.TryAddWithoutValidation("Mcp-Session-Id", sid);
+                            respMsg = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, linked.Token).ConfigureAwait(false);
                         }
                     }
                     catch (OperationCanceledException)
@@ -1705,22 +1775,79 @@ namespace Forge.SolidWorks
                         MarkHttpFailed(conn);
                         throw new McpException("MCP server '" + name + "' unavailable (" + ex.Message + ") — check its URL/command and retry.");
                     }
-                    if (!respMsg.IsSuccessStatusCode)
+                    using (respMsg)
                     {
-                        MarkHttpFailed(conn);
-                        string why = respMsg.ReasonPhrase ?? "";
-                        throw new McpException("MCP server '" + name + "' returned HTTP " + (int)respMsg.StatusCode + (string.IsNullOrEmpty(why) ? "" : " " + why) + " for `" + method + "`" + (string.IsNullOrEmpty(text) ? "" : ": " + Trunc(text, 200)) + " — check the URL/headers and the server logs, then retry.");
+                        try
+                        {
+                            IEnumerable<string> vals;
+                            if (respMsg.Headers.TryGetValues("Mcp-Session-Id", out vals))
+                            {
+                                var got = vals.FirstOrDefault();
+                                if (!string.IsNullOrEmpty(got)) lock (Gate) { conn.SessionId = got; }
+                            }
+                        }
+                        catch { }
+                        string text;
+                        try
+                        {
+                            using (var stream = await respMsg.Content.ReadAsStreamAsync().ConfigureAwait(false))
+                            using (var reader = new StreamReader(stream, Encoding.UTF8, true))
+                            {
+                                var sb = new StringBuilder();
+                                char[] buf = new char[8192];
+                                int n;
+                                while ((n = await reader.ReadAsync(buf, 0, buf.Length).ConfigureAwait(false)) > 0)
+                                {
+                                    linked.Token.ThrowIfCancellationRequested();
+                                    if (sb.Length + n > 16 * 1024 * 1024) break;
+                                    sb.Append(buf, 0, n);
+                                }
+                                text = sb.ToString();
+                            }
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
+                            MarkHttpFailed(conn);
+                            throw new McpException("MCP server '" + name + "' timed out on `" + method + "` after " + (timeoutMs / 1000) + "s — check its URL/logs, then retry.");
+                        }
+                        catch (Exception ex)
+                        {
+                            MarkHttpFailed(conn);
+                            throw new McpException("MCP server '" + name + "' unavailable (" + ex.Message + ") — check its URL/command and retry.");
+                        }
+                        if (!respMsg.IsSuccessStatusCode)
+                        {
+                            MarkHttpFailed(conn);
+                            string why = respMsg.ReasonPhrase ?? "";
+                            throw new McpException("MCP server '" + name + "' returned HTTP " + (int)respMsg.StatusCode + (string.IsNullOrEmpty(why) ? "" : " " + why) + " for `" + method + "`" + (string.IsNullOrEmpty(text) ? "" : ": " + Trunc(text, 200)) + " — check the URL/headers and the server logs, then retry.");
+                        }
+                        JObject parsed = ParseRpcResponse(text, name);
+                        if (parsed == null)
+                        {
+                            if (isNotification) { lock (Gate) { conn.HttpFailed = false; } return new JObject(); }
+                            MarkHttpFailed(conn);
+                            throw new McpException("MCP server '" + name + "' returned an unreadable response to `" + method + "` (" + (text != null ? text.Length : 0) + " chars): " + Trunc(text, 200) + " — check the server logs and retry.");
+                        }
+                        lock (Gate) { conn.HttpFailed = false; }
+                        return parsed;
                     }
-                    JObject parsed = ParseRpcResponse(text, name);
-                    if (parsed == null)
-                    {
-                        if (isNotification) { lock (Gate) { conn.HttpFailed = false; } return new JObject(); }
-                        MarkHttpFailed(conn);
-                        throw new McpException("MCP server '" + name + "' returned an unreadable response to `" + method + "` (" + (text != null ? text.Length : 0) + " chars): " + Trunc(text, 200) + " — check the server logs and retry.");
-                    }
-                    lock (Gate) { conn.HttpFailed = false; }
-                    return parsed;
                 }
+            }
+            finally
+            {
+                bool dispose = false;
+                lock (Gate)
+                {
+                    int n;
+                    if (HttpInFlight.TryGetValue(http, out n))
+                    {
+                        if (n <= 1) HttpInFlight.Remove(http);
+                        else HttpInFlight[http] = n - 1;
+                    }
+                    if (!HttpInFlight.ContainsKey(http) && DetachedHttpClients.Remove(http)) dispose = true;
+                }
+                if (dispose) { try { http.Dispose(); } catch { } }
             }
         }
 

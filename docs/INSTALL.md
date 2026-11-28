@@ -51,7 +51,7 @@ The Forge panel appears as a task pane inside SolidWorks.
 
 Unlike Kilo there is no sign-in, zero-config provider, or provisioning wizard: `/connect` and `/provider` only open Settings or switch slugs. Create `config.json` + a key as below, or run keyless — the deterministic local parser handles a large part of the catalog with no provider at all.
 
-Forge reads chat settings from `%APPDATA%\Forge\config.json`. Keys never live in the config file. Resolution order, everywhere: (1) per-slug DPAPI file `%APPDATA%\Forge\keys\<slug>.key` (e.g. `nvidia.key`), (2) per-slug env var, (3) the legacy shared client-id file (auto-adopted under the slug on first use), (4) the bare `FORGE_PROVIDER_KEY` fallback. For `opencode`, `OPENCODE_API_KEY` (Kilo parity) is accepted between (2) and (3); with no key found anywhere, Forge sends the literal bearer token `public` — **no key = free models only (public)**. For `opencode-go` the same chain applies (`FORGE_PROVIDER_KEY_OPENCODE_GO` then `OPENCODE_API_KEY`), but a paid subscription key is **required**: no `public` fallback — with no key Forge refuses with `OpenCode Go subscription required`.
+Forge reads chat settings from `%APPDATA%\Forge\config.json`. **Provider API keys** never live in the config file (they use per-slug DPAPI files or env vars) — but custom-provider header **templates** and MCP server `headers`/`env` are plain config values stored in `config.json` / `mcp.json`. Resolution order, everywhere: (1) per-slug DPAPI file `%APPDATA%\Forge\keys\<slug>.key` (e.g. `nvidia.key`), (2) per-slug env var, (3) the legacy shared client-id file (auto-adopted under the slug on first use), (4) the bare `FORGE_PROVIDER_KEY` fallback. For `opencode`, `OPENCODE_API_KEY` (Kilo parity) is accepted between (2) and (3); with no key found anywhere, Forge sends the literal bearer token `public` — **no key = free models only (public)**. For `opencode-go` the same chain applies (`FORGE_PROVIDER_KEY_OPENCODE_GO` then `OPENCODE_API_KEY`), but a paid subscription key is **required**: no `public` fallback — with no key Forge refuses with `OpenCode Go subscription required`.
 
 | Slug | Per-slug env var |
 |---|---|
@@ -83,7 +83,7 @@ Slugs normalize to uppercase with non-alphanumerics as underscores, so a custom 
 
 `smallModel` is optional: rewrite chores (enhance, compaction summaries) use it when set, else a built-in cheap default per provider (DeepSeek→`deepseek-flash`, OpenAI→`gpt-6-luna`, Anthropic→`claude-haiku-4-5`; OpenCode Zen / OpenCode Go→none, keeps the current model), else the current model.
 
-2. Set the key as an environment variable — never in the config file:
+2. Set the provider API key as an environment variable — never in the config file:
 
    ```
    setx FORGE_PROVIDER_KEY "sk-..."   (then restart SolidWorks)
@@ -110,13 +110,13 @@ Slugs normalize to uppercase with non-alphanumerics as underscores, so a custom 
 | `workStyle` | `"review-first"` or `"high-autonomy"` (default high-autonomy). `review-first` sets auto-approve master OFF; `high-autonomy` sets it ON. Both leave destructive gated. | Settings → Work style |
 | `reasoningEffort` | `none`, `low`, `medium`, `high`, `xhigh`, `max` (global); per-model override as `reasoningEffort_<modelKey>` | Model-picker effort row, Shift+Tab cycling |
 | `compactOn` | bool | Settings → Auto-compact |
-| `compactThresholdPct` | 1–100 (default 60); the Settings input restricts entry to 10–95 | Settings → Compact at |
-| `compactReservedTokens` | ≥0 (default up to 20 000 / the model's max output) | Settings → Reserved tokens |
-| `compactTailTurns` | 0–10 (default 2) | Settings → Tail turns |
+| `compactThresholdPct` | 10–95 % (default 60); clamped on both host and Settings input | Settings → Compact at |
+| `compactReservedTokens` | 0 = keep default `min(20 000, model max output)`; a positive value overrides | Settings → Reserved tokens |
+| `compactTailTurns` | 0 = keep default 2; 1–10 overrides (higher values clamped to 10) | Settings → Tail turns |
 | `customModels.<slug>` | `[{ "id": "...", "label": "..." }]` | Settings → Custom models |
 | `customProviders[]` | `{ "slug", "label", "kind": "openai-compatible"|"anthropic", "baseUrl", "headers": {...} }` | Settings → Custom providers |
 
-Custom-provider `headers` values support `{env:VAR}`, `${VAR}` and `%VAR%` templating; unresolved tokens are left in place and reported. The base URL is checked against other custom providers and built-in presets, reserved built-in slugs are rejected, and at most 20 custom providers are allowed. Removing the active custom provider falls back to DeepSeek; its key and model ids are kept on disk.
+Custom-provider `headers` values are stored **as raw templates** in `config.json` (plain config values, not DPAPI secrets) and support `{env:VAR}`, `${VAR}` and `%VAR%` templating. `ParseProviderHeaders` keeps the template verbatim; `ExpandedProviderHeaders` → `ExpandEnvTokens` resolves `{env:VAR}` against the process environment **at request time** into `ProviderOptions.Headers` / `McpBuild.ProviderHeaders`. Unresolved tokens are left in place and reported. MCP server `headers`/`env` are likewise plain config values (no token expansion) in `mcp.json`. The base URL is checked against other custom providers and built-in presets, reserved built-in slugs are rejected, and at most 20 custom providers are allowed. Removing the active custom provider falls back to DeepSeek; its key and model ids are kept on disk.
 
 ## Multi-part builds via the SolidWorks-MCP server (optional)
 
@@ -133,7 +133,7 @@ Override the launch in `%APPDATA%\Forge\mcp.json`. Each `servers[]` entry takes 
 ```json
 {
   "servers": [
-    { "name": "default", "type": "stdio", "command": "uvx", "args": ["solidworks-mcp"], "env": {}, "cwd": "", "enabled": true, "timeoutMs": 30000,
+    { "name": "default", "type": "stdio", "command": "uvx", "args": ["solidworks-mcp"], "env": {}, "cwd": "", "enabled": true, "timeoutMs": 300000,
       "watchPaths": [], "alwaysAllow": [], "disabledTools": [] },
     { "name": "remote", "type": "http", "url": "https://example.com/mcp", "headers": { "Authorization": "Bearer <token>" }, "enabled": true, "timeoutMs": 15000 }
   ]
@@ -142,7 +142,7 @@ Override the launch in `%APPDATA%\Forge\mcp.json`. Each `servers[]` entry takes 
 
 - For `stdio`, `command` (+ `args`) launches the server; `env` adds environment variables and `cwd` sets the working directory.
 - For `type: "http"`, `url` is required and `headers` are sent on each request. Both JSON and SSE responses are accepted, and a `Mcp-Session-Id` returned by the server is echoed on later calls. Failed HTTP connections are re-handshaken on the next route.
-- Timeouts: `timeoutMs` is the per-call timeout in **milliseconds** — default **30 s for stdio / 15 s for HTTP**, with a **1 s minimum** in config. `startTimeoutMs` covers launch+handshake and follows `timeoutMs` when unset. The Settings UI shows seconds. A short bounded catalog fetch stops one dead server from blocking the whole run.
+- Timeouts: `timeoutMs` is the per-call timeout in **milliseconds** — default **300000 ms (300 s) for stdio / 15000 ms (15 s) for HTTP**, with a **1 s minimum** in config. stdio keeps a long default because the first run can download the MCP package and the server may start slowly; remote HTTP stays short for Kilo parity (15 s). `startTimeoutMs` covers launch+handshake and follows `timeoutMs` when unset, but the initialize handshake is bumped to **60 s** whenever the configured value is ≤ 30 s (so a legacy 30 s config still gets a 60 s handshake). The Settings UI shows seconds. A separate catalog fetch is bounded to 60 s (`CatalogPerServerTimeoutMs`) so one dead server can't block the whole run.
 - `enabled: false` disables that server; multi-part builds will ask you to re-enable it. Routing is ordered failover across enabled servers.
 - `watchPaths` lists local paths that, when changed, auto-restart that server. `alwaysAllow` and `disabledTools` are per-server glob lists applied to tool names (qualified `{server}_{tool}` or bare); disabled tools are filtered from the catalog.
 - The legacy flat form (`{ "command": "uvx", "args": [...], ... }` with no `servers` key) auto-migrates in-memory to `servers[0]` named `"default"` (`McpBridge.LoadServers`); the `servers[]` form is written back on the next save.
@@ -199,7 +199,7 @@ The chat-history popover (`🕘` / `/history`) lists chats most-recent-first wit
 
 ### Transcript compaction
 
-`/compact` (aliases `/summarize`, `/smol`, `/condense`) folds older turns into a collapsed block; with a provider connected the host summarizes the folded text, otherwise a numbered titles digest is kept. Settings holds `Auto-compact`, `Compact at` (context-% threshold, default 60, host range 1–100 / UI 10–95), `Reserved tokens` and `Tail turns`. The host fires once session context usage reaches that % of the model window and keeps the newest tail turns; unknown windows are approximate. The `Auto-compact` toggle disables it entirely. A 200-step runaway breaker caps agent loops regardless of approvals.
+`/compact` (aliases `/summarize`, `/smol`, `/condense`) folds older turns into a collapsed block; with a provider connected the host summarizes the folded text, otherwise a numbered titles digest is kept. Settings holds `Auto-compact`, `Compact at` (context-% threshold, default 60, clamped to 10–95 on both host and UI), `Reserved tokens` and `Tail turns`. A value of 0 for reserved tokens or tail turns means "keep the default" — reserved defaults to `min(20 000, the model's max output)` and tail turns to 2. The host fires once session context usage reaches that % of the model window and keeps the newest tail turns; unknown windows are approximate. The `Auto-compact` toggle disables it entirely. A 200-step runaway breaker caps agent loops regardless of approvals.
 
 ### Top bar
 
@@ -244,5 +244,5 @@ Windows balloon toasts (`NotifyIcon.ShowBalloonTip`) fire for approval-card arri
 - **No models list for an Anthropic-wire endpoint.** Only `openai-compatible` providers expose a live `/models` list. Anthropic and custom providers of kind `anthropic` show a single fixed model ("One fixed model on this provider — nothing to load"). Set the model id in `config.json` or register it under Custom models.
 - **"Local storage is full" history warning.** The panel is keeping chats in memory for this session only; nothing was lost. Free browser storage or delete an old chat from history and saving resumes automatically. Older turns, then whole chats, are dropped before this point, and thinking blocks are stripped first.
 - **MCP project scope surprises.** With a SolidWorks document open, MCP server edits are saved per assembly under `%APPDATA%\Forge\mcp-projects\<hash>.json` and merged over the global `mcp.json`; with no document open, edits go to the global file. If a server you added "disappears", open the same document again (or check the global file). Changing `watchPaths` triggers requires the server to be enabled.
-- **MCP server won't start.** A disabled server reports its name and asks you to re-enable it in Settings → MCP servers. Stdio stderr is captured in the bounded server log (per-server `mcpLog` viewer); chat shows only curated error text. Timeouts default to 30 s stdio / 15 s HTTP with a 1 s config minimum.
+- **MCP server won't start.** A disabled server reports its name and asks you to re-enable it in Settings → MCP servers. Stdio stderr is captured in the bounded server log (per-server `mcpLog` viewer); chat shows only curated error text. Timeouts default to 300 s stdio / 15 s HTTP with a 1 s config minimum; the initialize handshake gets 60 s when the configured value is ≤ 30 s.
 - **Panel never appears** — see the Smart App Control note under Install.
