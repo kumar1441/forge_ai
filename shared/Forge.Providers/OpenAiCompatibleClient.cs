@@ -594,6 +594,323 @@ namespace Forge.Providers
             };
         }
 
+        public static async Task<JObject> FetchModelsRawAsync(string baseUrl, string apiKey, CancellationToken ct = default)
+        {
+            string root = string.IsNullOrWhiteSpace(baseUrl) ? "https://api.openai.com/v1" : baseUrl.TrimEnd('/');
+            string url = root + "/models";
+            HttpRequestMessage req;
+            try { req = new HttpRequestMessage(HttpMethod.Get, url); }
+            catch (Exception ex) { throw new ProviderException("Provider address looks wrong (bad base URL \"" + url + "\") — check the provider URL in settings, then resend: " + Truncate(ex.Message), ex); }
+            using (req)
+            {
+                if (!string.IsNullOrEmpty(apiKey))
+                    req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + apiKey);
+                HttpResponseMessage resp;
+                try { resp = await Http.SendAsync(req, ct).ConfigureAwait(false); }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                catch (TaskCanceledException) { throw new ProviderException("Provider request timed out after 10 minutes — the model list is overloaded; try again."); }
+                catch (HttpRequestException ex) { throw new ProviderException("Provider network failure (" + Truncate(ex.Message) + ") — check the connection and try again.", ex); }
+                catch (InvalidOperationException ex) { throw new ProviderException("Provider address looks wrong (bad base URL \"" + url + "\") — check the provider URL in settings, then resend: " + Truncate(ex.Message), ex); }
+                catch (UriFormatException ex) { throw new ProviderException("Provider address looks wrong (bad base URL \"" + url + "\") — check the provider URL in settings, then resend: " + Truncate(ex.Message), ex); }
+                using (resp)
+                {
+                    string text;
+                    try { text = await resp.Content.ReadAsStringAsync().ConfigureAwait(false); }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                    catch (OperationCanceledException) { throw new ProviderException("Provider request timed out after 10 minutes — the model list is overloaded; try again."); }
+                    if (text != null && text.Length > 1048576) throw new ProviderException("Provider returned an oversized model list (" + text.Length + " chars) — try again.");
+                    if (!resp.IsSuccessStatusCode)
+                    {
+                        int code = (int)resp.StatusCode;
+                        if (code == 401 || code == 403) throw new ProviderException(ProviderFactory.AuthRefusedMessage(IdForModelsList(root), root, code));
+                        throw new ProviderException("Provider request failed (" + HttpHint(code, resp.StatusCode) + "): " + Truncate(text) + " — try again; if it repeats, wait and resend.");
+                    }
+                    try { return JObject.Parse(text); }
+                    catch (Exception ex) { throw new ProviderException("Provider returned an unreadable model list — try again; if it repeats, switch provider. (detail: " + Truncate(text) + ")", ex); }
+                }
+            }
+        }
+
+        public static JObject PricingFrom(JObject modelEntry)
+        {
+            double? input = null;
+            double? output = null;
+            try
+            {
+                if (modelEntry != null)
+                {
+                    JObject pricingObj = modelEntry["pricing"] as JObject;
+                    if (pricingObj != null)
+                    {
+                        double? promptVal = ToDouble(pricingObj["prompt"]);
+                        double? completionVal = ToDouble(pricingObj["completion"]);
+                        if (promptVal.HasValue || completionVal.HasValue)
+                        {
+                            if (promptVal.HasValue) input = promptVal.Value * 1000000.0;
+                            if (completionVal.HasValue) output = completionVal.Value * 1000000.0;
+                        }
+                        else
+                        {
+                            double? pi = ToDouble(pricingObj["input"]);
+                            double? po = ToDouble(pricingObj["output"]);
+                            if (pi.HasValue || po.HasValue)
+                            {
+                                input = pi;
+                                output = po;
+                            }
+                        }
+                    }
+                    if (!input.HasValue && !output.HasValue)
+                    {
+                        double? ict = ToDouble(modelEntry["input_cost_per_token"]);
+                        double? oct = ToDouble(modelEntry["output_cost_per_token"]);
+                        if (ict.HasValue || oct.HasValue)
+                        {
+                            if (ict.HasValue) input = ict.Value * 1000000.0;
+                            if (oct.HasValue) output = oct.Value * 1000000.0;
+                        }
+                    }
+                    if (!input.HasValue && !output.HasValue)
+                    {
+                        JObject costObj = modelEntry["cost"] as JObject;
+                        if (costObj != null)
+                        {
+                            double? ci = ToDouble(costObj["input"]);
+                            double? co = ToDouble(costObj["output"]);
+                            if (ci.HasValue || co.HasValue)
+                            {
+                                input = ci;
+                                output = co;
+                            }
+                            else
+                            {
+                                double? cict = ToDouble(costObj["input_cost_per_token"]);
+                                double? coct = ToDouble(costObj["output_cost_per_token"]);
+                                if (cict.HasValue || coct.HasValue)
+                                {
+                                    if (cict.HasValue) input = cict.Value * 1000000.0;
+                                    if (coct.HasValue) output = coct.Value * 1000000.0;
+                                }
+                                else
+                                {
+                                    double? cp = ToDouble(costObj["prompt"]);
+                                    double? cc = ToDouble(costObj["completion"]);
+                                    if (cp.HasValue || cc.HasValue)
+                                    {
+                                        if (cp.HasValue) input = cp.Value * 1000000.0;
+                                        if (cc.HasValue) output = cc.Value * 1000000.0;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+            bool unknown = !input.HasValue || !output.HasValue;
+            JObject j = new JObject();
+            j["input"] = input.HasValue ? (JToken)new JValue(input.Value) : JValue.CreateNull();
+            j["output"] = output.HasValue ? (JToken)new JValue(output.Value) : JValue.CreateNull();
+            j["pricingUnknown"] = unknown;
+            return j;
+        }
+
+        public static async Task<JObject> FetchOpenCodeGoUsageAsync(string apiKey, string baseUrl = "https://opencode.ai/zen/go/v1", CancellationToken ct = default)
+        {
+            string key = apiKey ?? "";
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                try { key = Environment.GetEnvironmentVariable("OPENCODE_API_KEY"); } catch { key = null; }
+            }
+            if (string.IsNullOrWhiteSpace(key)) throw new ProviderException(ProviderFactory.MissingKeyMessage("opencode-go", "https://opencode.ai/zen/go/v1"));
+            string root = string.IsNullOrWhiteSpace(baseUrl) ? "https://opencode.ai/zen/go/v1" : baseUrl.Trim();
+            root = root.TrimEnd('/');
+            root = ReplaceGoRoot(root, "/zen/go/v1", "/inference/go");
+            string url = root.TrimEnd('/') + "/v1/usage";
+            HttpRequestMessage req;
+            try { req = new HttpRequestMessage(HttpMethod.Get, url); }
+            catch (Exception ex) { throw new ProviderException("Provider address looks wrong (bad base URL \"" + url + "\") — check the provider URL in settings, then resend: " + Truncate(ex.Message), ex); }
+            using (req)
+            {
+                req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + key);
+                HttpResponseMessage resp;
+                try { resp = await Http.SendAsync(req, ct).ConfigureAwait(false); }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                catch (TaskCanceledException) { throw new ProviderException("Provider request timed out after 10 minutes — the usage service is overloaded; try again."); }
+                catch (HttpRequestException ex) { throw new ProviderException("Provider network failure (" + Truncate(ex.Message) + ") — check the connection and try again.", ex); }
+                catch (InvalidOperationException ex) { throw new ProviderException("Provider address looks wrong (bad base URL \"" + url + "\") — check the provider URL in settings, then resend: " + Truncate(ex.Message), ex); }
+                catch (UriFormatException ex) { throw new ProviderException("Provider address looks wrong (bad base URL \"" + url + "\") — check the provider URL in settings, then resend: " + Truncate(ex.Message), ex); }
+                using (resp)
+                {
+                    string text;
+                    try { text = await resp.Content.ReadAsStringAsync().ConfigureAwait(false); }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                    catch (OperationCanceledException) { throw new ProviderException("Provider request timed out after 10 minutes — the usage service is overloaded; try again."); }
+                    if (text != null && text.Length > 262144) throw new ProviderException("Provider returned an oversized usage response (" + text.Length + " chars) — try again.");
+                    if (!resp.IsSuccessStatusCode)
+                    {
+                        int code = (int)resp.StatusCode;
+                        if (code == 401 || code == 403) throw new ProviderException("OpenCode Go subscription required or key not entitled — check the OpenCode Go key in Settings → API key, then resend.");
+                        throw new ProviderException("Provider request failed (" + HttpHint(code, resp.StatusCode) + "): " + Truncate(text) + " — try again; if it repeats, wait and resend.");
+                    }
+                    JObject raw;
+                    try { raw = JObject.Parse(text); }
+                    catch (Exception ex) { throw new ProviderException("Provider returned an unreadable usage reply — try again; if it repeats, switch provider. (detail: " + Truncate(text) + ")", ex); }
+                    JObject rolling = NormalizeGoMeter(FindMeterSource(raw, "rolling"));
+                    JObject weekly = NormalizeGoMeter(FindMeterSource(raw, "weekly"));
+                    JObject monthly = NormalizeGoMeter(FindMeterSource(raw, "monthly"));
+                    bool rawAvailable = MeterHasData(rolling) || MeterHasData(weekly) || MeterHasData(monthly);
+                    JObject j = new JObject();
+                    j["rolling"] = rolling;
+                    j["weekly"] = weekly;
+                    j["monthly"] = monthly;
+                    j["rawAvailable"] = rawAvailable;
+                    return j;
+                }
+            }
+        }
+
+        private static string IdForModelsList(string root)
+        {
+            try
+            {
+                string bu = (root ?? "").Trim().ToLowerInvariant();
+                if (bu.Contains("opencode.ai")) return bu.Contains("/zen/go") ? "opencode-go" : "opencode";
+                return "openai-compatible";
+            }
+            catch { return "openai-compatible"; }
+        }
+
+        private static double? ToDouble(JToken t)
+        {
+            try
+            {
+                if (t == null || t.Type == JTokenType.Null || t.Type == JTokenType.Undefined) return null;
+                if (t.Type == JTokenType.Integer || t.Type == JTokenType.Float)
+                {
+                    double v;
+                    try { v = (double)t; } catch { return null; }
+                    if (double.IsNaN(v) || double.IsInfinity(v)) return null;
+                    return v;
+                }
+                if (t.Type == JTokenType.String)
+                {
+                    string s = null;
+                    try { s = (string)t; } catch { return null; }
+                    if (string.IsNullOrWhiteSpace(s)) return null;
+                    s = s.Trim();
+                    double v;
+                    if (double.TryParse(s, System.Globalization.NumberStyles.Float | System.Globalization.NumberStyles.AllowThousands, System.Globalization.CultureInfo.InvariantCulture, out v))
+                    {
+                        if (double.IsNaN(v) || double.IsInfinity(v)) return null;
+                        return v;
+                    }
+                    return null;
+                }
+                return null;
+            }
+            catch { return null; }
+        }
+
+        private static string ReplaceGoRoot(string value, string oldValue, string newValue)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(value) || string.IsNullOrEmpty(oldValue)) return value;
+                if (newValue == null) newValue = "";
+                int idx = value.IndexOf(oldValue, StringComparison.OrdinalIgnoreCase);
+                if (idx < 0) return value;
+                return value.Substring(0, idx) + newValue + value.Substring(idx + oldValue.Length);
+            }
+            catch { return value; }
+        }
+
+        private static JToken FindMeterSource(JObject j, string name)
+        {
+            try
+            {
+                if (j == null || string.IsNullOrEmpty(name)) return null;
+                JToken direct = j[name];
+                if (direct != null && direct.Type == JTokenType.Object) return direct;
+                string[] containers = new string[] { "meters", "usage", "data", "result" };
+                foreach (string c in containers)
+                {
+                    JObject co = null;
+                    try { co = j[c] as JObject; } catch { co = null; }
+                    if (co != null)
+                    {
+                        JToken m = null;
+                        try { m = co[name]; } catch { m = null; }
+                        if (m != null && m.Type == JTokenType.Object) return m;
+                    }
+                }
+                return null;
+            }
+            catch { return null; }
+        }
+
+        private static JObject NormalizeGoMeter(JToken src)
+        {
+            string status = null;
+            double? percent = null;
+            string resetsAt = null;
+            try
+            {
+                JObject o = src as JObject;
+                if (o != null)
+                {
+                    JToken st = null;
+                    try { st = o["status"] ?? o["state"] ?? o["label"]; } catch { st = null; }
+                    if (st != null && st.Type == JTokenType.String)
+                    {
+                        string sv = null;
+                        try { sv = (string)st; } catch { sv = null; }
+                        if (!string.IsNullOrWhiteSpace(sv)) status = sv.Trim();
+                    }
+                    JToken pc = null;
+                    try { pc = o["percent"] ?? o["percentage"] ?? o["usedPercent"] ?? o["used_percent"] ?? o["utilization"] ?? o["pct"]; } catch { pc = null; }
+                    double? pv = null;
+                    try { pv = ToDouble(pc); } catch { pv = null; }
+                    if (pv.HasValue) percent = pv.Value;
+                    JToken ra = null;
+                    try { ra = o["resetsAt"] ?? o["resetAt"] ?? o["resets_at"] ?? o["reset_at"] ?? o["reset"] ?? o["expiresAt"] ?? o["expires_at"]; } catch { ra = null; }
+                    if (ra != null && ra.Type == JTokenType.String)
+                    {
+                        string rv = null;
+                        try { rv = (string)ra; } catch { rv = null; }
+                        if (!string.IsNullOrWhiteSpace(rv)) resetsAt = rv.Trim();
+                    }
+                    else if (ra != null && (ra.Type == JTokenType.Integer || ra.Type == JTokenType.Float))
+                    {
+                        try { resetsAt = ra.ToString(Newtonsoft.Json.Formatting.None); } catch { resetsAt = null; }
+                    }
+                }
+            }
+            catch { }
+            JObject m = new JObject();
+            m["status"] = status != null ? (JToken)new JValue(status) : JValue.CreateNull();
+            m["percent"] = percent.HasValue ? (JToken)new JValue(percent.Value) : JValue.CreateNull();
+            m["resetsAt"] = resetsAt != null ? (JToken)new JValue(resetsAt) : JValue.CreateNull();
+            return m;
+        }
+
+        private static bool MeterHasData(JObject m)
+        {
+            try
+            {
+                if (m == null) return false;
+                JToken s = m["status"];
+                if (s != null && s.Type == JTokenType.String && !string.IsNullOrWhiteSpace((string)s)) return true;
+                JToken p = m["percent"];
+                if (p != null && (p.Type == JTokenType.Float || p.Type == JTokenType.Integer)) return true;
+                if (p != null && p.Type == JTokenType.String && ToDouble(p).HasValue) return true;
+                JToken r = m["resetsAt"];
+                if (r != null && r.Type == JTokenType.String && !string.IsNullOrWhiteSpace((string)r)) return true;
+                return false;
+            }
+            catch { return false; }
+        }
+
         private static string Truncate(string s)
         {
             if (s == null) return "";

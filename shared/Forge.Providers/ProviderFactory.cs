@@ -109,7 +109,8 @@ namespace Forge.Providers
             string bu = (baseUrl ?? "").Trim().ToLowerInvariant();
             if (bu.Contains("api.deepseek.com")) return "deepseek-flash";
             if (bu.Contains("api.openai.com")) return "gpt-6-luna";
-        if (bu.Contains("api.anthropic.com")) return "claude-haiku-4-5";
+            if (bu.Contains("api.anthropic.com")) return "claude-haiku-4-5";
+            if (bu.Contains("opencode.ai/zen")) return "glm-5.3-flash";
             return null;
         }
 
@@ -317,6 +318,34 @@ namespace Forge.Providers
                 ["reasoning"] = reasoning,
                 ["temperatureSupported"] = temp
             };
+        }
+
+        public static JObject ModelInfo(string slug, string modelId, JObject raw)
+        {
+            JObject j = ModelInfo(slug, modelId);
+            try
+            {
+                if (raw == null) return j;
+                JObject p = OpenAiCompatibleClient.PricingFrom(raw);
+                if (p == null) return j;
+                JToken inp = p["input"];
+                JToken outp = p["output"];
+                bool hasIn = inp != null && inp.Type != JTokenType.Null;
+                bool hasOut = outp != null && outp.Type != JTokenType.Null;
+                if (hasIn || hasOut)
+                {
+                    JObject pricing = new JObject();
+                    pricing["input"] = inp != null ? (JToken)inp.DeepClone() : JValue.CreateNull();
+                    pricing["output"] = outp != null ? (JToken)outp.DeepClone() : JValue.CreateNull();
+                    j["pricing"] = pricing;
+                }
+                bool unknown = true;
+                try { unknown = (bool?)p["pricingUnknown"] ?? true; } catch { unknown = true; }
+                if (!hasIn || !hasOut) unknown = true;
+                j["pricingUnknown"] = unknown;
+            }
+            catch { }
+            return j;
         }
 
         /// <summary>

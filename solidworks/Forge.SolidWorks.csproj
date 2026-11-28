@@ -24,6 +24,10 @@
     <SwInteropRoot>C:\Program Files\Dassault Systemes\SOLIDWORKS 3DEXPERIENCE R2026x\SOLIDWORKS\api\redist</SwInteropRoot>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <SwInteropRoot Condition="!Exists('$(SwInteropRoot)') And Exists('$(MSBuildProjectDirectory)\..\lib\sw-interop')">$(MSBuildProjectDirectory)\..\lib\sw-interop</SwInteropRoot>
+  </PropertyGroup>
+
   <!--
     Harness/runner/ is its OWN separate csproj (ForgeHarnessRunner, a standalone exe). It lives inside this
     project's default recursive glob (solidworks/**/*.cs), so it and its bin/obj must be excluded here or its

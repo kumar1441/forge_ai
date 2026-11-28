@@ -448,6 +448,10 @@
   .ctxpop .crow b { color:var(--ink); font-weight:600; }
   .ctxpop .cbar { height:6px; border-radius:3px; background:var(--bg); overflow:hidden; }
   .ctxpop .cbar i { display:block; height:100%; background:var(--accent); border-radius:3px; }
+  .usage .urow { display:flex; justify-content:space-between; gap:8px; font-size:12px; color:var(--soft); }
+  .usage .urow b { color:var(--ink); font-weight:600; }
+  .usage .ubar { height:6px; border-radius:3px; background:var(--bg); overflow:hidden; margin:3px 0 7px; }
+  .usage .ubar i { display:block; height:100%; background:var(--accent); border-radius:3px; }
   /* transcript search bar */
   .findbar { display:flex; align-items:center; gap:6px; padding:8px 14px; border-bottom:1px solid var(--line);
     background:var(--surface); }
@@ -589,6 +593,51 @@
     border:1px solid var(--line); border-radius:8px; padding:6px 8px; margin:2px 0 4px;
     font-family:ui-monospace,"Cascadia Code",Consolas,monospace; font-size:10px;
     white-space:pre-wrap; word-break:break-all; color:var(--soft); }
+  .agentcard { border:1px solid var(--line); border-radius:12px; background:var(--surface);
+    display:flex; flex-direction:column; gap:0; overflow:hidden; }
+  .agentcard .achead { display:flex; align-items:center; gap:8px; padding:9px 12px; cursor:pointer; user-select:none; }
+  .agentcard .achead:hover { background:rgba(255,255,255,.02); }
+  .agentcard .arole { font-size:10.5px; padding:2px 8px; border-radius:20px; background:var(--sky-soft);
+    color:var(--sky); border:1px solid rgba(122,165,255,.30); white-space:nowrap; }
+  .agentcard .aname { font-weight:600; font-size:12.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1 1 auto; min-width:0; }
+  .agentcard .astatus { font-size:10.5px; padding:2px 8px; border-radius:20px; white-space:nowrap; border:1px solid var(--line); color:var(--soft); }
+  .agentcard .astatus[data-st="started"], .agentcard .astatus[data-st="queued"] { background:var(--accent-soft); color:var(--accent-ink); border-color:rgba(244,120,64,.35); }
+  .agentcard .astatus[data-st="done"] { background:var(--mint-soft); color:var(--mint); border-color:rgba(126,210,160,.30); }
+  .agentcard .astatus[data-st="failed"] { background:var(--red-soft); color:var(--red); border-color:rgba(242,125,114,.30); }
+  .agentcard .astatus[data-st="stopped"] { background:var(--amber-soft); color:var(--amber); border-color:rgba(245,193,105,.30); }
+  .agentcard .acaret { color:var(--faint); font-size:12px; flex:none; }
+  .agentcard .astop { flex:none; background:var(--raised); border:1px solid var(--line); border-radius:7px;
+    color:var(--soft); font:inherit; font-size:11px; padding:2px 9px; cursor:pointer; }
+  .agentcard .astop:hover { border-color:var(--red); color:var(--red); }
+  .agentcard .astop:disabled { opacity:.4; cursor:default; }
+  .agentcard .asumline { font-size:11.5px; color:var(--soft); padding:0 12px 8px; white-space:pre-wrap; word-break:break-word;
+    overflow-wrap:anywhere; max-height:120px; overflow-y:auto; }
+  .agentcard .asumline:empty { display:none; }
+  .agentcard .abody { border-top:1px solid var(--line); display:flex; flex-direction:column; }
+  .agentcard.collapsed .abody { display:none; }
+  .agentcard .atabs { display:flex; gap:2px; padding:6px 8px 0; }
+  .agentcard .atabs button { background:none; border:1px solid transparent; border-bottom:none; border-radius:8px 8px 0 0;
+    color:var(--faint); font:inherit; font-size:11.5px; padding:4px 10px; cursor:pointer; }
+  .agentcard .atabs button.on { color:var(--ink); background:var(--raised); border-color:var(--line); }
+  .agentcard .apanes { padding:8px; }
+  .agentcard .apane { display:flex; flex-direction:column; gap:6px; max-height:260px; overflow-y:auto; }
+  .agentcard .atrace { font-size:12px; color:var(--soft); display:flex; flex-direction:column; gap:2px;
+    border-bottom:1px solid var(--line); padding:4px 2px; overflow-wrap:anywhere; }
+  .agentcard .atrace:last-child { border-bottom:none; }
+  .agentcard .atrace .akind { font-size:10px; text-transform:uppercase; letter-spacing:.6px; color:var(--faint); }
+  .agentcard .atrace .alabel { color:var(--ink); white-space:pre-wrap; word-break:break-word; }
+  .agentcard .atrace .adetail { font-family:ui-monospace,"Cascadia Code",Consolas,monospace; font-size:11px;
+    color:var(--faint); white-space:pre-wrap; word-break:break-word; max-height:140px; overflow-y:auto; }
+  .agentcard .atrace .aat { font-size:10px; color:var(--faint); }
+  .agentcard .atrace.err { color:var(--red); }
+  .agentcard .aempty { font-size:11.5px; color:var(--faint); padding:6px 2px; }
+  .agentcard .asummary { font-size:12.5px; color:var(--ink); white-space:pre-wrap; word-break:break-word; overflow-wrap:anywhere; }
+  .settings .alimrow { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:5px 6px; font-size:12px; color:var(--ink); }
+  .settings .alimrow label { color:var(--soft); }
+  .settings .alimrow .skeywrap label { font-size:10.5px; color:var(--faint); display:inline-flex; align-items:center; gap:4px; }
+  .settings .alimrow input[type="checkbox"] { accent-color:var(--accent); }
+  .settings .alimlock { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:5px 6px; font-size:12px; color:var(--ink); }
+  .settings .alimlock .onbadge { font-size:10.5px; padding:2px 8px; border-radius:20px; background:var(--mint-soft); color:var(--mint); border:1px solid rgba(126,210,160,.30); }
 </style>
 </head>
 <body>
@@ -635,6 +684,41 @@
       <div class="srow"><label>Custom models</label></div>
       <div id="customlist"></div>
       <div class="cadd"><input id="customid" placeholder="model id" autocomplete="off" /><input id="customlabel" placeholder="label (optional)" autocomplete="off" /><button id="customadd" title="Register this model id for the current provider">Add</button></div>
+      <div class="ssep"></div>
+      <div class="srow"><label>Subagents</label>
+        <span class="skeywrap"><button id="agentadd" title="Add a custom subagent role">+ Add</button></span>
+      </div>
+      <div id="agentlist"></div>
+      <div id="agentedit" style="display:none">
+        <div class="srow"><label>Name</label>
+          <span class="skeywrap"><input type="text" id="agentname" placeholder="researcher" autocomplete="off" /></span>
+        </div>
+        <div class="srow"><label>Description</label>
+          <span class="skeywrap"><input type="text" id="agentdesc" class="mwide" placeholder="what this role does" autocomplete="off" /></span>
+        </div>
+        <div class="srow"><label>System prompt</label>
+          <span class="skeywrap"><textarea id="agentsys" class="mta" rows="3" spellcheck="false" placeholder="extra instructions for this role"></textarea></span>
+        </div>
+        <div class="srow"><label>Tools</label>
+          <span class="skeywrap"><textarea id="agenttools" class="mta" rows="2" spellcheck="false" placeholder="one tool per line (blank = all tools)"></textarea></span>
+        </div>
+        <div class="srow"><label>Model</label>
+          <span class="skeywrap"><input type="text" id="agentmodel" class="mwide" placeholder="optional model override" autocomplete="off" /></span>
+        </div>
+        <div class="srow"><label></label>
+          <span class="skeywrap"><button id="agentsaveone" title="Save this role">Save role</button><button id="agentcancel" title="Close without saving">Cancel</button></span>
+        </div>
+      </div>
+      <div class="ssub" id="agentsub">built-ins (general, explore, verifier) are read-only — add an override with the same name to customize one.</div>
+      <div class="srow"><label>Subagent limits</label></div>
+      <div id="agentlimits">
+        <div class="alimrow"><label>Max depth</label><span class="skeywrap"><input type="number" id="agentmaxdepth" min="0" step="1" value="0" title="0 = unlimited" /><label><input type="checkbox" id="agentmaxdepthunl" /> Unlimited</label></span></div>
+        <div class="alimrow"><label>Max fan-out</label><span class="skeywrap"><input type="number" id="agentmaxfanout" min="0" step="1" value="0" title="0 = unlimited" /><label><input type="checkbox" id="agentmaxfanoutunl" /> Unlimited</label></span></div>
+        <div class="alimrow"><label>Child turns</label><span class="skeywrap"><input type="number" id="agentmaxchildturns" min="0" step="1" value="0" title="0 = unlimited" /><label><input type="checkbox" id="agentmaxchildturnsunl" /> Unlimited</label></span></div>
+        <div class="alimrow"><label>Result cap (chars)</label><span class="skeywrap"><input type="number" id="agentmaxresultcap" min="0" step="1" value="0" title="0 = unlimited (8192 ≈ 8 KB)" /><label><input type="checkbox" id="agentmaxresultcapunl" /> Unlimited</label></span></div>
+        <div class="alimlock"><label>COM serialized</label><span class="onbadge">ON · locked</span></div>
+        <div class="ssub">SolidWorks COM access is always serialized — not configurable</div>
+      </div>
       <div class="ssep"></div>
       <div class="srow"><label>Auto-compact</label>
         <span class="toggle"><input type="checkbox" id="compacttgl" checked /><span class="tk"></span></span>
@@ -766,6 +850,7 @@
       <div class="crow"><span>Provider · model</span><b id="ctxprov">–</b></div>
       <div class="crow"><span>Completion tokens (session)</span><b id="ctxtok">–</b></div>
       <div class="crow"><span>Agent history (this session)</span><b id="ctxagent">–</b></div>
+      <div class="crow" id="ctxusagerow" style="display:none"><span>Subscription usage</span><button class="attachbtn" id="ctxusagebtn" title="Show OpenCode Go subscription limits">View usage</button></div>
     </div>
   </div>
 
@@ -808,6 +893,8 @@
                 <button type="button" data-effort="none">none</button><button type="button" data-effort="low">low</button><button type="button" data-effort="medium">medium</button><button type="button" data-effort="high">high</button><button type="button" data-effort="xhigh">xhigh</button><button type="button" data-effort="max">max</button>
               </span></div>
               <div class="mlist" id="mlist"></div>
+              <div class="mgroup" id="agentgroup" style="display:none">Subagents · <a href="#" id="agentmanage" style="color:var(--accent-ink);text-transform:none;letter-spacing:0">Manage</a></div>
+              <div class="mlist" id="agentroster" style="display:none;max-height:120px"></div>
               <div class="mfoot"><label class="mfree"><input type="checkbox" id="modelfree" title="Show only free models" /> Free only</label><span id="mcount"></span><button class="mrefresh" id="mrefresh" title="Reload the live model list">↻ Refresh</button></div>
             </div>
           </span>
@@ -856,12 +943,18 @@
   const intent = $("intent");
   const escHtml = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   const EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"];
-  const INFORMATIONAL_TYPES = new Set(["models", "model", "provider", "mcpConfig", "mcpToolsChanged", "toolPolicy", "rules", "usage", "notifyConfig", "variants", "files", "status", "queued", "queueState", "workStyle", "reasoningEffort", "compactConfig", "mcpLog", "mcpPing", "mcpAuthStatus", "attached", "attachCleared", "enhanced", "historyLoaded", "diff", "timeline", "shared", "forked", "continued", "initContext", "firstrun", "telemetryState", "compacted", "bifrost"]);
+  const INFORMATIONAL_TYPES = new Set(["models", "model", "provider", "mcpConfig", "mcpToolsChanged", "toolPolicy", "rules", "usage", "usageGo", "notifyConfig", "variants", "files", "status", "queued", "queueState", "workStyle", "reasoningEffort", "compactConfig", "mcpLog", "mcpPing", "mcpAuthStatus", "attached", "attachCleared", "enhanced", "historyLoaded", "diff", "timeline", "shared", "forked", "continued", "initContext", "firstrun", "telemetryState", "compacted", "bifrost", "agents", "agentStatus", "agentLimits", "agentTrace"]);
   let queue = [], queuePaused = false, queueSid = null;
   let workStyle = null, reasoningEffort = null, reasoningEffortSupported = false, reasoningEffortCapability = null;
   let modelMetaMap = {}, freeOnly = false;
   let runInterrupted = false, continuation = false;
   const turnPrompts = new WeakMap();
+  let agentRoles = [], agentCustom = [];
+  const AGENT_BUILTINS = ["general", "explore", "verifier"];
+  const agentNodes = {};
+  let agentEditIdx = -1, agentReconciled = false;
+  try { const ac = JSON.parse(safeGet("forge_agent_custom")); if (Array.isArray(ac)) agentCustom = ac.filter(a => a && typeof a.name === "string").slice(0, 12); } catch (e) {}
+  try { const ar = JSON.parse(safeGet("forge_agents")); if (Array.isArray(ar)) agentRoles = ar; } catch (e) {}
 
   // rotating mechanical "thinking" words — one shared pool
   const WORDS = ["Mating","Fastening","Threading","Torquing","Bolting","Calibrating",
@@ -1409,8 +1502,9 @@
     working = false; turn = null; thinkEl = null; sessionId = null; lastPrompt = "";
     usage.agentMsgs = 0; usage.agentTokens = 0;
     ctx = { used: 0, window: 0, out: 0, turns: 0, approx: true }; // fresh chat: context resets with the session
-    pendingCompact = null; lastReverted = null; lastNoKeyPrompt = null; // new chat = new no-key episode
-    try { post({ action: "reset" }); } catch (e) {} // fresh agent conversation host-side too
+    pendingCompact = null; lastReverted = null; lastNoKeyPrompt = null;
+    try { Object.keys(agentNodes).forEach(k => { try { delete agentNodes[k]; } catch (e2) {} }); } catch (e3) {}
+    try { post({ action: "reset" }); } catch (e) {}
     clearFind(); closePops();
     transcript.innerHTML = '<div class="empty" id="empty">Forge <b>knows</b> your part.<br>' +
       'Forge <b>understands</b> what you mean.<br>Forge <b>gets it done.</b><br>' +
@@ -1457,6 +1551,7 @@
     const turns = Number(ctx.turns || 0);
     const amsgs = Number(usage.agentMsgs || 0);
     $("ctxagent").textContent = `${turns} turns · ${amsgs} msgs`;
+    if ($("ctxusagerow")) $("ctxusagerow").style.display = curSlug === "opencode-go" ? "" : "none";
   }
   function toggleCtx(force) {
     const p = $("ctxpop");
@@ -1468,6 +1563,7 @@
   }
   $("ctxpill").addEventListener("click", (e) => { e.stopPropagation(); toggleCtx(); });
   $("ctxarrow").addEventListener("click", (e) => { e.stopPropagation(); toggleCtx(); });
+  { const ugob = $("ctxusagebtn"); if (ugob) ugob.addEventListener("click", (e) => { e.stopPropagation(); post({ action: "usageGo" }); }); }
   $("compactbtn").addEventListener("click", () => compactTranscript(false));
   document.addEventListener("click", (e) => { if (!e.target.closest("#ctxpop") && !e.target.closest("#ctxpill") && !e.target.closest("#ctxarrow")) { const p = $("ctxpop"); if (p && !popHidden(p)) { focusIfHidden(p); p.style.display = "none"; setExpanded("ctxpill", false); setExpanded("ctxarrow", false); } } });
   document.addEventListener("click", (e) => { if (menOpen && !e.target.closest("#menpop") && e.target !== intent) menClose(); });
@@ -1723,6 +1819,24 @@
     if (idEl) { idEl.value = ""; idEl.focus(); }
   });
   [$("customid"), $("customlabel")].forEach(el => { if (el) el.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); $("customadd").click(); } e.stopPropagation(); }); });
+  $("agentadd").addEventListener("click", () => openAgentEditor(-1));
+  $("agentcancel").addEventListener("click", closeAgentEditor);
+  $("agentsaveone").addEventListener("click", () => {
+    try {
+      let nm = agentEditIdx >= 0 && agentCustom[agentEditIdx] ? agentCustom[agentEditIdx].name : ($("agentname").value || "").trim();
+      if (!nm) { systemCard("Subagent roles need a name — e.g. <b>researcher</b>."); return; }
+      const tools = ($("agenttools").value || "").split(/\r?\n/).map(s => s.trim()).filter(s => s.length);
+      const entry = { name: nm, description: ($("agentdesc").value || "").trim(), systemPrompt: $("agentsys").value || "", tools: tools, model: ($("agentmodel").value || "").trim() || null };
+      if (agentEditIdx >= 0) agentCustom[agentEditIdx] = entry;
+      else {
+        if (agentCustom.some(c => String(c.name || "").toLowerCase() === nm.toLowerCase())) { systemCard("A custom role named <b>" + escHtml(nm) + "</b> already exists — edit it instead of adding a duplicate."); return; }
+        if (agentCustom.length >= 12) { systemCard("Role cap reached (12) — delete one before adding another."); return; }
+        agentCustom.push(entry);
+      }
+      persistAgentCustom(); closeAgentEditor(); renderAgentSettings(); renderAgentRoster(); postAgentsSave();
+    } catch (e) {}
+  });
+  $("agentmanage").addEventListener("click", (e) => { try { e.preventDefault(); } catch (x) {} closeModels(false); showPop("settings"); try { renderAgentSettings(); post({ action: "agents" }); } catch (x2) {} });
   $("provadd").addEventListener("click", () => {
     const sgEl = $("provslug"), lbEl = $("provlabel"), kdEl = $("provkind"), urEl = $("provurl");
     const slug = sgEl ? sgEl.value.trim().toLowerCase() : "", url = urEl ? urEl.value.trim() : "";
@@ -1859,7 +1973,7 @@
   $("gearbtn").addEventListener("click", (e) => {
     e.stopPropagation();
     const open = settingsEl.style.display === "none";
-    if (open) { showPop("settings"); try { post({ action: "mcpConfig" }); } catch (em) {} try { post({ action: "toolPolicyGet" }); } catch (etp) {} }
+    if (open) { showPop("settings"); try { post({ action: "mcpConfig" }); } catch (em) {} try { post({ action: "toolPolicyGet" }); } catch (etp) {} try { renderAgentSettings(); post({ action: "agents" }); } catch (eag) {} }
     else { focusIfHidden(settingsEl); settingsEl.style.display = "none"; }
     setExpanded("gearbtn", open);
     if (open) $("setprov").focus(); else intent.focus();
@@ -2185,6 +2299,7 @@
     ["model", "switch model · /models"],
     ["provider", "switch provider · /connect"],
     ["mcps", "MCP servers: list, enable, disable, start, stop, timeout"],
+    ["agents", "list subagent roles"],
     ["settings", "open settings"],
     ["history", "search and restore chats · /sessions /resume · /continue resumes the interrupted turn (or opens history)"],
     ["rename", "rename the current chat"],
@@ -2278,6 +2393,7 @@
   function expireApprovals() {
     try {
       transcript.querySelectorAll(".appr:not(.done)").forEach(box => {
+        try { if (box.closest && box.closest(".agentcard")) return; } catch (e2) {}
         box.classList.add("done");
         box.querySelectorAll("button").forEach(x => { x.disabled = true; });
         const hd = box.querySelector(".ahead");
@@ -2296,7 +2412,7 @@
       turns = turns.slice(-100).map(t => typeof t === "string" ? { q: t, a: "" } : (t && typeof t === "object" ? { q: String(t.q ?? t.prompt ?? ""), a: String(t.a ?? t.html ?? t.answer ?? "") } : { q: "", a: "" }));
       const started = Number(s.started) || 0;
       const updatedAt = Math.max(Number(s.updatedAt) || 0, Number(s.updated) || 0, started) || 0;
-      return { id: String(s.id || ""), title: String(s.title || (turns[0] && turns[0].q) || "chat").slice(0, 60), started, updatedAt, turnCount: Number(s.turnCount) || turns.length, model: s.model ? String(s.model) : "", prov: s.prov ? String(s.prov) : "", turns };
+      return { id: String(s.id || ""), title: String(s.title || (turns[0] && turns[0].q) || "chat").slice(0, 60), started, updatedAt, turnCount: Number(s.turnCount) || turns.length, model: s.model ? String(s.model) : "", prov: s.prov ? String(s.prov) : "", subagent: !!(s.subagent || s.child), subRole: s.subRole ? String(s.subRole) : "", subName: s.subName ? String(s.subName) : "", subStatus: s.subStatus ? String(s.subStatus) : "", subSummary: s.subSummary ? String(s.subSummary) : "", turns };
     }).filter(s => s.id && !seen[s.id] && (seen[s.id] = 1)); } catch (e) { return []; } };
   const saveSessions = (s) => { try { safeSet(sessKey, JSON.stringify(s.slice(0, 30))); } catch (e) {} };
   const ago = (t) => { if (!Number.isFinite(t) || t <= 0) return "—"; const m = Math.floor((Date.now() - t) / 60000); if (m < 1) return "just now"; if (m < 60) return m + "m ago"; const h = Math.floor(m / 60); if (h < 24) return h + "h ago"; const d = Math.floor(h / 24); if (d < 7) return d + "d ago"; try { return new Date(t).toLocaleDateString(); } catch (e) { return d + "d ago"; } };
@@ -2336,7 +2452,7 @@
       const main = document.createElement("div"); main.className = "hmain";
       const tt = document.createElement("div"); tt.className = "htitle"; tt.textContent = s.title;
       const mt = document.createElement("div"); mt.className = "hmeta";
-      mt.textContent = `${ago(s.updatedAt)} · ${s.turnCount} turn${s.turnCount === 1 ? "" : "s"}${s.model ? " · " + s.model : ""}`;
+      mt.textContent = `${ago(s.updatedAt)} · ${s.turnCount} turn${s.turnCount === 1 ? "" : "s"}${s.model ? " · " + s.model : ""}${s.subagent ? " · subagent" : ""}`;
       main.append(tt, mt);
       const del = document.createElement("button"); del.className = "hdel"; del.title = "Delete"; del.setAttribute("aria-label", "Delete chat: " + s.title); del.textContent = "✕";
       del.addEventListener("click", (e) => { e.stopPropagation(); saveSessions(loadSessions().filter(x => x.id !== s.id)); if (s.id === sessionId) sessionId = null; renderHistoryList(); $("hsearch").focus(); });
@@ -2388,7 +2504,14 @@
     stopWords(); clearThinkTick(thinkEl); clearThinkTimeout(); working = false; turn = null; thinkEl = null; pendingCompact = null; lastReverted = null; ebReset(); setWorking();
     clearFind(); closePops();
     transcript.innerHTML = "";
+    try { Object.keys(agentNodes).forEach(k => { try { delete agentNodes[k]; } catch (e2) {} }); } catch (e3) {}
     renderTurnNodes(s.turns);
+    try {
+      if (s.subagent) {
+        const tr = subagentTraceBySid[String(id)] || null;
+        hydrateAgentCard(String(id), s.subRole || "subagent", s.subName || s.title || String(id), s.subStatus || "done", s.subSummary || "", tr);
+      }
+    } catch (e) {}
     sessionId = id;
     lastPrompt = (s.turns.length ? s.turns[s.turns.length - 1].q : "") || "";
     hideChip(); hIdx = -1; draftStash = null; preEnhance = null; $("enhanceUndo").style.display = "none";
@@ -2505,7 +2628,7 @@
   }
 
   // ---- slash commands (Kilo-style: local, instant, no LLM round-trip) ----
-  const SLASH_HELP = "/compact — summarize older turns into an expandable block (aliases: /summarize, /smol, /condense)\n/settings — open Settings\n/clear, /new — start a fresh chat\n/regen, /regenerate — re-run the last prompt\n/model, /models — open the model picker\n/provider [slug] — switch provider (deepseek|openrouter|nvidia|openai|anthropic|opencode|opencode-go|ollama) or open settings\n/connect — open provider settings (Kilo-style connect)\n/allow <tool> — always allow one tool going forward\n/deny <tool> — block one tool outright · /undeny <tool> — unblock it\n/auto-approve [on|off] — master switch for unattended tool runs (aliases: /autoapprove /approve-all /approveall)\n/mcps — list servers · /mcps enable|disable|start|stop <name> · /mcps timeout <name> <secs>\n/history, /sessions — open chat history · /resume — same list · /continue — resume the interrupted turn (or open history)\n/rename <title> — rename the current chat\n/status — show usage details\n/undo — revert the last turn · /redo — restore it · /copy — copy last answer · /copy-session — copy whole chat · /export — save transcript as markdown (rendered turns only) · /about — panel/provider info (no diagnostics copy) · /review — design review of the active model (ignores extra args) · /thinking, /toggle-thinking — toggle thinking blocks\n/help — this list\n/unrevert — restore the last reverted turns\n/diff — show the change diff · /timeline — show the event timeline · /share — save this transcript locally (local-only export, no remote link service) · /init — capture the current assembly context · /themes — switch dark/light palette\nNotifications — Settings toggle for approval + done + teammate OS toasts";
+  const SLASH_HELP = "/compact — summarize older turns into an expandable block (aliases: /summarize, /smol, /condense)\n/settings — open Settings\n/clear, /new — start a fresh chat\n/regen, /regenerate — re-run the last prompt\n/model, /models — open the model picker\n/provider [slug] — switch provider (deepseek|openrouter|nvidia|openai|anthropic|opencode|opencode-go|ollama) or open settings\n/connect — open provider settings (Kilo-style connect)\n/allow <tool> — always allow one tool going forward\n/deny <tool> — block one tool outright · /undeny <tool> — unblock it\n/auto-approve [on|off] — master switch for unattended tool runs (aliases: /autoapprove /approve-all /approveall)\n/mcps — list servers · /mcps enable|disable|start|stop <name> · /mcps timeout <name> <secs>\n/agents — list subagent roles (built-ins + customs; manage in Settings → Subagents)\n/history, /sessions — open chat history · /resume — same list · /continue — resume the interrupted turn (or open history)\n/rename <title> — rename the current chat\n/status — show usage details\n/undo — revert the last turn · /redo — restore it · /copy — copy last answer · /copy-session — copy whole chat · /export — save transcript as markdown (rendered turns only) · /about — panel/provider info (no diagnostics copy) · /review — design review of the active model (ignores extra args) · /thinking, /toggle-thinking — toggle thinking blocks\n/help — this list\n/unrevert — restore the last reverted turns\n/diff — show the change diff · /timeline — show the event timeline · /share — save this transcript locally (local-only export, no remote link service) · /init — capture the current assembly context · /themes — switch dark/light palette\nNotifications — Settings toggle for approval + done + teammate OS toasts";
   function fallbackCopy(text) {
     try {
       const ta = document.createElement("textarea");
@@ -2515,8 +2638,392 @@
       return ok;
     } catch (e) { return false; }
   }
-  function slashRun(text) {
-    const parts = text.slice(1).trim().split(/\s+/);
+  function agentToolsLabel(a) {
+    const n = Array.isArray(a && a.tools) ? a.tools.length : 0;
+    return n ? n + " tool" + (n === 1 ? "" : "s") : "all tools";
+  }
+  function renderAgentRoster() {
+    try {
+      const g = $("agentgroup"), r = $("agentroster");
+      if (!g || !r) return;
+      if (!agentRoles || !agentRoles.length) { g.style.display = "none"; r.style.display = "none"; return; }
+      g.style.display = ""; r.style.display = "";
+      r.innerHTML = "";
+      agentRoles.forEach(a => {
+        const row = document.createElement("div");
+        row.className = "mrow"; row.style.cursor = "default";
+        const md = (a && a.model) || "default model";
+        const mname = document.createElement("span"); mname.className = "mname";
+        mname.textContent = (a && a.name) || "role";
+        const sm = document.createElement("small");
+        sm.textContent = ((a && a.description) || "") + " · " + agentToolsLabel(a) + " · " + md;
+        mname.appendChild(sm); row.appendChild(mname); r.appendChild(row);
+      });
+    } catch (e) {}
+  }
+  function persistAgentCustom() { try { safeSet("forge_agent_custom", JSON.stringify(agentCustom)); } catch (e) {} }
+  function postAgentsSave() { try { if (hasBridge) post({ action: "agentsSave", roles: agentCustom }); else systemCard(needBridgeMsg("Saving subagents")); } catch (e) {} }
+  function renderAgentSettings() {
+    try {
+      const host = $("agentlist");
+      if (!host) return;
+      host.innerHTML = "";
+      const byName = {};
+      (agentRoles || []).forEach(a => { if (a && a.name) byName[String(a.name).toLowerCase()] = a; });
+      AGENT_BUILTINS.forEach(bn => {
+        const m = byName[bn];
+        const over = agentCustom.some(c => String(c.name || "").toLowerCase() === bn);
+        const row = document.createElement("div");
+        row.className = "crow";
+        const nm = document.createElement("span"); nm.className = "cid"; nm.textContent = bn;
+        const lab = document.createElement("span"); lab.className = "clab";
+        lab.textContent = (over ? "overridden" : "built-in") + " · " + (m ? agentToolsLabel(m) : "read-only");
+        row.append(nm, lab);
+        row.title = (m && m.description) || "";
+        host.appendChild(row);
+      });
+      if (!agentCustom.length) {
+        const em = document.createElement("div");
+        em.className = "cempty";
+        em.textContent = "no custom roles yet — + Add to create one.";
+        host.appendChild(em);
+      }
+      agentCustom.forEach((c, i) => {
+        const row = document.createElement("div");
+        row.className = "crow";
+        const isOver = AGENT_BUILTINS.indexOf(String(c.name || "").toLowerCase()) >= 0;
+        const nm = document.createElement("span"); nm.className = "cid"; nm.textContent = c.name || "";
+        const lab = document.createElement("span"); lab.className = "clab"; lab.textContent = (isOver ? "override · " : "") + agentToolsLabel(c);
+        const eb = document.createElement("button"); eb.className = "editprov"; eb.title = "Edit"; eb.setAttribute("aria-label", "Edit role " + (c.name || "")); eb.textContent = "✎";
+        eb.addEventListener("click", () => openAgentEditor(i));
+        const db = document.createElement("button"); db.title = "Delete"; db.setAttribute("aria-label", "Delete role " + (c.name || "")); db.textContent = "✕";
+        db.addEventListener("click", () => {
+          agentCustom.splice(i, 1);
+          persistAgentCustom(); renderAgentSettings(); renderAgentRoster(); postAgentsSave();
+        });
+        row.append(nm, lab, eb, db);
+        row.title = c.description || "";
+        host.appendChild(row);
+      });
+      const add = $("agentadd");
+      if (add) { add.disabled = agentCustom.length >= 12; add.title = agentCustom.length >= 12 ? "Role cap reached (12)" : "Add a custom subagent role"; }
+    } catch (e) {}
+  }
+  function openAgentEditor(i) {
+    try {
+      agentEditIdx = (typeof i === "number") ? i : -1;
+      const c = agentEditIdx >= 0 ? agentCustom[agentEditIdx] : null;
+      $("agentname").value = c ? (c.name || "") : "";
+      $("agentname").disabled = agentEditIdx >= 0;
+      $("agentdesc").value = c ? (c.description || "") : "";
+      $("agentsys").value = c ? (c.systemPrompt || "") : "";
+      $("agenttools").value = c && Array.isArray(c.tools) ? c.tools.join("\n") : "";
+      $("agentmodel").value = c ? (c.model || "") : "";
+      $("agentedit").style.display = "";
+      try { ((c ? $("agentdesc") : $("agentname")) || {}).focus(); } catch (e) {}
+    } catch (e) {}
+  }
+  function closeAgentEditor() { try { $("agentedit").style.display = "none"; agentEditIdx = -1; } catch (e) {} }
+  const AGENT_TRACE_CAP = 200;
+  let agentLimits = { maxDepth: 0, maxFanout: 0, maxChildTurns: 0, maxResultCap: 0, comSerialized: true };
+  const subagentTraceBySid = {};
+  function agentLimitNum(v) { const n = parseInt(v, 10); return Number.isFinite(n) && n > 0 ? n : 0; }
+  function renderAgentLimits(m) {
+    try {
+      if (!m || typeof m !== "object") return;
+      ["maxDepth", "maxFanout", "maxChildTurns", "maxResultCap"].forEach(k => {
+        if (m[k] !== undefined && m[k] !== null) { const n = parseInt(m[k], 10); agentLimits[k] = Number.isFinite(n) && n > 0 ? n : 0; }
+      });
+      if (m.comSerialized !== undefined) agentLimits.comSerialized = true;
+      const pairs = [["agentmaxdepth", "agentmaxdepthunl", "maxDepth"], ["agentmaxfanout", "agentmaxfanoutunl", "maxFanout"], ["agentmaxchildturns", "agentmaxchildturnsunl", "maxChildTurns"], ["agentmaxresultcap", "agentmaxresultcapunl", "maxResultCap"]];
+      pairs.forEach(p => {
+        const inp = $(p[0]), unl = $(p[1]);
+        if (!inp || !unl) return;
+        const val = agentLimits[p[2]] || 0;
+        unl.checked = val === 0;
+        inp.value = String(val === 0 ? "" : val);
+        inp.disabled = val === 0;
+        inp.placeholder = val === 0 ? "Unlimited" : "0 = unlimited";
+      });
+    } catch (e) {}
+  }
+  function postAgentLimitsSave() {
+    try {
+      const read = (id, unl) => {
+        const u = $(unl);
+        if (u && u.checked) return 0;
+        const inp = $(id);
+        if (!inp) return 0;
+        return agentLimitNum(inp.value);
+      };
+      const payload = { action: "agentLimitsSave", maxDepth: read("agentmaxdepth", "agentmaxdepthunl"), maxFanout: read("agentmaxfanout", "agentmaxfanoutunl"), maxChildTurns: read("agentmaxchildturns", "agentmaxchildturnsunl"), maxResultCap: read("agentmaxresultcap", "agentmaxresultcapunl") };
+      agentLimits.maxDepth = payload.maxDepth; agentLimits.maxFanout = payload.maxFanout; agentLimits.maxChildTurns = payload.maxChildTurns; agentLimits.maxResultCap = payload.maxResultCap;
+      if (hasBridge) post(payload);
+    } catch (e) {}
+  }
+  function wireAgentLimits() {
+    try {
+      ["agentmaxdepth", "agentmaxfanout", "agentmaxchildturns", "agentmaxresultcap"].forEach(id => {
+        const el = $(id);
+        if (el) el.addEventListener("change", () => { postAgentLimitsSave(); renderAgentLimits(agentLimits); });
+      });
+      ["agentmaxdepthunl", "agentmaxfanoutunl", "agentmaxchildturnsunl", "agentmaxresultcapunl"].forEach(id => {
+        const el = $(id);
+        if (el) el.addEventListener("change", () => { postAgentLimitsSave(); renderAgentLimits(agentLimits); });
+      });
+      renderAgentLimits(agentLimits);
+    } catch (e) {}
+  }
+  function agentSelectTab(card, name) {
+    try {
+      if (!card) return;
+      card.querySelectorAll(".atabs button").forEach(b => { b.classList.toggle("on", b.dataset.tab === name); });
+      card.querySelectorAll(".apane").forEach(p => { p.style.display = p.dataset.pane === name ? "" : "none"; });
+    } catch (e) {}
+  }
+  function agentSetCollapsed(card, collapsed) {
+    try {
+      if (!card) return;
+      card.classList.toggle("collapsed", !!collapsed);
+      const caret = card.querySelector(".acaret");
+      if (caret) caret.textContent = collapsed ? "▸" : "▾";
+      const head = card.querySelector(".achead");
+      if (head) head.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    } catch (e) {}
+  }
+  function agentCardFor(cid, role, name) {
+    try {
+      const id = String(cid || "");
+      let card = (id && agentNodes[id]) || null;
+      if (card && card.isConnected && card.classList.contains("agentcard")) return card;
+      if (card && card.parentElement) { try { card.remove(); } catch (e) {} }
+      if (id && agentNodes[id]) delete agentNodes[id];
+      card = document.createElement("div");
+      card.className = "agentcard";
+      if (id) card.dataset.child = id;
+      card._trace = [];
+      const head = document.createElement("div");
+      head.className = "achead";
+      head.tabIndex = 0;
+      head.setAttribute("role", "button");
+      head.setAttribute("aria-expanded", "true");
+      const roleEl = document.createElement("span"); roleEl.className = "arole"; roleEl.textContent = String(role || "subagent");
+      const nameEl = document.createElement("span"); nameEl.className = "aname"; nameEl.textContent = String(name || id || "child");
+      const stEl = document.createElement("span"); stEl.className = "astatus"; stEl.dataset.st = "started"; stEl.textContent = "started";
+      const caret = document.createElement("span"); caret.className = "acaret"; caret.textContent = "▾";
+      const stop = document.createElement("button"); stop.className = "astop"; stop.textContent = "Stop"; stop.title = "Stop this subagent";
+      stop.setAttribute("aria-label", "Stop subagent " + String(name || id || ""));
+      stop.addEventListener("click", ev => {
+        try { ev.stopPropagation(); } catch (e) {}
+        try { stop.disabled = true; } catch (e2) {}
+        try { if (hasBridge && id) post({ action: "agentStop", childSid: id }); } catch (e3) {}
+      });
+      head.append(roleEl, nameEl, stEl, caret, stop);
+      const sumline = document.createElement("div"); sumline.className = "asumline";
+      const body = document.createElement("div"); body.className = "abody";
+      const tabs = document.createElement("div"); tabs.className = "atabs";
+      [["transcript", "Transcript"], ["actions", "Actions"], ["summary", "Summary"]].forEach(t => {
+        const b = document.createElement("button");
+        b.dataset.tab = t[0]; b.textContent = t[1];
+        if (t[0] === "transcript") b.classList.add("on");
+        b.addEventListener("click", ev => { try { ev.stopPropagation(); } catch (e) {} agentSelectTab(card, t[0]); });
+        tabs.appendChild(b);
+      });
+      const panes = document.createElement("div"); panes.className = "apanes";
+      [["transcript", "No steps yet."], ["actions", "No tool calls yet."], ["summary", "No summary yet."]].forEach(p => {
+        const pane = document.createElement("div");
+        pane.className = "apane"; pane.dataset.pane = p[0];
+        if (p[0] !== "transcript") pane.style.display = "none";
+        const em = document.createElement("div"); em.className = "aempty"; em.textContent = p[1];
+        pane.appendChild(em);
+        panes.appendChild(pane);
+      });
+      body.append(tabs, panes);
+      card.append(head, sumline, body);
+      head.addEventListener("click", ev => {
+        try { if (ev.target && ev.target.closest && ev.target.closest(".astop")) return; } catch (e) {}
+        agentSetCollapsed(card, !card.classList.contains("collapsed"));
+      });
+      head.addEventListener("keydown", ev => {
+        try {
+          if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); agentSetCollapsed(card, !card.classList.contains("collapsed")); }
+        } catch (e) {}
+      });
+      card._role = roleEl; card._name = nameEl; card._status = stEl; card._stop = stop; card._sumline = sumline; card._panes = panes;
+      const empty = $("empty"); if (empty) empty.remove();
+      transcript.appendChild(card);
+      if (id) agentNodes[id] = card;
+      scroll();
+      return card;
+    } catch (e) { return null; }
+  }
+  function agentPane(card, name) {
+    try { if (!card || !card._panes) return null; return card._panes.querySelector('[data-pane="' + name + '"]'); } catch (e) { return null; }
+  }
+  function agentAppendTraceRow(card, kind, label, detail, at) {
+    try {
+      if (!card) return;
+      const k = String(kind || "step");
+      const target = k === "tool" ? "actions" : "transcript";
+      const pane = agentPane(card, target);
+      if (!pane) return;
+      const empty = pane.querySelector(".aempty");
+      if (empty) empty.remove();
+      while (pane.children.length >= AGENT_TRACE_CAP) { try { pane.firstChild.remove(); } catch (e) { break; } }
+      const row = document.createElement("div");
+      row.className = "atrace" + (k === "error" ? " err" : "");
+      const kk = document.createElement("div"); kk.className = "akind"; kk.textContent = k;
+      row.appendChild(kk);
+      if (label) { const lb = document.createElement("div"); lb.className = "alabel"; lb.textContent = String(label); row.appendChild(lb); }
+      if (detail) {
+        let txt = String(detail);
+        if (txt.length > 2000) txt = txt.slice(0, 2000) + "…";
+        const dt = document.createElement("div"); dt.className = "adetail"; dt.textContent = txt; row.appendChild(dt);
+      }
+      if (at) {
+        const tm = document.createElement("div"); tm.className = "aat";
+        try { tm.textContent = new Date(Number(at)).toLocaleTimeString(); } catch (e2) { tm.textContent = String(at); }
+        row.appendChild(tm);
+      }
+      pane.appendChild(row);
+      const entry = { kind: k, label: String(label || ""), detail: String(detail || ""), at: Number(at) || Date.now() };
+      card._trace.push(entry);
+      if (card._trace.length > AGENT_TRACE_CAP) card._trace = card._trace.slice(-AGENT_TRACE_CAP);
+      try { if ($("findbar") && $("findbar").style.display !== "none" && $("findinput").value) runFind(); } catch (e3) {}
+      scroll();
+    } catch (e) {}
+  }
+  function renderAgentTrace(m) {
+    try {
+      if (!m) return;
+      const cid = String((m && (m.childSid || m.sid)) || "");
+      if (!cid) return;
+      let card = (agentNodes[cid] && agentNodes[cid].isConnected) ? agentNodes[cid] : null;
+      if (!card) card = agentCardFor(cid, m.role || "subagent", m.name || cid);
+      if (!card) return;
+      if (m.role && card._role) card._role.textContent = String(m.role);
+      agentAppendTraceRow(card, m.kind || "step", m.label || "", m.detail || "", m.at || Date.now());
+    } catch (e) {}
+  }
+  function agentSetStatus(card, st, summary) {
+    try {
+      if (!card) return;
+      const sum = String(summary || "");
+      const badge = card._status;
+      if (badge) { badge.dataset.st = st || "started"; badge.textContent = st || "started"; }
+      const sumPane = agentPane(card, "summary");
+      if (sumPane && (st === "done" || st === "stopped" || st === "failed")) {
+        sumPane.innerHTML = "";
+        const s = document.createElement("div");
+        s.className = "asummary";
+        s.textContent = sum || st;
+        sumPane.appendChild(s);
+      }
+      if (card._sumline) {
+        if (st === "done" || st === "stopped" || st === "failed") card._sumline.textContent = sum ? (st + " — " + sum).slice(0, 500) : st;
+        else if (sum) card._sumline.textContent = sum.slice(0, 500);
+      }
+      const stop = card._stop;
+      if (stop) {
+        const terminal = st === "done" || st === "stopped" || st === "failed";
+        stop.disabled = !!terminal;
+        stop.style.display = terminal ? "none" : "";
+      }
+      if (st === "done" || st === "stopped" || st === "failed") agentSetCollapsed(card, true);
+      else agentSetCollapsed(card, false);
+      try { card.title = (sum || st || "").slice(0, 500); } catch (e) {}
+    } catch (e) {}
+  }
+  function renderAgentStatus(m) {
+    try {
+      const cid = String((m && (m.childSid || m.sid)) || "");
+      const role = String((m && m.role) || "subagent");
+      const nm = String((m && m.name) || cid || "child");
+      const st = String((m && m.status) || "");
+      const sum = String((m && m.summary) || "");
+      if (!cid) return;
+      const card = agentCardFor(cid, role || "subagent", nm);
+      if (!card) return;
+      if (role && card._role) card._role.textContent = String(role || "subagent");
+      if (nm && card._name) card._name.textContent = nm;
+      if (!st) return;
+      agentSetStatus(card, st, sum);
+      try { if ($("findbar") && $("findbar").style.display !== "none" && $("findinput").value) runFind(); } catch (e) {}
+    } catch (e) {}
+  }
+  function hydrateAgentCard(sid, role, name, status, summary, trace) {
+    try {
+      const id = String(sid || "");
+      if (!id) return null;
+      const card = agentCardFor(id, role || "subagent", name || id);
+      if (!card) return null;
+      if (Array.isArray(trace) && trace.length) {
+        trace.slice(-AGENT_TRACE_CAP).forEach(t => {
+          if (!t || typeof t !== "object") return;
+          agentAppendTraceRow(card, t.kind || "step", t.label || t.text || "", t.detail || t.summary || "", t.at || Date.now());
+        });
+      } else {
+        const pane = agentPane(card, "transcript");
+        if (pane && !pane.querySelector(".atrace")) {
+          pane.innerHTML = "";
+          const em = document.createElement("div"); em.className = "aempty"; em.textContent = "Trace not saved for this subagent";
+          pane.appendChild(em);
+        }
+      }
+      agentSetStatus(card, status || "done", summary || "");
+      agentSetCollapsed(card, true);
+      return card;
+    } catch (e) { return null; }
+  }
+  function agentChildApproval(m) {
+    try {
+      const cid = String((m && m.childSid) || "");
+      if (!cid) return false;
+      let card = (agentNodes[cid] && agentNodes[cid].isConnected) ? agentNodes[cid] : null;
+      if (!card) card = agentCardFor(cid, m.role || "subagent", m.name || cid);
+      if (!card) return true;
+      const pane = agentPane(card, "actions");
+      if (!pane) return true;
+      const empty = pane.querySelector(".aempty");
+      if (empty) empty.remove();
+      while (pane.children.length >= AGENT_TRACE_CAP) { try { pane.firstChild.remove(); } catch (e) { break; } }
+      const box = document.createElement("div");
+      box.className = "appr";
+      box.dataset.apprId = m.id || "";
+      box.dataset.tool = m.tool || "";
+      const hd = document.createElement("div"); hd.className = "ahead";
+      const pre = document.createElement("span"); pre.textContent = "△ Permission required";
+      const tn = document.createElement("span"); tn.className = "atool"; tn.textContent = "Call tool " + (m.tool || "unknown tool");
+      hd.append(pre, tn);
+      const ag = document.createElement("div"); ag.className = "aargs";
+      let as_ = "";
+      try { as_ = JSON.stringify(m.args || {}, null, 1); } catch (e) { as_ = String((m && m.args) || ""); }
+      ag.textContent = as_.length > 600 ? as_.slice(0, 600) + "…" : as_;
+      const btns = document.createElement("div"); btns.className = "abtns";
+      const mk = (label, decision, cls) => {
+        const b = document.createElement("button"); b.textContent = label; if (cls) b.className = cls;
+        b.addEventListener("click", () => {
+          if (box.classList.contains("done")) return;
+          box.classList.add("done");
+          btns.querySelectorAll("button").forEach(x => { x.disabled = true; });
+          try { hd.firstChild.textContent = "△ " + label + " — " + (m.tool || "tool"); } catch (e2) {}
+          if (decision === "always" && m.tool) trackAllow(m.tool);
+          try { post({ action: "approveReply", id: m.id, decision: decision, childSid: cid }); } catch (e3) {}
+        });
+        return b;
+      };
+      btns.append(mk("Allow once", "approve", "go"), mk("Allow always", "always"), mk("Reject", "reject"));
+      box.append(hd, ag, btns);
+      pane.appendChild(box);
+      const entry = { kind: "tool", label: "approval: " + String(m.tool || ""), detail: ag.textContent || "", at: Date.now() };
+      try { card._trace.push(entry); if (card._trace.length > AGENT_TRACE_CAP) card._trace = card._trace.slice(-AGENT_TRACE_CAP); } catch (e4) {}
+      agentSetCollapsed(card, false);
+      agentSelectTab(card, "actions");
+      scroll();
+      return true;
+    } catch (e) { return true; }
+  }
+  function slashRun(text) {    const parts = text.slice(1).trim().split(/\s+/);
     const cmd = (parts[0] || "").toLowerCase(), args = parts.slice(1);
     switch (cmd) {
       case "clear": case "new": clearPanel(); break;
@@ -2630,6 +3137,9 @@
         break;
       }
       case "compact": case "summarize": case "smol": case "condense": compactTranscript(false); break;
+      case "agents":
+        if (!hasBridge) { systemCard(needBridgeMsg("Listing subagents")); break; }
+        post({ action: "agents" }); break;
       case "settings": showPop("settings"); break;
       case "undo": {
         const turns = [...transcript.querySelectorAll(":scope > .turn")];
@@ -2878,6 +3388,38 @@
     } catch (e) {}
     try { return clone.innerHTML; } catch (e) { return node.innerHTML; }
   }
+  function fmtReset(ts) {
+    const t = Number(ts);
+    if (!Number.isFinite(t) || t <= 0) return "—";
+    let s = "";
+    try { s = new Date(t).toLocaleString(); } catch (e) { s = String(ts); }
+    if (t <= Date.now()) return s + " (" + ago(t) + ")";
+    const mins = Math.max(1, Math.round((t - Date.now()) / 60000));
+    const rel = mins < 60 ? "in " + mins + "m" : "in " + Math.floor(mins / 60) + "h" + (mins % 60 ? " " + (mins % 60) + "m" : "");
+    return s + " (" + rel + ")";
+  }
+  function renderUsageGo(m) {
+    if (m && m.error) {
+      systemCard(`<div class="card fail"><div class="top"><span class="name">Subscription usage</span><span class="tag">unavailable</span></div><div class="err">${escHtml(m.error)}</div></div>`);
+      return;
+    }
+    const meters = (m && m.meters) || {};
+    const rows = ["rolling", "weekly", "monthly"].map((k) => {
+      const mm = meters[k] || {};
+      let pct = Number(mm.percent);
+      if (!Number.isFinite(pct)) pct = 0;
+      pct = Math.max(0, Math.min(100, pct));
+      const raw = String(mm.status == null ? "ok" : mm.status);
+      const limited = /rate|limit|block|deny|exhaust/i.test(raw);
+      const label = limited ? "rate-limited" : "ok";
+      const col = limited ? "var(--red)" : "var(--mint)";
+      return `<div class="urow"><span>${escHtml(k)} · <b style="color:${col}">${escHtml(label)}</b></span><b>${pct}% used</b></div>` +
+        `<div class="ubar"><i style="width:${pct}%;${limited ? "background:var(--red);" : ""}"></i></div>` +
+        `<div class="urow"><span>resets</span><span>${escHtml(fmtReset(mm.resetsAt))}</span></div>`;
+    }).join("");
+    const note = (m && m.rawAvailable === false) ? `<div class="sub">limits not reported by the gateway</div>` : "";
+    systemCard(`<div class="card usage"><div class="top"><span class="name">Subscription usage</span><span class="tag">opencode-go</span></div>${rows}${note}</div>`);
+  }
   // finish the turn: stop the gerund, drop the thinking line, render the result card(s).
   // System answers outside a turn (key saved, telemetry toggled, notices) render as system cards.
   function finish(html) {
@@ -3071,6 +3613,27 @@
         renderTurnNodes(td.slice(0, 30));
         scroll(true);
       }
+      try {
+        const subs = Array.isArray(m.subagents) ? m.subagents : [];
+        if (subs.length) {
+          const all = loadSessions();
+          const seen = {};
+          all.forEach(s => { if (s && s.id) seen[String(s.id)] = 1; });
+          let added = false;
+          subs.forEach(sub => {
+            if (!sub || !sub.sid) return;
+            try {
+              if (Array.isArray(sub.trace)) subagentTraceBySid[String(sub.sid)] = sub.trace.slice(-AGENT_TRACE_CAP);
+              else if (sub.trace) subagentTraceBySid[String(sub.sid)] = [];
+            } catch (e3) {}
+            if (seen[String(sub.sid)]) return;
+            seen[String(sub.sid)] = 1;
+            all.unshift({ id: sub.sid, title: ("[subagent " + sub.role + "] " + (sub.name || sub.sid)).slice(0, 60), subagent: true, subRole: sub.role || "", subName: sub.name || "", subStatus: sub.status || (sub.stopped ? "stopped" : "done"), subSummary: sub.summary || "", updatedAt: Date.parse(sub.createdAtUtc) || 0, turns: 0 });
+            added = true;
+          });
+          if (added) { saveSessions(all); try { if ($("history") && $("history").style.display !== "none") renderHistoryList(); } catch (e2) {} }
+        }
+      } catch (e) {}
     }
     // Live context stats ride on answer/step/status/enhanced/compacted/usage/historyLoaded:
     // merge first so the pill reflects REAL session usage without polling.
@@ -3173,7 +3736,8 @@
     }
 
     else if (m.type === "approve") {
-      if (!working || !turn) { // orphan card: run already ended/cancelled — show expired, post nothing
+      if (m && m.childSid) { agentChildApproval(m); return; }
+      if (!working || !turn) {
         const exp = document.createElement("div");
         exp.className = "appr done";
         exp.innerHTML = `<div class="ahead"><span>△ Permission expired — run ended</span></div>`;
@@ -3298,6 +3862,10 @@
         usage = { in: m.tokensIn || 0, out: m.tokensOut || 0, agentMsgs: m.agentMsgs || 0, agentTokens: m.agentTokens || 0 };
         renderCtx();
       }
+    }
+
+    else if (m.type === "usageGo") {
+      renderUsageGo(m);
     }
 
     else if (m.type === "mcpConfig") {
@@ -3555,6 +4123,34 @@
         } catch (e4) {}
       } catch (e) {}
     }
+    else if (m.type === "agents") {
+      try {
+        agentRoles = Array.isArray(m.roles) ? m.roles : [];
+        try { safeSet("forge_agents", JSON.stringify(agentRoles)); } catch (e) {}
+        if (!agentReconciled) {
+          agentReconciled = true;
+          if (!agentCustom.length) {
+            const seeded = agentRoles
+              .filter(a => a && a.name && AGENT_BUILTINS.indexOf(String(a.name).toLowerCase()) < 0)
+              .map(a => ({ name: String(a.name), description: String(a.description || ""), systemPrompt: String(a.systemPrompt || ""), tools: Array.isArray(a.tools) ? a.tools.filter(t => typeof t === "string") : [], model: a.model || null }));
+            if (seeded.length) { agentCustom = seeded.slice(0, 12); persistAgentCustom(); }
+          }
+        }
+        renderAgentRoster();
+        renderAgentSettings();
+      } catch (e) {}
+      const rows = (agentRoles || []).map(r => {
+        const nm = escHtml((r && r.name) || "role");
+        const ds = escHtml((r && r.description) || "no description");
+        const tc = (r && Array.isArray(r.tools)) ? r.tools.length : 0;
+        const md = escHtml((r && r.model) || "default model");
+        return `<div class="bucket"><span class="n">${tc}</span><span class="t"><b>${nm}</b> — ${ds}<br><span style="color:var(--faint)">${tc ? tc + " tool" + (tc === 1 ? "" : "s") : "all tools"} · ${md}</span></span></div>`;
+      }).join("");
+      systemCard(`<div class="card report"><div class="top"><span class="name">Subagents</span><span class="tag">${(agentRoles || []).length} roles</span></div><div class="report">${rows || '<div class="sub">No roles reported — the host owns the roster.</div>'}</div><div class="sub">Manage in Settings → Subagents. Stop cancels child sessions too.</div></div>`);
+    }
+    else if (m.type === "agentLimits") { try { renderAgentLimits(m); } catch (e) {} }
+    else if (m.type === "agentTrace") { try { renderAgentTrace(m); } catch (e) {} }
+    else if (m.type === "agentStatus") { try { renderAgentStatus(m); } catch (e) {} }
     // safety net: an unknown TERMINAL card must still stop the gerund + end the turn (never leave it looping).
     // Known informational traffic is ignored instead — it must never abort a live run.
     else if (working && !INFORMATIONAL_TYPES.has(String(m.type || ""))) { finish(m.info ? `<div class="card ok"><div class="sub">${String(m.info).replace(/</g,"<")}</div></div>` : ""); }
@@ -4114,7 +4710,27 @@
     rows.push(["Reasoning", meta.reasoning ? "yes" : "no"]);
     rows.push(["Capabilities", (meta.capabilities || []).join(", ") || "—"]);
     let price = "pricing unknown";
-    if (!meta.pricingUnknown && meta.pricing) price = typeof meta.pricing === "object" ? JSON.stringify(meta.pricing) : String(meta.pricing);
+    const pr = meta.pricing;
+    if (!meta.pricingUnknown && pr != null) {
+      if (typeof pr === "object") {
+        const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
+        let p = num(pr.prompt ?? pr.input ?? null);
+        let c = num(pr.completion ?? pr.output ?? null);
+        let cr = num(pr.cacheRead ?? pr.cached ?? pr.promptCached ?? pr.inputCached ?? null);
+        let cw = num(pr.cacheWrite ?? pr.outputCached ?? null);
+        const tiny = [p, c, cr, cw].some((v) => v !== null && v > 0 && v < 0.001);
+        const per1M = (v) => (tiny && v !== null ? v * 1e6 : v);
+        p = per1M(p); c = per1M(c); cr = per1M(cr); cw = per1M(cw);
+        const money = (v) => "$" + (Math.abs(v) < 10 ? String(Number(v.toFixed(4))) : String(Number(v.toFixed(2))));
+        if (p !== null || c !== null) {
+          price = (p !== null ? money(p) : "?") + " / " + (c !== null ? money(c) : "?") + " per 1M tokens";
+          const cache = [];
+          if (cr !== null) cache.push("cache read " + money(cr));
+          if (cw !== null) cache.push("cache write " + money(cw));
+          if (cache.length) price += " · " + cache.join(" · ");
+        } else price = JSON.stringify(pr);
+      } else price = String(pr);
+    }
     rows.push(["Pricing", price]);
     rows.push(["Key", meta.byok ? "BYOK" : "provider"]);
     return rows.map(r => `<span>${escHtml(r[0])}</span><span>${escHtml(r[1])}</span>`).join("");
@@ -4127,6 +4743,7 @@
     $("modelpop").style.display = "flex"; setExpanded("modelpick", true);
     $("msearch").value = "";
     renderModelList("");
+    try { renderAgentRoster(); if (hasBridge) post({ action: "agents" }); } catch (eam) {}
     requestAnimationFrame(() => {
       $("msearch").focus();
       const act = $("mlist").querySelector(".mrow.active");
@@ -4304,6 +4921,7 @@
     if ($("modelpop").style.display !== "none" && !e.target.closest("#modelpop") && !e.target.closest("#modelpick")) closeModels(false);
   });
   renderPill();
+  try { wireAgentLimits(); } catch (e) {}
 
   // feedback
   function fbThanks() { $("fbthx").textContent = "thanks!"; }

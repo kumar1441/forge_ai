@@ -69,7 +69,7 @@ Create `%APPDATA%\Forge\config.json` and choose one of two modes:
 }
 ```
 
-Set the provider key via the `FORGE_PROVIDER_KEY` environment variable (`setx FORGE_PROVIDER_KEY "sk-..."`, then restart SolidWorks). Keys are never read from plaintext fields in config.json — a settings pane with DPAPI-encrypted storage (`ProtectedData`, current-user scope) is already in the build and arrives with the GUI. The key is sent only to the provider you configure. Optional overrides: `modelPrimary` / `modelLight` (and `FORGE_MODEL_PRIMARY` / `FORGE_MODEL_LIGHT` env vars).
+Set the provider key via the `FORGE_PROVIDER_KEY` environment variable (`setx FORGE_PROVIDER_KEY "sk-..."`, then restart SolidWorks), or paste it into the Settings cog → API key row and hit Save (Remove clears the stored key). Keys are never read from plaintext fields in config.json — the Settings pane stores each provider key DPAPI-encrypted (`ProtectedData`, current-user scope) in its own per-slug file, so the saved key survives restarts. The key is sent only to the provider you configure. Optional overrides: `modelPrimary` / `modelLight` (and `FORGE_MODEL_PRIMARY` / `FORGE_MODEL_LIGHT` env vars).
 
 ## Windows Smart App Control
 

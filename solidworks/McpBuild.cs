@@ -918,7 +918,7 @@ namespace Forge.SolidWorks
 
         // Auto-compaction controls (Kilo parity: user-set context-% threshold, disableable).
         // Panel settings cog owns the values; the host just honors them. CompactAt is a
-        // PERCENT of the model's context window (10-95, default 60) — NOT a message count.
+        // PERCENT of the model's context window (1-100, default 60) — NOT a message count.
         // NOTE: the forge_compact_at storage key is unchanged, so an existing value of 60
         // (old message-count semantics) carries over as 60% — a sane migration.
         // Off toggle = never compact.
@@ -1575,6 +1575,7 @@ namespace Forge.SolidWorks
                 lines.Add(n + ": " + d);
             }
 
+            AppendSpawnAgentPlanLine(lines, names);
             bool hideInstructions = AllToolsDenied(route, tools);
             await emit("Builder", "planning " + lines.Count + " available modelling tools", "run", null);
             Tuple<JObject, string> authored;
@@ -1631,7 +1632,11 @@ namespace Forge.SolidWorks
                 n_++;
                 await emit("Builder", "step " + n_ + "/" + steps.Count + ": " + tool, "run", null);
                 McpBridge.ToolResult r;
-                if (IsResourceTool(tool))
+                if (IsSpawnAgent(tool))
+                {
+                    r = new McpBridge.ToolResult { Ok = false, Text = "spawn_agent needs the agent loop (openai-compatible provider) — switch provider in Settings → Provider to use subagents." };
+                }
+                else if (IsResourceTool(tool))
                 {
                     r = await HandleResourceToolAsync(tool, args, route, emit, ct, cardSender, isCurrent);
                 }
@@ -1645,7 +1650,7 @@ namespace Forge.SolidWorks
                     }
                     try
                     {
-                        r = await McpBridge.CallToolAsync(tool, args, 300000, ct);
+                        r = await CallCadToolSerializedAsync(tool, args, 300000, ct);
                     }
                     catch (OperationCanceledException) { throw; }
                     catch (Exception ex)
@@ -1745,6 +1750,7 @@ namespace Forge.SolidWorks
                 outcome.Error = "Couldn't start the SolidWorks-MCP server: the tool list came back empty — restart SolidWorks, then resend.";
                 return outcome;
             }
+            AppendSpawnAgentFn(fns, names);
             string toolsJson = fns.ToString(Newtonsoft.Json.Formatting.None);
             // The run's model: the snapshot from above, never a fresh read (deterministic per run).
             string model = modelSnapshot;
@@ -1774,6 +1780,7 @@ namespace Forge.SolidWorks
 
             var opts = new ProviderOptions { MaxTokens = 16000, Model = model, ToolsJson = toolsJson, ToolChoice = "auto", ReasoningEffort = effort, Headers = ProviderHeaders, SessionId = SessionId };
             var log = new List<string>();
+            var runSpawnCounts = new Dictionary<string, int>(StringComparer.Ordinal);
             int executed = 0;
             int succeeded = 0; // tool calls that returned Ok: the success line reports these, never attempts
             var DoomWindow = new System.Collections.Generic.List<string>(); // per-run rolling window, Kilo parity (fresh each run: a rejected loop re-asks next run, never auto-stops)
@@ -1888,7 +1895,11 @@ namespace Forge.SolidWorks
                         try { await emit("Builder", "step " + executed + ": " + c.Name, "run", null); }
                         catch { /* dead panel: keep executing, the user just sees nothing */ }
                         McpBridge.ToolResult r;
-                        if (IsResourceTool(c.Name))
+                        if (IsSpawnAgent(c.Name))
+                        {
+                            r = await HandleSpawnAgentAsync(args, sid, 0, client, tools, route, model, emit, ct, cardSender, isCurrent, runSpawnCounts, sid);
+                        }
+                        else if (IsResourceTool(c.Name))
                         {
                             r = await HandleResourceToolAsync(c.Name, args, route, emit, ct, cardSender, isCurrent);
                         }
@@ -1898,9 +1909,9 @@ namespace Forge.SolidWorks
                             if (gate != null) r = gate;
                             else
                             {
-                                try { r = await McpBridge.CallToolAsync(c.Name, args, 300000, ct); }
+                                try { r = await CallCadToolSerializedAsync(c.Name, args, 300000, ct); }
                                 catch (OperationCanceledException) { throw; }
-                        catch (Exception ex) { r = new McpBridge.ToolResult { Ok = false, Text = "transport failed (" + CleanDetail(ex.Message, 300) + ") — check the MCP server and retry that step." }; }
+                                catch (Exception ex) { r = new McpBridge.ToolResult { Ok = false, Text = "transport failed (" + CleanDetail(ex.Message, 300) + ") — check the MCP server and retry that step." }; }
                             }
                         }
                         string text = r.Text ?? "";
@@ -2488,5 +2499,930 @@ namespace Forge.SolidWorks
             "Args use each tool's own parameter names (mm for lengths, degrees for angles). " +
             "Intricate machines legitimately need dozens of steps — use up to 40, one tool call per " +
             "part or feature, no filler steps.";
+
+        public class AgentRole
+        {
+            public string Name;
+            public string Description;
+            public string SystemPrompt;
+            public string[] Tools;
+            public string Model;
+        }
+
+        private static readonly object AgentRoleLock = new object();
+        private static List<AgentRole> ConfiguredRoles;
+        private static readonly System.Threading.SemaphoreSlim AgentGate = new System.Threading.SemaphoreSlim(1, 1);
+        private const int AgentMaxDepthCeiling = 8;
+        private const int AgentMaxChildrenCeiling = 32;
+        private const int AgentMaxChildTurnsCeiling = 500;
+        private const int AgentResultCapCeiling = 65536;
+        private const int AgentDefaultDepth = 2;
+        private const int AgentDefaultChildren = 4;
+        private const int AgentDefaultChildTurns = 30;
+        private const int AgentDefaultResultCap = 8192;
+        private static readonly object AgentLimitsLock = new object();
+        private static int _agentMaxDepth = 2;
+        private static int _agentMaxChildren = 4;
+        private static int _agentMaxChildTurns = 30;
+        private static int _agentMaxResultCap = 8192;
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, System.Threading.CancellationTokenSource> ChildRuns = new System.Collections.Concurrent.ConcurrentDictionary<string, System.Threading.CancellationTokenSource>(System.StringComparer.Ordinal);
+        private class ChildMeta { public string ParentSid; public string Role; public string Name; }
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, ChildMeta> ChildMetaMap = new System.Collections.Concurrent.ConcurrentDictionary<string, ChildMeta>(System.StringComparer.Ordinal);
+        private static int NormalizeLimit(int v, int def, int ceiling)
+        {
+            if (v < 0) return def;
+            if (v == 0) return 0;
+            if (v < 1) return def;
+            if (v > ceiling) return ceiling;
+            return v;
+        }
+        public static void ConfigureAgentLimits(int maxDepth, int maxFanout, int maxChildTurns, int maxResultCap)
+        {
+            int d = NormalizeLimit(maxDepth, AgentDefaultDepth, AgentMaxDepthCeiling);
+            int f = NormalizeLimit(maxFanout, AgentDefaultChildren, AgentMaxChildrenCeiling);
+            int t = NormalizeLimit(maxChildTurns, AgentDefaultChildTurns, AgentMaxChildTurnsCeiling);
+            int r = NormalizeLimit(maxResultCap, AgentDefaultResultCap, AgentResultCapCeiling);
+            lock (AgentLimitsLock)
+            {
+                _agentMaxDepth = d;
+                _agentMaxChildren = f;
+                _agentMaxChildTurns = t;
+                _agentMaxResultCap = r;
+            }
+        }
+        public static JObject AgentLimits()
+        {
+            lock (AgentLimitsLock)
+            {
+                return new JObject
+                {
+                    ["maxDepth"] = _agentMaxDepth,
+                    ["maxFanout"] = _agentMaxChildren,
+                    ["maxChildTurns"] = _agentMaxChildTurns,
+                    ["maxResultCap"] = _agentMaxResultCap,
+                    ["comSerialized"] = true
+                };
+            }
+        }
+        private static int EffMaxDepth() { lock (AgentLimitsLock) { return _agentMaxDepth == 0 ? AgentMaxDepthCeiling : _agentMaxDepth; } }
+        private static int EffMaxChildren() { lock (AgentLimitsLock) { return _agentMaxChildren == 0 ? AgentMaxChildrenCeiling : _agentMaxChildren; } }
+        private static int EffMaxChildTurns() { lock (AgentLimitsLock) { return _agentMaxChildTurns == 0 ? AgentMaxChildTurnsCeiling : _agentMaxChildTurns; } }
+        private static int EffResultCap() { lock (AgentLimitsLock) { return _agentMaxResultCap == 0 ? AgentResultCapCeiling : _agentMaxResultCap; } }
+        public static bool StopAgent(string childSid)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(childSid)) return false;
+                string key = SafeSid(childSid);
+                System.Threading.CancellationTokenSource cts;
+                if (!ChildRuns.TryGetValue(key, out cts) || cts == null) return false;
+                ChildMeta meta = null;
+                try { ChildMetaMap.TryGetValue(key, out meta); } catch { meta = null; }
+                try { cts.Cancel(); } catch { return false; }
+                try
+                {
+                    string ps = meta != null && meta.ParentSid != null ? meta.ParentSid : "";
+                    string rl = meta != null && meta.Role != null ? meta.Role : "";
+                    string nm = meta != null && meta.Name != null ? meta.Name : "";
+                    EmitAgentStatus(null, ps, key, rl, nm, "stopped", "stopped by user");
+                }
+                catch { }
+                try { MarkSubagentStopped(key, true); } catch { }
+                return true;
+            }
+            catch { return false; }
+        }
+        public static bool IsAgentRunning(string childSid)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(childSid)) return false;
+                return ChildRuns.ContainsKey(SafeSid(childSid));
+            }
+            catch { return false; }
+        }
+        public static JArray RunningAgentsFor(string parentSid)
+        {
+            var arr = new JArray();
+            try
+            {
+                string want = SafeSid(parentSid);
+                foreach (var kv in ChildMetaMap)
+                {
+                    try
+                    {
+                        if (kv.Value == null) continue;
+                        if (!string.Equals((kv.Value.ParentSid ?? "").Trim(), want, System.StringComparison.OrdinalIgnoreCase)) continue;
+                        if (!ChildRuns.ContainsKey(kv.Key)) continue;
+                        arr.Add(new JObject { ["childSid"] = kv.Key, ["role"] = kv.Value.Role ?? "", ["name"] = kv.Value.Name ?? "" });
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return arr;
+        }
+        private static void EmitAgentTrace(Action<JObject> sender, string parentSid, string childSid, string kind, string label, string detail)
+        {
+            try
+            {
+                var s = sender;
+                try { if (s == null) s = CardSender; } catch { s = null; }
+                string det = detail ?? "";
+                if (det.Length > 2000) det = det.Substring(0, 2000);
+                string at = DateTime.UtcNow.ToString("o");
+                if (s != null)
+                {
+                    try
+                    {
+                        s(new JObject
+                        {
+                            ["type"] = "agentTrace",
+                            ["parentSid"] = parentSid ?? "",
+                            ["childSid"] = childSid ?? "",
+                            ["kind"] = kind ?? "",
+                            ["label"] = label ?? "",
+                            ["detail"] = det,
+                            ["at"] = at
+                        });
+                    }
+                    catch { }
+                }
+                try { AppendSubagentTrace(childSid, kind, label, det, at); } catch { }
+            }
+            catch { }
+        }
+        private static void AppendSubagentTrace(string childSid, string kind, string label, string detail, string at)
+        {
+            try
+            {
+                string p = SubagentSidecarPath(childSid);
+                if (string.IsNullOrEmpty(p)) return;
+                string safe = SafeSid(childSid);
+                JObject o = null;
+                try { if (File.Exists(p)) o = JObject.Parse(File.ReadAllText(p)); } catch { o = null; }
+                if (o == null) o = new JObject { ["sid"] = safe };
+                JArray trace = null;
+                try { trace = o["trace"] as JArray; } catch { trace = null; }
+                if (trace == null) { trace = new JArray(); o["trace"] = trace; }
+                try
+                {
+                    trace.Add(new JObject
+                    {
+                        ["kind"] = kind ?? "",
+                        ["label"] = label ?? "",
+                        ["detail"] = (detail ?? "").Length > 2000 ? (detail ?? "").Substring(0, 2000) : (detail ?? ""),
+                        ["at"] = at ?? DateTime.UtcNow.ToString("o")
+                    });
+                }
+                catch { }
+                try { while (trace.Count > 200) trace.RemoveAt(0); } catch { }
+                if (o["stopped"] == null) o["stopped"] = false;
+                string tmp = p + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                try
+                {
+                    try { string dir = Path.GetDirectoryName(p); if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir); } catch { }
+                    File.WriteAllText(tmp, o.ToString(Newtonsoft.Json.Formatting.None));
+                    if (File.Exists(p)) File.Replace(tmp, p, null);
+                    else File.Move(tmp, p);
+                }
+                catch { try { File.Delete(tmp); } catch { } throw; }
+            }
+            catch { }
+        }
+        private static void MarkSubagentStopped(string childSid, bool stopped)
+        {
+            try
+            {
+                string p = SubagentSidecarPath(childSid);
+                if (string.IsNullOrEmpty(p)) return;
+                string safe = SafeSid(childSid);
+                JObject o = null;
+                try { if (File.Exists(p)) o = JObject.Parse(File.ReadAllText(p)); } catch { o = null; }
+                if (o == null) o = new JObject { ["sid"] = safe };
+                o["stopped"] = stopped;
+                if (o["trace"] == null) o["trace"] = new JArray();
+                string tmp = p + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                try
+                {
+                    try { string dir = Path.GetDirectoryName(p); if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir); } catch { }
+                    File.WriteAllText(tmp, o.ToString(Newtonsoft.Json.Formatting.None));
+                    if (File.Exists(p)) File.Replace(tmp, p, null);
+                    else File.Move(tmp, p);
+                }
+                catch { try { File.Delete(tmp); } catch { } throw; }
+            }
+            catch { }
+        }
+        private const string SpawnAgentTool = "spawn_agent";
+        private static readonly string[] AgentExploreTools = new string[]
+        {
+            "DescribeGeometry", "get_mass_properties", "get_faces", "get_edges",
+            "list_mcp_", "read_mcp_resource", "get_", "list_", "describe", "inspect",
+            "bounding", "measur", "mass", "count", "compar", "interfer", "profil", "validat", "estim", "check", "find"
+        };
+        private static readonly string[] AgentVerifierTools = new string[]
+        {
+            "get_mass_properties", "get_bounding_box", "get_faces", "get_edges",
+            "list_mcp_", "read_mcp_resource", "get_", "list_",
+            "measur", "bounding", "mass", "check", "validat", "compar", "interfer", "inspect", "count"
+        };
+
+        public static void ConfigureAgents(IEnumerable<AgentRole> roles)
+        {
+            List<AgentRole> copy = null;
+            try
+            {
+                if (roles != null)
+                {
+                    copy = new List<AgentRole>();
+                    foreach (var r in roles)
+                    {
+                        if (r == null || string.IsNullOrWhiteSpace(r.Name)) continue;
+                        var c = new AgentRole();
+                        c.Name = r.Name.Trim();
+                        c.Description = r.Description ?? "";
+                        c.SystemPrompt = r.SystemPrompt ?? "";
+                        c.Model = r.Model;
+                        try { c.Tools = r.Tools != null ? (string[])r.Tools.Clone() : null; } catch { c.Tools = null; }
+                        copy.Add(c);
+                        if (copy.Count >= 32) break;
+                    }
+                    if (copy.Count == 0) copy = null;
+                }
+            }
+            catch { copy = null; }
+            lock (AgentRoleLock) { ConfiguredRoles = copy; }
+        }
+
+        public static JArray AgentRoles()
+        {
+            var arr = new JArray();
+            try
+            {
+                foreach (var r in ActiveRoles())
+                {
+                    try
+                    {
+                        var tools = new JArray();
+                        if (r.Tools != null)
+                            foreach (var t in r.Tools)
+                                if (!string.IsNullOrWhiteSpace(t)) tools.Add(t.Trim());
+                        arr.Add(new JObject
+                        {
+                            ["name"] = r.Name ?? "",
+                            ["description"] = r.Description ?? "",
+                            ["systemPrompt"] = r.SystemPrompt ?? "",
+                            ["tools"] = tools,
+                            ["model"] = r.Model ?? ""
+                        });
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return arr;
+        }
+
+        private static List<AgentRole> ActiveRoles()
+        {
+            List<AgentRole> configured = null;
+            lock (AgentRoleLock)
+            {
+                if (ConfiguredRoles != null && ConfiguredRoles.Count > 0) configured = new List<AgentRole>(ConfiguredRoles);
+            }
+            var merged = BuiltinRoles();
+            if (configured == null || configured.Count == 0) return merged;
+            foreach (var c in configured)
+            {
+                if (c == null || string.IsNullOrWhiteSpace(c.Name)) continue;
+                int idx = -1;
+                for (int i = 0; i < merged.Count; i++)
+                {
+                    if (merged[i] != null && string.Equals(merged[i].Name, c.Name.Trim(), StringComparison.OrdinalIgnoreCase)) { idx = i; break; }
+                }
+                if (idx >= 0) merged[idx] = c;
+                else merged.Add(c);
+            }
+            return merged;
+        }
+
+        private static List<AgentRole> BuiltinRoles()
+        {
+            return new List<AgentRole>
+            {
+                new AgentRole { Name = "general", Description = "Full tool access for build subtasks.", SystemPrompt = AgentSystemPrompt, Tools = null, Model = null },
+                new AgentRole { Name = "explore", Description = "Read-only analysis: geometry inspection and measurement.", SystemPrompt = AgentSystemPrompt, Tools = AgentExploreTools, Model = null },
+                new AgentRole { Name = "verifier", Description = "Read-only verification: measurement and mass properties.", SystemPrompt = AgentSystemPrompt, Tools = AgentVerifierTools, Model = null }
+            };
+        }
+
+        private static AgentRole FindRole(string name)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(name)) return null;
+                foreach (var r in ActiveRoles())
+                    if (r != null && string.Equals(r.Name, name.Trim(), StringComparison.OrdinalIgnoreCase)) return r;
+            }
+            catch { }
+            return null;
+        }
+
+        private static List<string> AgentRoleNames()
+        {
+            var out_ = new List<string>();
+            try
+            {
+                foreach (var r in ActiveRoles())
+                    if (r != null && !string.IsNullOrWhiteSpace(r.Name)) out_.Add(r.Name.Trim());
+            }
+            catch { }
+            return out_;
+        }
+
+        private static string SubagentSidecarPath(string sid)
+        {
+            try { return Path.Combine(AgentDir(), SafeSid(sid) + ".subagent.json"); } catch { return null; }
+        }
+
+        private static void WriteSubagentSidecar(string childSid, string roleName, string label, string parentSid, bool? stopped = null)
+        {
+            try
+            {
+                string p = SubagentSidecarPath(childSid);
+                if (string.IsNullOrEmpty(p)) return;
+                string safe = SafeSid(childSid);
+                string created = null;
+                JArray keepTrace = null;
+                bool keepStopped = false;
+                try
+                {
+                    if (File.Exists(p))
+                    {
+                        var prev = JObject.Parse(File.ReadAllText(p));
+                        string c = null;
+                        try { c = (string)prev["createdAtUtc"]; } catch { c = null; }
+                        if (!string.IsNullOrWhiteSpace(c)) created = c.Trim();
+                        try { keepTrace = prev["trace"] as JArray; } catch { keepTrace = null; }
+                        try { if (prev["stopped"] != null) keepStopped = (bool)prev["stopped"]; } catch { keepStopped = false; }
+                    }
+                }
+                catch { created = null; }
+                if (string.IsNullOrWhiteSpace(created)) created = DateTime.UtcNow.ToString("o");
+                bool finalStopped = stopped.HasValue ? stopped.Value : keepStopped;
+                var o = new JObject
+                {
+                    ["sid"] = safe,
+                    ["role"] = (roleName ?? "").Trim(),
+                    ["name"] = (label ?? "").Trim(),
+                    ["parentSid"] = SafeSid(parentSid),
+                    ["createdAtUtc"] = created,
+                    ["stopped"] = finalStopped,
+                    ["trace"] = keepTrace ?? new JArray()
+                };
+                try { while (((JArray)o["trace"]).Count > 200) ((JArray)o["trace"]).RemoveAt(0); } catch { }
+                string tmp = p + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                try
+                {
+                    File.WriteAllText(tmp, o.ToString(Newtonsoft.Json.Formatting.None));
+                    if (File.Exists(p)) File.Replace(tmp, p, null);
+                    else File.Move(tmp, p);
+                }
+                catch { try { File.Delete(tmp); } catch { } throw; }
+            }
+            catch { }
+        }
+
+        public static JObject SubagentInfo(string sid)
+        {
+            try
+            {
+                string p = SubagentSidecarPath(sid);
+                if (string.IsNullOrEmpty(p) || !File.Exists(p)) return null;
+                return JObject.Parse(File.ReadAllText(p));
+            }
+            catch { return null; }
+        }
+
+        public static JArray SubagentSessionsFor(string parentSid)
+        {
+            var arr = new JArray();
+            try
+            {
+                string want = SafeSid(parentSid);
+                var dir = AgentDir();
+                FileInfo[] files = null;
+                try { files = new DirectoryInfo(dir).GetFiles("*.subagent.json"); } catch { files = null; }
+                if (files == null) return arr;
+                var rows = new List<System.Collections.Generic.KeyValuePair<JObject, DateTime>>();
+                foreach (var f in files)
+                {
+                    try
+                    {
+                        var o = JObject.Parse(File.ReadAllText(f.FullName));
+                        string ps = null;
+                        try { ps = (string)o["parentSid"]; } catch { ps = null; }
+                        if (!string.Equals((ps ?? "").Trim(), want, StringComparison.OrdinalIgnoreCase)) continue;
+                        DateTime dt = DateTime.MinValue;
+                        try
+                        {
+                            string cs = (string)o["createdAtUtc"];
+                            if (!string.IsNullOrWhiteSpace(cs)) dt = DateTime.Parse(cs, null, System.Globalization.DateTimeStyles.RoundtripKind);
+                        }
+                        catch { dt = DateTime.MinValue; }
+                        if (dt == DateTime.MinValue)
+                        {
+                            try { dt = f.LastWriteTimeUtc; } catch { dt = DateTime.MinValue; }
+                        }
+                        rows.Add(new System.Collections.Generic.KeyValuePair<JObject, DateTime>(o, dt));
+                    }
+                    catch { }
+                }
+                rows.Sort((a, b) => b.Value.CompareTo(a.Value));
+                foreach (var r in rows) arr.Add(r.Key);
+            }
+            catch { }
+            return arr;
+        }
+
+        private static bool IsSpawnAgent(string name)
+        {
+            return string.Equals((name ?? "").Trim(), SpawnAgentTool, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool AgentToolMatch(string tool, string entry)
+        {
+            if (string.IsNullOrWhiteSpace(tool) || string.IsNullOrWhiteSpace(entry)) return false;
+            string e = entry.Trim();
+            if (e.EndsWith("*"))
+            {
+                e = e.TrimEnd('*').Trim();
+                if (e.Length == 0) return true;
+                return tool.StartsWith(e, StringComparison.OrdinalIgnoreCase);
+            }
+            if (e.EndsWith("_")) return tool.StartsWith(e, StringComparison.OrdinalIgnoreCase);
+            return string.Equals(tool, e, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool RoleAllowsTool(AgentRole role, string tool)
+        {
+            if (role == null || string.IsNullOrWhiteSpace(tool)) return false;
+            string t = tool.Trim();
+            if (IsSpawnAgent(t)) return false;
+            if (role.Tools == null || role.Tools.Length == 0) return true;
+            if (string.Equals(role.Name, "general", StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (var e in role.Tools)
+                {
+                    try { if (AgentToolMatch(t, e)) return true; } catch { }
+                }
+                return false;
+            }
+            try { if (string.Equals(ToolCategory(t), "destructive", StringComparison.OrdinalIgnoreCase)) return false; } catch { }
+            foreach (var e in role.Tools)
+            {
+                try { if (AgentToolMatch(t, e)) return true; } catch { }
+            }
+            return false;
+        }
+
+        private static JObject SpawnAgentSchema(List<string> roleNames)
+        {
+            var en = new JArray();
+            try
+            {
+                if (roleNames != null)
+                    foreach (var n in roleNames)
+                        if (!string.IsNullOrWhiteSpace(n)) en.Add(n.Trim());
+            }
+            catch { }
+            var props = new JObject
+            {
+                ["role"] = new JObject { ["type"] = "string", ["description"] = "Subagent role.", ["enum"] = en },
+                ["prompt"] = new JObject { ["type"] = "string", ["description"] = "Subtask for the subagent." },
+                ["name"] = new JObject { ["type"] = "string", ["description"] = "Short label shown in status events." },
+                ["model"] = new JObject { ["type"] = "string", ["description"] = "Model override, omit to inherit the run model." },
+                ["background"] = new JObject { ["type"] = "boolean", ["description"] = "Accepted but runs inline: STA CAD access is serialized per tool call." }
+            };
+            return new JObject
+            {
+                ["name"] = SpawnAgentTool,
+                ["description"] = "Spawn a role subagent for a subtask; its final answer returns as this call's result text.",
+                ["inputSchema"] = new JObject { ["type"] = "object", ["properties"] = props, ["required"] = new JArray("role", "prompt") }
+            };
+        }
+
+        private static void AppendSpawnAgentPlanLine(List<string> lines, HashSet<string> names)
+        {
+            try
+            {
+                if (lines == null) return;
+                if (names != null && (names.Contains(SpawnAgentTool) || names.Count >= MaxCatalogTools)) return;
+                var rn = AgentRoleNames();
+                string desc = rn.Count > 0 ? string.Join("|", rn.ToArray()) : "general";
+                lines.Add(SpawnAgentTool + ": Spawn a role subagent (" + desc + "); the agent loop runs it, single-shot plans cannot.");
+                if (names != null && !names.Contains(SpawnAgentTool)) names.Add(SpawnAgentTool);
+            }
+            catch { }
+        }
+
+        private static void AppendSpawnAgentFn(JArray fns, HashSet<string> names)
+        {
+            try
+            {
+                if (fns == null || names == null) return;
+                if (names.Contains(SpawnAgentTool) || names.Count >= MaxCatalogTools) return;
+                var schema = SpawnAgentSchema(AgentRoleNames());
+                JToken schemaParams = null;
+                try { schemaParams = schema["inputSchema"]; } catch { schemaParams = null; }
+                fns.Add(new JObject
+                {
+                    ["type"] = "function",
+                    ["function"] = new JObject
+                    {
+                        ["name"] = SpawnAgentTool,
+                        ["description"] = (string)schema["description"],
+                        ["parameters"] = schemaParams ?? new JObject { ["type"] = "object" }
+                    }
+                });
+                names.Add(SpawnAgentTool);
+            }
+            catch { }
+        }
+
+        private static void EmitAgentStatus(Action<JObject> cardSender, string parentSid, string childSid, string role, string name, string status, string summary)
+        {
+            try
+            {
+                var sender = cardSender;
+                try { if (sender == null) sender = CardSender; } catch { sender = null; }
+                if (sender == null) return;
+                string sum = summary ?? "";
+                if (sum.Length > 300) sum = sum.Substring(0, 300) + "…";
+                sender(new JObject
+                {
+                    ["type"] = "agentStatus",
+                    ["parentSid"] = parentSid ?? "",
+                    ["childSid"] = childSid ?? "",
+                    ["role"] = role ?? "",
+                    ["name"] = name ?? "",
+                    ["status"] = status ?? "",
+                    ["summary"] = sum
+                });
+            }
+            catch { }
+        }
+
+        private static async Task<McpBridge.ToolResult> CallCadToolSerializedAsync(string tool, JObject args, int timeoutMs, System.Threading.CancellationToken ct)
+        {
+            try { await AgentGate.WaitAsync(ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { return new McpBridge.ToolResult { Ok = false, Text = "transport failed (" + CleanDetail(ex.Message, 300) + ") — check the MCP server and retry that step." }; }
+            try { return await McpBridge.CallToolAsync(tool, args, timeoutMs, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { return new McpBridge.ToolResult { Ok = false, Text = "transport failed (" + CleanDetail(ex.Message, 300) + ") — check the MCP server and retry that step." }; }
+            finally { try { AgentGate.Release(); } catch { } }
+        }
+
+        private static async Task<McpBridge.ToolResult> HandleSpawnAgentAsync(
+            JObject args, string parentSid, int parentDepth,
+            IProviderClient client, JArray fullTools, object route, string parentModel,
+            Func<string, string, string, string, Task> emit,
+            System.Threading.CancellationToken ct,
+            Action<JObject> cardSender, Func<bool> isCurrent,
+            Dictionary<string, int> spawnCounts, string topSid)
+        {
+            string roleName = "";
+            string task = "";
+            string label = "";
+            string modelOverride = "";
+            bool background = false;
+            try
+            {
+                if (args != null)
+                {
+                    try { roleName = (string)args["role"] ?? ""; } catch { roleName = ""; }
+                    try { task = (string)args["prompt"] ?? ""; } catch { task = ""; }
+                    try { label = (string)args["name"] ?? ""; } catch { label = ""; }
+                    try { modelOverride = (string)args["model"] ?? ""; } catch { modelOverride = ""; }
+                    try
+                    {
+                        var bg = args["background"];
+                        if (bg != null)
+                        {
+                            if (bg.Type == Newtonsoft.Json.Linq.JTokenType.Boolean) background = (bool)bg;
+                            else if (bg.Type == Newtonsoft.Json.Linq.JTokenType.String)
+                                background = string.Equals((string)bg, "true", StringComparison.OrdinalIgnoreCase)
+                                    || string.Equals((string)bg, "1", StringComparison.OrdinalIgnoreCase);
+                        }
+                    }
+                    catch { background = false; }
+                }
+            }
+            catch { }
+            roleName = (roleName ?? "").Trim();
+            task = (task ?? "").Trim();
+            label = (label ?? "").Trim();
+            if (label.Length > 60) label = label.Substring(0, 60);
+            if (string.IsNullOrWhiteSpace(label)) label = roleName.Length > 0 ? roleName : "subagent";
+            AgentRole role = FindRole(roleName);
+            if (role == null)
+            {
+                string valid = "general, explore, verifier";
+                try { valid = string.Join(", ", AgentRoleNames().ToArray()); } catch { }
+                if (string.IsNullOrWhiteSpace(valid)) valid = "general, explore, verifier";
+                return new McpBridge.ToolResult { Ok = false, Text = "spawn_agent: unknown role '" + TruncPlan(roleName, 40) + "'. Valid roles: " + valid + " — retry with one of those." };
+            }
+            if (string.IsNullOrWhiteSpace(task))
+                return new McpBridge.ToolResult { Ok = false, Text = "spawn_agent: 'prompt' is required — describe the subtask for the '" + role.Name + "' subagent and retry." };
+            if (parentDepth >= EffMaxDepth())
+                return new McpBridge.ToolResult { Ok = false, Text = "spawn_agent: max nesting depth " + EffMaxDepth() + " reached — do the '" + role.Name + "' subtask with direct tool calls instead." };
+            string top = SafeSid(topSid ?? parentSid);
+            if (spawnCounts == null) spawnCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+            lock (spawnCounts)
+            {
+                int n = 0;
+                try { spawnCounts.TryGetValue(top, out n); } catch { n = 0; }
+                if (n >= EffMaxChildren())
+                    return new McpBridge.ToolResult { Ok = false, Text = "spawn_agent: max " + EffMaxChildren() + " subagents per run already used — do the '" + role.Name + "' subtask with direct tool calls instead." };
+                try { spawnCounts[top] = n + 1; } catch { }
+            }
+            string childSid = SafeSid(parentSid) + "_sub_" + Guid.NewGuid().ToString("N").Substring(0, 8);
+            if (background) EmitAgentStatus(cardSender, top, childSid, role.Name, label, "queued", task);
+            EmitAgentStatus(cardSender, top, childSid, role.Name, label, "started", task);
+            var linked = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(ct);
+            try { ChildRuns[childSid] = linked; } catch { }
+            try { ChildMetaMap[childSid] = new ChildMeta { ParentSid = top, Role = role.Name, Name = label }; } catch { }
+            Func<string, string, string, string, Task> childEmit = delegate (string a, string b, string c, string d)
+            {
+                try { EmitAgentTrace(cardSender, top, childSid, "step", a ?? "subagent", b ?? ""); } catch { }
+                return Task.FromResult(0);
+            };
+            Action<JObject> childSender = delegate (JObject card)
+            {
+                try
+                {
+                    if (card == null) return;
+                    string t = null;
+                    try { t = (string)card["type"]; } catch { t = null; }
+                    if (string.Equals(t, "approve", System.StringComparison.OrdinalIgnoreCase))
+                    {
+                        try { card["childSid"] = childSid; } catch { }
+                        var s0 = cardSender;
+                        try { if (s0 == null) s0 = CardSender; } catch { s0 = null; }
+                        if (s0 != null) { try { s0(card); } catch { } }
+                    }
+                    else if (string.Equals(t, "agentStatus", System.StringComparison.OrdinalIgnoreCase))
+                    {
+                        var s1 = cardSender;
+                        try { if (s1 == null) s1 = CardSender; } catch { s1 = null; }
+                        if (s1 != null) { try { s1(card); } catch { } }
+                    }
+                    else
+                    {
+                        string det = null;
+                        try { det = card.ToString(Newtonsoft.Json.Formatting.None); } catch { det = ""; }
+                        EmitAgentTrace(cardSender, top, childSid, "step", t ?? "card", det ?? "");
+                    }
+                }
+                catch { }
+            };
+            try
+            {
+                string final;
+                final = await RunChildLoopAsync(role, task, childSid, modelOverride, client, fullTools, route, parentModel, childEmit, linked.Token, childSender, isCurrent, parentDepth + 1, spawnCounts, top, label).ConfigureAwait(false);
+                final = (final ?? "").Trim();
+                if (final.Length == 0)
+                {
+                    EmitAgentStatus(cardSender, top, childSid, role.Name, label, "failed", "empty final answer");
+                    EmitAgentTrace(cardSender, top, childSid, "error", "empty final answer", label);
+                    try { WriteSubagentSidecar(childSid, role.Name, label, top); } catch { }
+                    return new McpBridge.ToolResult { Ok = false, Text = "Subagent '" + label + "' (" + role.Name + ") finished with no result — retry with a narrower subtask or do it with direct tool calls." };
+                }
+                int cap = EffResultCap();
+                if (final.Length > cap) final = final.Substring(0, cap) + "…(truncated to " + cap + " chars)";
+                EmitAgentStatus(cardSender, top, childSid, role.Name, label, "done", final);
+                EmitAgentTrace(cardSender, top, childSid, "result", label, final);
+                return new McpBridge.ToolResult { Ok = true, Text = "[subagent role='" + role.Name + "' name='" + label + "']\n" + final };
+            }
+            catch (OperationCanceledException)
+            {
+                bool parentGone = false;
+                try { parentGone = ct.IsCancellationRequested; } catch { parentGone = false; }
+                if (parentGone)
+                {
+                    try { EmitAgentStatus(cardSender, top, childSid, role.Name, label, "failed", "cancelled"); } catch { }
+                    try { SaveSession(childSid); } catch { }
+                    try { WriteSubagentSidecar(childSid, role != null ? role.Name : roleName, label, top); } catch { }
+                    return new McpBridge.ToolResult { Ok = false, Text = "Subagent '" + label + "' (" + role.Name + ") was stopped with the parent run — resend to retry." };
+                }
+                try { EmitAgentStatus(cardSender, top, childSid, role.Name, label, "stopped", "stopped by user"); } catch { }
+                try { MarkSubagentStopped(childSid, true); } catch { }
+                try { EmitAgentTrace(cardSender, top, childSid, "error", "stopped", "Subagent stopped by the user"); } catch { }
+                try { SaveSession(childSid); } catch { }
+                return new McpBridge.ToolResult { Ok = false, Text = "Subagent stopped by the user — re-plan or retry." };
+            }
+            catch (Exception ex)
+            {
+                string why = "";
+                try { why = CleanDetail(ex.Message, 300); } catch { why = ""; }
+                try { EmitAgentStatus(cardSender, top, childSid, role.Name, label, "failed", why); } catch { }
+                try { SaveSession(childSid); } catch { }
+                try { WriteSubagentSidecar(childSid, role != null ? role.Name : roleName, label, top); } catch { }
+                if (string.IsNullOrEmpty(why)) why = "the subagent run failed";
+                return new McpBridge.ToolResult { Ok = false, Text = "Subagent '" + label + "' (" + role.Name + ") failed (" + why + ") — retry with a narrower subtask or do it with direct tool calls." };
+            }
+            finally
+            {
+                try { System.Threading.CancellationTokenSource gone; ChildRuns.TryRemove(childSid, out gone); } catch { }
+                try { ChildMeta goneM; ChildMetaMap.TryRemove(childSid, out goneM); } catch { }
+                try { linked.Dispose(); } catch { }
+            }
+        }
+
+        private static async Task<string> RunChildLoopAsync(
+            AgentRole role, string task, string childSid, string modelOverride,
+            IProviderClient client, JArray fullTools, object route, string parentModel,
+            Func<string, string, string, string, Task> emit,
+            System.Threading.CancellationToken ct,
+            Action<JObject> cardSender, Func<bool> isCurrent,
+            int childDepth, Dictionary<string, int> spawnCounts, string topSid, string label)
+        {
+            if (role == null) throw new Exception("Subagent role is missing — retry with role 'general', 'explore' or 'verifier'.");
+            if (client == null) throw new Exception("Subagent '" + label + "' has no provider client — the parent run lost its model; resend to retry.");
+            if (fullTools == null || fullTools.Count == 0) throw new Exception("Subagent '" + label + "' has no tool catalog — the parent run lost its tool list; resend to retry.");
+            var childNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var childFns = new JArray();
+            foreach (var t in fullTools)
+            {
+                var o = t as JObject;
+                if (o == null) continue;
+                string n = null;
+                try { n = (string)o["name"]; } catch { n = null; }
+                if (string.IsNullOrWhiteSpace(n)) continue;
+                if (IsSpawnAgent(n)) continue;
+                if (!RoleAllowsTool(role, n)) continue;
+                try { if (ApprovalFor(n) == "deny") continue; } catch { }
+                if (childNames.Contains(n)) continue;
+                if (childNames.Count >= MaxCatalogTools) break;
+                childNames.Add(n);
+                JToken schemaParams = null;
+                try { schemaParams = o["inputSchema"]; } catch { schemaParams = null; }
+                string desc = "";
+                try { desc = (((string)o["description"]) ?? "").Split('\n')[0].Trim(); } catch { desc = ""; }
+                childFns.Add(new JObject
+                {
+                    ["type"] = "function",
+                    ["function"] = new JObject
+                    {
+                        ["name"] = n,
+                        ["description"] = desc,
+                        ["parameters"] = schemaParams ?? new JObject { ["type"] = "object" }
+                    }
+                });
+            }
+            if (childDepth < EffMaxDepth()) AppendSpawnAgentFn(childFns, childNames);
+            if (childNames.Count == 0) throw new Exception("Subagent role '" + role.Name + "' has no usable tools after filtering — retry with role 'general'.");
+            var childSession = EnsureSession(childSid);
+            try { lock (Sessions) { CurrentSid = SafeSid(topSid); } } catch { }
+            string basePrompt = !string.IsNullOrWhiteSpace(role.SystemPrompt) ? role.SystemPrompt : AgentSystemPrompt;
+            string cadCtx = null;
+            try { cadCtx = CadContextSummary(topSid); } catch { cadCtx = null; }
+            string childSys = basePrompt + "\n\nYou are a '" + role.Name + "' subagent. Complete only the task below and reply with the result. Subagent task: " + task
+                + (string.IsNullOrWhiteSpace(cadCtx) ? "" : "\n\nCAD context for this session: " + cadCtx);
+            string taggedTask = "[subagent role='" + role.Name + "'] " + task;
+            lock (childSession.Msgs)
+            {
+                if (childSession.Msgs.Count == 0 || (string)childSession.Msgs[0]["role"] != "system")
+                {
+                    childSession.Msgs.Insert(0, new JObject { ["role"] = "system", ["content"] = childSys });
+                    for (int ti = 0; ti < childSession.TurnStarts.Count; ti++) childSession.TurnStarts[ti]++;
+                }
+                else if (!string.Equals((string)childSession.Msgs[0]["content"], childSys, StringComparison.Ordinal))
+                    childSession.Msgs[0]["content"] = childSys;
+                childSession.TurnStarts.Add(childSession.Msgs.Count);
+                string histTask = taggedTask.Length > 2000 ? taggedTask.Substring(0, 2000) + "…(truncated)" : taggedTask;
+                childSession.Msgs.Add(new JObject { ["role"] = "user", ["content"] = histTask });
+                AgentMsgCount = childSession.Msgs.Count;
+            }
+            SaveSession(childSid);
+            try { WriteSubagentSidecar(childSid, role.Name, label, topSid); } catch { }
+            string model = !string.IsNullOrWhiteSpace(modelOverride) ? modelOverride.Trim()
+                : (!string.IsNullOrWhiteSpace(role.Model) ? role.Model.Trim() : parentModel);
+            var opts = new ProviderOptions { MaxTokens = 16000, Model = model, ToolsJson = childFns.ToString(Newtonsoft.Json.Formatting.None), ToolChoice = "auto", ReasoningEffort = ReasoningEffort, Headers = ProviderHeaders, SessionId = SessionId };
+            var log = new List<string>();
+            var seen = new List<string>();
+            string topForTrace = SafeSid(topSid);
+            Action<string, string> childThink = delegate (string a, string b)
+            {
+                try { EmitAgentTrace(cardSender, topForTrace, childSid, "think", a ?? "thinking", b ?? ""); } catch { }
+            };
+            int turnCap = EffMaxChildTurns();
+            for (int iter = 1; iter <= turnCap; iter++)
+            {
+                ct.ThrowIfCancellationRequested();
+                List<JObject> hist;
+                lock (childSession.Msgs) { hist = new List<JObject>(childSession.Msgs); }
+                ProviderResult res = await StreamAgentTurn(client, new JArray(hist.ToArray()), opts, ct, childThink);
+                if (res == null) throw new Exception("Subagent '" + label + "' got an empty provider response — retry with a narrower subtask.");
+                try { NoteCtx(childSid, res.TokIn, res.TokOut); } catch { }
+                try { System.Threading.Interlocked.Add(ref _agentTokCount, res.TokIn + res.TokOut); } catch { }
+                if (res.ToolCalls == null || res.ToolCalls.Count == 0)
+                {
+                    string summary = (res.Text ?? "").Trim();
+                    SaveSession(childSid);
+                    try { WriteSubagentSidecar(childSid, role.Name, label, topSid); } catch { }
+                    if (string.IsNullOrEmpty(summary)) throw new Exception("Subagent '" + label + "' finished with no tools and no text — retry with a narrower subtask.");
+                    return summary;
+                }
+                var asst = new JObject { ["role"] = "assistant", ["content"] = res.Text ?? "" };
+                var tcArr = new JArray();
+                foreach (var c in res.ToolCalls)
+                {
+                    string hArgs = c.ArgumentsJson ?? "{}";
+                    if (hArgs.Length > 4000) hArgs = hArgs.Substring(0, 4000) + "…(truncated for history)";
+                    tcArr.Add(new JObject { ["id"] = c.Id ?? Guid.NewGuid().ToString("N"), ["type"] = "function", ["function"] = new JObject { ["name"] = c.Name, ["arguments"] = hArgs } });
+                }
+                asst["tool_calls"] = tcArr;
+                lock (childSession.Msgs) { childSession.Msgs.Add(asst); AgentMsgCount = childSession.Msgs.Count; }
+                foreach (var c in res.ToolCalls)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    string cid = string.IsNullOrWhiteSpace(c.Id) ? Guid.NewGuid().ToString("N") : c.Id;
+                    try { EmitAgentTrace(cardSender, topForTrace, childSid, "tool", c.Name ?? "tool", c.ArgumentsJson ?? ""); } catch { }
+                    if (string.IsNullOrWhiteSpace(c.Name) || !childNames.Contains(c.Name))
+                    {
+                        try { EmitAgentTrace(cardSender, topForTrace, childSid, "error", "unknown tool", TruncPlan(c.Name, 60)); } catch { }
+                        lock (childSession.Msgs) { childSession.Msgs.Add(new JObject { ["role"] = "tool", ["tool_call_id"] = cid, ["content"] = "ERROR: unknown tool '" + TruncPlan(c.Name, 60) + "'. Use only listed tools." }); }
+                        continue;
+                    }
+                    string argRaw = string.IsNullOrWhiteSpace(c.ArgumentsJson) ? "{}" : c.ArgumentsJson;
+                    if (argRaw.Length > 100000 || JsonTooDeep(argRaw))
+                    {
+                        try { EmitAgentTrace(cardSender, topForTrace, childSid, "error", "args too large", TruncPlan(c.Name, 60)); } catch { }
+                        lock (childSession.Msgs) { childSession.Msgs.Add(new JObject { ["role"] = "tool", ["tool_call_id"] = cid, ["content"] = "ERROR: arguments for '" + TruncPlan(c.Name, 60) + "' are too large/complex (" + argRaw.Length + " chars) — retry with a smaller call." }); }
+                        continue;
+                    }
+                    JObject callArgs;
+                    try { callArgs = JObject.Parse(argRaw); }
+                    catch
+                    {
+                        try { EmitAgentTrace(cardSender, topForTrace, childSid, "error", "bad args", TruncPlan(c.Name, 60)); } catch { }
+                        lock (childSession.Msgs) { childSession.Msgs.Add(new JObject { ["role"] = "tool", ["tool_call_id"] = cid, ["content"] = "ERROR: arguments for '" + TruncPlan(c.Name, 60) + "' were not valid JSON — retry the call with fixed arguments." }); }
+                        continue;
+                    }
+                    McpBridge.ToolResult r;
+                    if (IsSpawnAgent(c.Name))
+                    {
+                        r = await HandleSpawnAgentAsync(callArgs, childSid, childDepth, client, fullTools, route, model, emit, ct, cardSender, isCurrent, spawnCounts, topSid);
+                    }
+                    else if (IsResourceTool(c.Name))
+                    {
+                        r = await HandleResourceToolAsync(c.Name, callArgs, route, emit, ct, cardSender, isCurrent);
+                    }
+                    else
+                    {
+                        var gate = await GateToolAsync(c.Name, callArgs, emit, ct, cardSender, isCurrent);
+                        if (gate != null) r = gate;
+                        else
+                        {
+                            try { r = await CallCadToolSerializedAsync(c.Name, callArgs, 300000, ct); }
+                            catch (OperationCanceledException) { throw; }
+                            catch (Exception ex) { r = new McpBridge.ToolResult { Ok = false, Text = "transport failed (" + CleanDetail(ex.Message, 300) + ") — check the MCP server and retry that step." }; }
+                        }
+                    }
+                    string text = r.Text ?? "";
+                    if (text.Length > 2000) text = text.Substring(0, 2000) + "…(truncated)";
+                    log.Add(c.Name + " -> " + (r.Ok ? "ok" : "FAILED"));
+                    try { EmitAgentTrace(cardSender, topForTrace, childSid, "tool", (c.Name ?? "tool") + (r.Ok ? " ok" : " FAILED"), text); } catch { }
+                    ct.ThrowIfCancellationRequested();
+                    lock (childSession.Msgs) { childSession.Msgs.Add(new JObject { ["role"] = "tool", ["tool_call_id"] = cid, ["content"] = (r.Ok ? "" : "FAILED: ") + text }); AgentMsgCount = childSession.Msgs.Count; }
+                    bool loop = false;
+                    lock (seen)
+                    {
+                        seen.Add((c.Name ?? "") + "\n" + argRaw);
+                        while (seen.Count > 3) seen.RemoveAt(0);
+                        loop = seen.Count == 3 && string.Equals(seen[0], seen[1], StringComparison.Ordinal) && string.Equals(seen[1], seen[2], StringComparison.Ordinal);
+                    }
+                    if (loop)
+                    {
+                        SaveSession(childSid);
+                        try { WriteSubagentSidecar(childSid, role.Name, label, topSid); } catch { }
+                        return "Subagent '" + label + "' stopped: it repeated the same " + c.Name + " call 3 times (" + string.Join("; ", log.ToArray()) + ").";
+                    }
+                    if (!r.Ok)
+                    {
+                        try { await emit("Builder", "subagent " + label + ": " + c.Name + " missed — re-planning around it", "run", null); }
+                        catch { }
+                    }
+                }
+                SaveSession(childSid);
+                try { WriteSubagentSidecar(childSid, role.Name, label, topSid); } catch { }
+            }
+            SaveSession(childSid);
+            try { WriteSubagentSidecar(childSid, role.Name, label, topSid); } catch { }
+            throw new Exception("Subagent '" + label + "' hit the " + EffMaxChildTurns() + "-turn cap (" + string.Join("; ", log.ToArray()) + ") — split the subtask and retry.");
+        }
     }
 }

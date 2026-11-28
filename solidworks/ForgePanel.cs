@@ -90,6 +90,7 @@ namespace Forge.SolidWorks
             _web.CoreWebView2.NavigationCompleted += (s, e) =>
             {
                 Send(new { type = "telemetryState", on = Telemetry.Enabled });
+                try { Send(AgentLimitsPayload()); } catch { }
                 if (!_firstrunShown) { _firstrunShown = true; Send(new { type = "firstrun" }); }
             };
 
@@ -402,6 +403,71 @@ namespace Forge.SolidWorks
                     SendQueueState(psid);
                     SendQueued(psid);
                 }
+                else if (action == "agents")
+                {
+                    try { Send(new { type = "agents", roles = AgentRolesPayload() }); }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't list agent roles (" + BoundDetail(ex.Message, 200) + ")." }); }
+                }
+                else if (action == "agentsSave")
+                {
+                    List<McpBuild.AgentRole> roles = null;
+                    string verr = null;
+                    try
+                    {
+                        JToken rt = null;
+                        try { rt = msg.roles as JToken; } catch { }
+                        roles = ParseAgentRoles(rt, out verr);
+                    }
+                    catch (Exception ex) { verr = "Couldn't read roles (" + BoundDetail(ex.Message, 200) + ")."; }
+                    if (roles == null) { Send(new { type = "error", message = verr ?? "Invalid agent roles — nothing saved." }); return; }
+                    try { McpBuild.ConfigureAgents(roles); }
+                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't apply agent roles (" + BoundDetail(ex.Message, 200) + ") — nothing saved." }); return; }
+                    try
+                    {
+                        var cfg = ReadForgeConfig();
+                        var arr = new JArray();
+                        foreach (var r in roles) arr.Add(AgentRoleToJObject(r));
+                        cfg["agents"] = arr;
+                        WriteForgeConfigAtomic(cfg);
+                        try { ApplyAgentLimitsFromConfig(ReadForgeConfig()); } catch { }
+                    }
+                    catch (Exception ex) { Send(new { type = "error", message = "Agent roles applied for this session but couldn't be saved (" + BoundDetail(ex.Message, 200) + ")." }); return; }
+                    try { Send(new { type = "agents", roles = AgentRolesPayload() }); } catch { }
+                }
+                else if (action == "agentLimitsSave")
+                {
+                    int d = 0, f = 0, t = 0, c = 0;
+                    bool valid = false;
+                    try
+                    {
+                        int vd = 0, vf = 0, vt = 0, vc = 0;
+                        valid = TryAgentLimitField((object)msg.maxDepth, out vd)
+                            && TryAgentLimitField((object)msg.maxFanout, out vf)
+                            && TryAgentLimitField((object)msg.maxChildTurns, out vt)
+                            && TryAgentLimitField((object)msg.maxResultCap, out vc);
+                        if (valid) { d = vd; f = vf; t = vt; c = vc; }
+                    }
+                    catch { valid = false; }
+                    if (!valid) { Send(new { type = "error", message = "Invalid agent limits — maxDepth, maxFanout, maxChildTurns, and maxResultCap must each be an integer >= 0 (0 = unlimited)." }); return; }
+                    try
+                    {
+                        var cfg = ReadForgeConfig();
+                        cfg["agentLimits"] = new JObject { ["maxDepth"] = d, ["maxFanout"] = f, ["maxChildTurns"] = t, ["maxResultCap"] = c };
+                        WriteForgeConfigAtomic(cfg);
+                    }
+                    catch (Exception ex) { Send(new { type = "error", message = "Agent limits couldn't be saved (" + BoundDetail(ex.Message, 200) + ") — try again." }); return; }
+                    try { ApplyAgentLimitsFromConfig(ReadForgeConfig()); } catch { }
+                    try { Send(AgentLimitsPayload()); } catch { }
+                }
+                else if (action == "agentStop")
+                {
+                    string csid = null;
+                    try { csid = (string)msg.childSid; } catch { }
+                    if (string.IsNullOrWhiteSpace(csid)) { try { csid = (string)msg.sid; } catch { } }
+                    bool stopped = false;
+                    try { stopped = TryStopAgent(csid); } catch { stopped = false; }
+                    if (!stopped) Send(new { type = "status", message = "No running subagent '" + (((csid ?? "").Trim().Length > 0) ? (csid ?? "").Trim() : "(unknown)") + "' — it may have finished or already stopped. The parent run is untouched." });
+                }
                 else if (action == "continue")
                 {
                     if (System.Threading.Volatile.Read(ref _activeRuns) > 0)
@@ -530,6 +596,10 @@ namespace Forge.SolidWorks
                 else if (action == "usage")   // top-bar context dropdown: session context stats + legacy daily totals
                 {
                     SendUsage();
+                }
+                else if (action == "usageGo")
+                {
+                    await HandleUsageGoAsync();
                 }
                 else if (action == "setCompact")
                 {
@@ -851,7 +921,9 @@ namespace Forge.SolidWorks
                         {
                             McpBuild.EnsureSessionPublic(lsid);
                             var turnsData = BuildHostTurns(lsid);
-                            Send(new { type = "historyLoaded", turns = McpBuild.HistoryCount(), sid = lsid, turns_data = turnsData });
+                            JArray subagents = new JArray();
+                            try { subagents = McpBuild.SubagentSessionsFor(lsid) as JArray ?? new JArray(); } catch { subagents = new JArray(); }
+                            Send(new { type = "historyLoaded", turns = McpBuild.HistoryCount(), sid = lsid, turns_data = turnsData, subagents = subagents });
                         }
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't load chat history (" + BoundDetail(ex.Message, 200) + ") — try again." }); }
@@ -1205,7 +1277,8 @@ namespace Forge.SolidWorks
                     try
                     {
                         var ids = await FetchServableModels(preset.BaseUrl, (key ?? "").Trim(), fslug);
-                        Send(new { type = "models", models = ids, modelMeta = ModelMetaArray(ids, fslug), selected = preset.Model });
+                        var rawMap = await FetchRawMapAsync(preset.BaseUrl, (key ?? "").Trim());
+                        Send(new { type = "models", models = ids, modelMeta = ModelMetaArray(ids, fslug, rawMap), selected = preset.Model });
                     }
                     catch (Exception ex) { Send(new { type = "models", models = new string[0], modelMeta = new JArray(), error = MapModelsError(ex) }); }
                 }
@@ -1290,7 +1363,8 @@ namespace Forge.SolidWorks
                         if (ropencode && string.IsNullOrWhiteSpace(key)) key = "public";
                         if (string.IsNullOrWhiteSpace(key) && !rlocal && !ropencode) throw new Exception("No key saved for " + (rslug ?? p) + " — save one in Settings → API key (or set " + (Forge.Providers.ProviderFactory.EnvSlug(rslug) == null ? "FORGE_PROVIDER_KEY" : "FORGE_PROVIDER_KEY_" + Forge.Providers.ProviderFactory.EnvSlug(rslug)) + "), then Refresh.");
                         var ids = await FetchServableModels(baseUrl, (key ?? "").Trim(), rslug);
-                        Send(new { type = "models", models = ids, modelMeta = ModelMetaArray(ids, rslug), selected = (string)cfg["model"] });
+                        var rawMap = await FetchRawMapAsync(baseUrl, (key ?? "").Trim());
+                        Send(new { type = "models", models = ids, modelMeta = ModelMetaArray(ids, rslug, rawMap), selected = (string)cfg["model"] });
                     }
                     catch (Exception ex) { Send(new { type = "models", models = new string[0], modelMeta = new JArray(), error = MapModelsError(ex) }); }
                 }
@@ -2384,6 +2458,238 @@ namespace Forge.SolidWorks
             }
         }
 
+        private const int MaxAgentRoles = 12;
+
+        private static List<McpBuild.AgentRole> ParseAgentRoles(JToken token, out string error)
+        {
+            error = null;
+            var roles = new List<McpBuild.AgentRole>();
+            if (token == null || token.Type == JTokenType.Null) return roles;
+            var arr = token as JArray;
+            if (arr == null) { error = "agents must be an array of {name, description, systemPrompt, tools[], model}."; return null; }
+            if (arr.Count > MaxAgentRoles) { error = "Too many agent roles (" + arr.Count + ", cap is 12) — remove some, then save again."; return null; }
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var item in arr)
+            {
+                var o = item as JObject;
+                if (o == null) { error = "Each agents[] entry must be an object with a non-empty name."; return null; }
+                string name = null;
+                try { name = (string)o["name"]; } catch { }
+                name = (name ?? "").Trim();
+                if (name.Length == 0) { error = "Each agents[] entry needs a non-empty name."; return null; }
+                if (!seen.Add(name)) { error = "Duplicate agent name '" + name + "' — names must be unique (built-ins general/explore/verifier may be overridden once, not duplicated)."; return null; }
+                string desc = null, prompt = null, model = null;
+                try { desc = (string)o["description"]; } catch { }
+                try { prompt = (string)o["systemPrompt"]; } catch { }
+                try { model = (string)o["model"]; } catch { }
+                var tools = new List<string>();
+                try
+                {
+                    var tt = o["tools"];
+                    if (tt != null && tt.Type != JTokenType.Null)
+                    {
+                        var ta = tt as JArray;
+                        if (ta == null) { error = "Agent '" + name + "': tools must be an array of strings."; return null; }
+                        foreach (var t in ta)
+                        {
+                            string ts = null;
+                            try { ts = (string)t; } catch { }
+                            if (ts == null) { error = "Agent '" + name + "': tools must be an array of strings."; return null; }
+                            ts = ts.Trim();
+                            if (ts.Length == 0) continue;
+                            tools.Add(ts);
+                        }
+                    }
+                }
+                catch { error = "Agent '" + name + "': tools must be an array of strings."; return null; }
+                try
+                {
+                    roles.Add(new McpBuild.AgentRole
+                    {
+                        Name = name,
+                        Description = (desc ?? "").Trim(),
+                        SystemPrompt = (prompt ?? ""),
+                        Tools = tools.ToArray(),
+                        Model = string.IsNullOrWhiteSpace(model) ? null : model.Trim()
+                    });
+                }
+                catch (Exception ex) { error = "Couldn't build agent '" + name + "' (" + BoundDetail(ex.Message, 200) + ")."; return null; }
+            }
+            return roles;
+        }
+
+        private static JObject AgentRoleToJObject(McpBuild.AgentRole r)
+        {
+            var o = new JObject
+            {
+                ["name"] = r.Name ?? "",
+                ["description"] = r.Description ?? "",
+                ["systemPrompt"] = r.SystemPrompt ?? ""
+            };
+            var ta = new JArray();
+            try { if (r.Tools != null) foreach (var t in r.Tools) if (!string.IsNullOrWhiteSpace(t)) ta.Add(t.Trim()); } catch { }
+            o["tools"] = ta;
+            o["model"] = r.Model != null ? (JToken)new JValue(r.Model) : JValue.CreateNull();
+            return o;
+        }
+
+        private static JArray AgentRolesPayload()
+        {
+            var clean = new JArray();
+            try
+            {
+                var raw = McpBuild.AgentRoles() as JArray ?? new JArray();
+                foreach (var item in raw)
+                {
+                    var o = item as JObject;
+                    if (o == null) continue;
+                    string nm = null, ds = null, md = null, sp = null;
+                    try { nm = (string)o["name"]; } catch { }
+                    try { ds = (string)o["description"]; } catch { }
+                    try { md = (string)o["model"]; } catch { }
+                    try { sp = (string)o["systemPrompt"]; } catch { }
+                    var tools = new JArray();
+                    try
+                    {
+                        var tt = o["tools"] as JArray;
+                        if (tt != null) foreach (var t in tt) { try { string s = (string)t; if (!string.IsNullOrWhiteSpace(s)) tools.Add(s.Trim()); } catch { } }
+                    }
+                    catch { }
+                    var jo = new JObject { ["name"] = nm ?? "", ["description"] = ds ?? "", ["systemPrompt"] = sp ?? "", ["tools"] = tools };
+                    jo["model"] = md != null ? (JToken)new JValue(md) : JValue.CreateNull();
+                    clean.Add(jo);
+                }
+            }
+            catch { }
+            return clean;
+        }
+
+        private static void ConfigureAgentsFromConfig()
+        {
+            try
+            {
+                var cfg = ReadForgeConfig();
+                string error;
+                var roles = ParseAgentRoles(cfg["agents"], out error);
+                if (roles == null) return;
+                try { McpBuild.ConfigureAgents(roles); } catch { }
+            }
+            catch { }
+        }
+
+        private static int AgentLimitInt(JToken v, int fallback)
+        {
+            try
+            {
+                if (v == null || v.Type == JTokenType.Null || v.Type == JTokenType.Undefined) return fallback;
+                if (v.Type == JTokenType.Integer || v.Type == JTokenType.Float) { long n = Convert.ToInt64((object)v); if (n < 0 || n > int.MaxValue) return fallback; return (int)n; }
+                string s = ((string)v ?? "").Trim();
+                if (s.Length == 0) return fallback;
+                int n2;
+                if (!int.TryParse(s, out n2)) return fallback;
+                if (n2 < 0) return fallback;
+                return n2;
+            }
+            catch { return fallback; }
+        }
+
+        private static void ReadAgentLimits(JObject cfg, out int maxDepth, out int maxFanout, out int maxChildTurns, out int maxResultCap)
+        {
+            maxDepth = 2; maxFanout = 4; maxChildTurns = 30; maxResultCap = 8192;
+            try
+            {
+                var lim = cfg != null ? cfg["agentLimits"] as JObject : null;
+                if (lim == null) return;
+                maxDepth = AgentLimitInt(lim["maxDepth"], maxDepth);
+                maxFanout = AgentLimitInt(lim["maxFanout"], maxFanout);
+                maxChildTurns = AgentLimitInt(lim["maxChildTurns"], maxChildTurns);
+                maxResultCap = AgentLimitInt(lim["maxResultCap"], maxResultCap);
+            }
+            catch { }
+        }
+
+        private static void ApplyAgentLimitsFromConfig(JObject cfg)
+        {
+            try
+            {
+                int d, f, t, c;
+                ReadAgentLimits(cfg, out d, out f, out t, out c);
+                try
+                {
+                    var m = typeof(McpBuild).GetMethod("ConfigureAgentLimits", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                    if (m != null) m.Invoke(null, new object[] { d, f, t, c });
+                }
+                catch { }
+            }
+            catch { }
+        }
+
+        private static JObject AgentLimitsPayload()
+        {
+            try
+            {
+                var m = typeof(McpBuild).GetMethod("AgentLimits", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                if (m != null)
+                {
+                    object r = m.Invoke(null, null);
+                    var jo = r as JObject;
+                    if (jo != null)
+                    {
+                        try { jo["type"] = "agentLimits"; } catch { }
+                        return jo;
+                    }
+                }
+            }
+            catch { }
+            try
+            {
+                int d, f, t, c;
+                ReadAgentLimits(ReadForgeConfig(), out d, out f, out t, out c);
+                return new JObject { ["type"] = "agentLimits", ["maxDepth"] = d, ["maxFanout"] = f, ["maxChildTurns"] = t, ["maxResultCap"] = c, ["comSerialized"] = true };
+            }
+            catch { return new JObject { ["type"] = "agentLimits", ["maxDepth"] = 2, ["maxFanout"] = 4, ["maxChildTurns"] = 30, ["maxResultCap"] = 8192, ["comSerialized"] = true }; }
+        }
+
+        private static bool TryAgentLimitField(object raw, out int value)
+        {
+            value = 0;
+            try
+            {
+                if (raw == null) return false;
+                var tok = raw as JToken;
+                if (tok != null)
+                {
+                    if (tok.Type == JTokenType.Null || tok.Type == JTokenType.Undefined) return false;
+                    if (tok.Type == JTokenType.Integer) { long n = (long)tok; if (n < 0 || n > int.MaxValue) return false; value = (int)n; return true; }
+                    if (tok.Type == JTokenType.Float) { double n = (double)tok; if (n < 0 || n > int.MaxValue || n != Math.Floor(n)) return false; value = (int)n; return true; }
+                    if (tok.Type == JTokenType.String) { int n; if (!int.TryParse((((string)tok) ?? "").Trim(), out n) || n < 0) return false; value = n; return true; }
+                    try { long n = Convert.ToInt64((object)tok); if (n < 0 || n > int.MaxValue) return false; value = (int)n; return true; }
+                    catch { return false; }
+                }
+                if (raw is int) { int n = (int)raw; if (n < 0) return false; value = n; return true; }
+                if (raw is long) { long n = (long)raw; if (n < 0 || n > int.MaxValue) return false; value = (int)n; return true; }
+                if (raw is double) { double n = (double)raw; if (n < 0 || n > int.MaxValue || n != Math.Floor(n)) return false; value = (int)n; return true; }
+                if (raw is string) { int n; if (!int.TryParse((((string)raw) ?? "").Trim(), out n) || n < 0) return false; value = n; return true; }
+                try { long n = Convert.ToInt64(raw); if (n < 0 || n > int.MaxValue) return false; value = (int)n; return true; }
+                catch { return false; }
+            }
+            catch { return false; }
+        }
+
+        private static bool TryStopAgent(string childSid)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(childSid)) return false;
+                var m = typeof(McpBuild).GetMethod("StopAgent", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                if (m == null) return false;
+                object r = m.Invoke(null, new object[] { childSid.Trim() });
+                if (r is bool) return (bool)r;
+                try { return Convert.ToBoolean(r); } catch { return false; }
+            }
+            catch { return false; }
+        }
+
         private static JArray AddCustomModel(string slug, string id, string label)
         {
             string s = NormCustomSlug(slug);
@@ -2794,7 +3100,7 @@ namespace Forge.SolidWorks
             if (bu.Contains("localhost") || bu.Contains("127.0.0.1") || bu.Contains("::1")) return "ollama";
             if (bu.Contains("integrate.api.nvidia.com")) return "nvidia";
             if (bu.Contains("openrouter.ai")) return "openrouter";
-            if (bu.Contains("opencode.ai")) return "opencode";
+            if (bu.Contains("opencode.ai")) return bu.Contains("/zen/go") ? "opencode-go" : "opencode";
             if (bu.Contains("api.deepseek.com")) return "deepseek";
             if (bu.Contains("api.openai.com")) return "openai";
             if (p == "openai-compatible") return "openai-compatible";
@@ -4618,6 +4924,9 @@ namespace Forge.SolidWorks
                 try { McpBuild.ConfigureCompaction(compactOn, pct, reserve, tail); } catch { }
                 CompactReservedTokens = reserve;
                 CompactTailTurns = tail;
+                try { ConfigureAgentsFromConfig(); } catch { }
+                try { ApplyAgentLimitsFromConfig(cfg); } catch { }
+                try { Send(AgentLimitsPayload()); } catch { }
             }
             catch { }
         }
@@ -4764,6 +5073,11 @@ namespace Forge.SolidWorks
 
         private static JObject ModelMeta(string id, string slug)
         {
+            return ModelMeta(id, slug, null);
+        }
+
+        private static JObject ModelMeta(string id, string slug, JObject raw)
+        {
             bool free = IsFreeModel(id, slug), byok = IsByokSlug(slug);
             int window = 0, maxOut = 0;
             bool exact = false, reasoning = false, temperature = false, pricingUnknown = true;
@@ -4771,7 +5085,7 @@ namespace Forge.SolidWorks
             JObject pricing = null;
             try
             {
-                var info = ProviderFactory.ModelInfo(slug, id);
+                var info = raw != null ? ProviderFactory.ModelInfo(slug, id, raw) : ProviderFactory.ModelInfo(slug, id);
                 if (info != null)
                 {
                     label = (string)info["label"] ?? label;
@@ -4784,7 +5098,7 @@ namespace Forge.SolidWorks
                     temperature = (bool?)info["temperatureSupported"] ?? ProviderFactory.SupportsTemperature(id);
                     pricingUnknown = (bool?)info["pricingUnknown"] ?? true;
                     var p = info["pricing"] as JObject;
-                    if (p != null) { pricing = (JObject)p.DeepClone(); pricingUnknown = false; }
+                    if (p != null) pricing = (JObject)p.DeepClone();
                 }
             }
             catch
@@ -4819,10 +5133,46 @@ namespace Forge.SolidWorks
 
         private static JArray ModelMetaArray(IEnumerable<string> ids, string slug)
         {
+            return ModelMetaArray(ids, slug, null);
+        }
+
+        private static JArray ModelMetaArray(IEnumerable<string> ids, string slug, System.Collections.Generic.IDictionary<string, JObject> rawMap)
+        {
             var metas = new JArray();
             if (ids == null) return metas;
-            foreach (var id in ids) metas.Add(ModelMeta(id ?? "", slug));
+            foreach (var id in ids)
+            {
+                string key = id ?? "";
+                JObject raw = null;
+                try { if (rawMap != null && rawMap.TryGetValue(key, out var hit)) raw = hit; } catch { raw = null; }
+                metas.Add(ModelMeta(key, slug, raw));
+            }
             return metas;
+        }
+
+        private static async Task<System.Collections.Generic.Dictionary<string, JObject>> FetchRawMapAsync(string baseUrl, string apiKey)
+        {
+            try
+            {
+                using (var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(15)))
+                {
+                    var root = await OpenAiCompatibleClient.FetchModelsRawAsync(baseUrl, apiKey ?? "", cts.Token).ConfigureAwait(false);
+                    var data = root != null ? root["data"] as JArray : null;
+                    if (data == null) return null;
+                    var map = new System.Collections.Generic.Dictionary<string, JObject>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var e in data)
+                    {
+                        string mid = null;
+                        try { mid = (string)e["id"]; } catch { mid = null; }
+                        if (string.IsNullOrWhiteSpace(mid)) continue;
+                        var obj = e as JObject;
+                        if (obj == null) continue;
+                        if (!map.ContainsKey(mid)) map.Add(mid, obj);
+                    }
+                    return map;
+                }
+            }
+            catch { return null; }
         }
 
         private static object WithModelMeta(object payload)
@@ -5022,6 +5372,63 @@ namespace Forge.SolidWorks
         }
 
         // Top-bar context dropdown: per-session context stats (+ legacy daily totals).
+        private async Task HandleUsageGoAsync()
+        {
+            string slug = null;
+            string provider = null;
+            string baseUrl = null;
+            try
+            {
+                var cfg = ReadForgeConfig();
+                try { provider = (string)cfg["provider"]; } catch { provider = null; }
+                try { baseUrl = (string)cfg["baseUrl"]; } catch { baseUrl = null; }
+                try { slug = PresetSlugFor(provider, baseUrl); } catch { slug = null; }
+            }
+            catch { }
+            try
+            {
+                string bu = (baseUrl ?? "").Trim();
+                if (!string.IsNullOrWhiteSpace(bu) && bu.ToLowerInvariant().Contains("/zen/go")) slug = "opencode-go";
+            }
+            catch { }
+            if (!string.Equals((slug ?? "").Trim(), "opencode-go", StringComparison.OrdinalIgnoreCase))
+            {
+                Send(new { type = "usageGo", error = "OpenCode Go usage is only available when the active provider is OpenCode Go — switch the provider to OpenCode Go to see rolling, weekly, and monthly meters." });
+                return;
+            }
+            string key = null;
+            try { key = StoredProviderKeyForSlug(slug, provider); } catch { key = null; }
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                Send(new { type = "usageGo", error = "No OpenCode Go key saved — save a key in Settings → API key (or set FORGE_PROVIDER_KEY_OPENCODE_GO), then try again." });
+                return;
+            }
+            try
+            {
+                using (var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(15)))
+                {
+                    var u = await OpenAiCompatibleClient.FetchOpenCodeGoUsageAsync(key, string.IsNullOrWhiteSpace(baseUrl) ? "https://opencode.ai/zen/go/v1" : baseUrl.Trim(), cts.Token).ConfigureAwait(false);
+                    var meters = new JObject();
+                    try { meters["rolling"] = u["rolling"] != null ? (JToken)u["rolling"].DeepClone() : JValue.CreateNull(); } catch { meters["rolling"] = JValue.CreateNull(); }
+                    try { meters["weekly"] = u["weekly"] != null ? (JToken)u["weekly"].DeepClone() : JValue.CreateNull(); } catch { meters["weekly"] = JValue.CreateNull(); }
+                    try { meters["monthly"] = u["monthly"] != null ? (JToken)u["monthly"].DeepClone() : JValue.CreateNull(); } catch { meters["monthly"] = JValue.CreateNull(); }
+                    bool rawAvailable = false;
+                    try { rawAvailable = (bool?)u["rawAvailable"] ?? false; } catch { rawAvailable = false; }
+                    Send(new { type = "usageGo", meters = meters, rawAvailable = rawAvailable });
+                }
+            }
+            catch (Exception ex)
+            {
+                string m = ex != null ? ex.Message : "";
+                if ((m ?? "").Contains("401") || (m ?? "").Contains("403") || (m ?? "").IndexOf("subscription", StringComparison.OrdinalIgnoreCase) >= 0)
+                    Send(new { type = "usageGo", error = "OpenCode Go subscription required or key not entitled — check the OpenCode Go key in Settings → API key, then try again." });
+                else if ((m ?? "").IndexOf("No API key", StringComparison.OrdinalIgnoreCase) >= 0 || (m ?? "").IndexOf("Missing", StringComparison.OrdinalIgnoreCase) >= 0)
+                    Send(new { type = "usageGo", error = "No OpenCode Go key saved — save a key in Settings → API key (or set FORGE_PROVIDER_KEY_OPENCODE_GO), then try again." });
+                else
+                    Send(new { type = "usageGo", error = "Couldn't load OpenCode Go usage (" + BoundDetail(m, 200) + ") — check the connection/key, then try again." });
+            }
+        }
+
         private void SendUsage()
         {
             try
