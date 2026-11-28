@@ -2,14 +2,32 @@
 
 ## Signed installer (recommended once released)
 
-The installer project (`installer/`, WiX v4) produces a single-file **Forge-Setup.msi** that registers the add-in for you — no `regasm`, no `.bat`. Once a release ships a **signed** MSI (SignPath OSS, free for open source), it installs on Smart App Control ON machines and the flow is: download from GitHub Releases → run → enable Forge in SolidWorks → Tools → Add-ins.
+The installer project (`installer/`, WiX v4) produces a single-file **Forge-Setup.msi** that registers the add-in for you — no `regasm`, no `.bat`. A **signed** MSI installs on Smart App Control ON machines and the flow is: download from GitHub Releases → run → enable Forge in SolidWorks → Tools → Add-ins.
 
-Status: the MSI project + build script (`installer/build-msi.ps1`) are in the repo. Build the MSI yourself on a machine with SolidWorks (needed for the interop assemblies), with an optional local cert:
+Status: the pipeline is ready but **no signed MSI exists in this repo**. Signing requires the project owner to configure SignPath (see `installer/signpath/README.md`); every MSI built locally here is unsigned.
+
+Local unsigned build (Smart App Control must be off — see the note under Install; on some Windows builds that switch is one-way and cannot be re-enabled without reinstalling Windows):
 
 ```
 powershell -ExecutionPolicy Bypass -File installer\build-msi.ps1           # unsigned
 powershell -ExecutionPolicy Bypass -File installer\build-msi.ps1 -Sign -CertThumbprint <sha1>
 ```
+
+Opt-in signing as a post-build step (needs the secrets documented in `installer/signpath/README.md`):
+
+```
+powershell -ExecutionPolicy Bypass -File installer\sign-with-signpath.ps1 -MsiPath dist\Forge-Setup-<version>.msi
+```
+
+The script writes `dist\Forge-Setup-<version>.signed.msi` and fails loudly when secrets are absent — it never labels an unsigned file as signed. Verify the result:
+
+```
+$sig = Get-AuthenticodeSignature -FilePath dist\Forge-Setup-<version>.signed.msi
+$sig.Status
+$sig.SignerCertificate.Subject
+```
+
+`Status` must report `Valid`. An unsigned local build reports `NotSigned` at the same command.
 
 ## From source (current path)
 
@@ -45,7 +63,7 @@ If your SolidWorks install is not under the default path, add `-p:SwInteropRoot=
 
 The Forge panel appears as a task pane inside SolidWorks.
 
-> **Panel never appears?** Windows Smart App Control blocks unsigned code from loading regardless of file-unblocking or Defender exclusions. If the panel is missing, Smart App Control must be off (Windows Security → App & browser control). On some builds that switch is one-way — it can't be re-enabled without reinstalling Windows.
+> **Panel never appears?** Windows Smart App Control blocks unsigned code from loading regardless of file-unblocking or Defender exclusions. A locally built (unsigned) MSI requires Smart App Control off (Windows Security → App & browser control); on some builds that switch is one-way — it can't be re-enabled without reinstalling Windows. Signed release MSIs (see above) are trusted with Smart App Control on.
 
 ## Configure a provider
 
@@ -64,9 +82,9 @@ Forge reads chat settings from `%APPDATA%\Forge\config.json`. **Provider API key
 | `opencode-go` | `FORGE_PROVIDER_KEY_OPENCODE_GO` (also `OPENCODE_API_KEY`, Kilo parity; key required → `OpenCode Go subscription required`, never `public`) |
 | `ollama` | — (local, no key) |
 
-`opencode` targets the OpenCode Zen gateway at `https://opencode.ai/zen/v1` using OpenAI-compatible chat completions. Scope: only the chat-completions model families (glm / kimi / minimax / deepseek / qwen / grok) are covered — zen's GPT-family models use `/v1/responses` and claude/qwen-plus use `/v1/messages`, which Forge's `opencode` preset does not implement. No key is required: the gateway serves zero-cost models with the `public` bearer token.
+`opencode` targets the OpenCode Zen gateway at `https://opencode.ai/zen/v1` using OpenAI-compatible chat completions. Scope: the chat-completions model families (`glm` / `kimi` / `minimax` / `deepseek` / `qwen` / `grok` / `nemotron` / `ling` / `mimo` / `big-pickle`, per `OpenCodeChatFamilies`) — zen's GPT-family models use `/v1/responses` and claude/qwen-plus use `/v1/messages`, which the `opencode` preset does not implement (those wire paths exist only on `opencode-go`). No key is required: the gateway serves zero-cost models with the `public` bearer token.
 
-`opencode-go` targets the sibling OpenCode Go subscription gateway at `https://opencode.ai/zen/go/v1`, also over OpenAI-compatible chat completions. It requires a paid subscription key (no `public` fallback) and sends a stable `x-opencode-session` header per conversation. Scope: chat-completions families only — glm / kimi / deepseek / mimo / longcat / hy / space-bunny / minimax (digit-suffixed ids such as `hy3-preview`, `hy4` and `minimax-m3` are grouped under their leading family). Out of scope: Responses-only `grok-*`, `gpt-*-luna`, `muse-spark-*`; Messages-only `qwen3.*-max/plus`, `jev`, `claude-*`, `gemini-*`. The subscription usage/limits endpoint is not implemented. Unknown Go model ids use the approximate 128k context-window fallback — no per-model window numbers are invented.
+`opencode-go` targets the sibling OpenCode Go subscription gateway at `https://opencode.ai/zen/go/v1` and routes per model id (`ProviderFactory.WirePathFor` / `ResolveFor`): chat-completions families (`glm` / `kimi` / `deepseek` / `mimo` / `longcat` / `hy` / `space-bunny` / `minimax`, per `OpenCodeGoChatFamilies` — digit-suffixed ids such as `hy3-preview`, `hy4` and `minimax-m3` are grouped under their leading family) stay on OpenAI-compatible chat; Responses-only `grok-*`, `gpt-*-luna`, `muse-spark-*` go through the `OpenAiResponsesClient` (POST `<base>/responses`, `IsResponsesModel`); Messages-only `qwen3.7`/`3.8` and `qwen3.*-max/plus`, `jev`, `claude-*`, `gemini-*` go through `AnthropicClient` pointed at the zen/go base URL (`IsGoMessagesModel`). The model picker lists all three families (the family filter admits any id whose wire path is not `chat`). A paid subscription key is still required (no `public` fallback — with no key Forge refuses with `OpenCode Go subscription required`), and `x-opencode-session` is now stamped per run (`ProviderOptions.SessionId` preferred over the static provider, so concurrent runs never share a session id). The subscription usage/limits endpoint is not implemented. Unknown Go model ids use the approximate 128k context-window fallback — no per-model window numbers are invented.
 
 Slugs normalize to uppercase with non-alphanumerics as underscores, so a custom slug like `openai-compatible` maps to `FORGE_PROVIDER_KEY_OPENAI_COMPATIBLE`.
 
@@ -110,13 +128,13 @@ Slugs normalize to uppercase with non-alphanumerics as underscores, so a custom 
 | `workStyle` | `"review-first"` or `"high-autonomy"` (default high-autonomy). `review-first` sets auto-approve master OFF; `high-autonomy` sets it ON. Both leave destructive gated. | Settings → Work style |
 | `reasoningEffort` | `none`, `low`, `medium`, `high`, `xhigh`, `max` (global); per-model override as `reasoningEffort_<modelKey>` | Model-picker effort row, Shift+Tab cycling |
 | `compactOn` | bool | Settings → Auto-compact |
-| `compactThresholdPct` | 10–95 % (default 60); clamped on both host and Settings input | Settings → Compact at |
-| `compactReservedTokens` | 0 = keep default `min(20 000, model max output)`; a positive value overrides | Settings → Reserved tokens |
-| `compactTailTurns` | 0 = keep default 2; 1–10 overrides (higher values clamped to 10) | Settings → Tail turns |
+| `compactThresholdPct` | 1–100 % (default 60); clamped on both host and Settings input; 0/negative keeps the default | Settings → Compact at |
+| `compactReservedTokens` | 0/negative = keep default `min(20 000, model max output)`; a positive value overrides | Settings → Reserved tokens |
+| `compactTailTurns` | 0/negative = keep default 2; 1–10 overrides (higher values clamped to 10) | Settings → Tail turns |
 | `customModels.<slug>` | `[{ "id": "...", "label": "..." }]` | Settings → Custom models |
 | `customProviders[]` | `{ "slug", "label", "kind": "openai-compatible"|"anthropic", "baseUrl", "headers": {...} }` | Settings → Custom providers |
 
-Custom-provider `headers` values are stored **as raw templates** in `config.json` (plain config values, not DPAPI secrets) and support `{env:VAR}`, `${VAR}` and `%VAR%` templating. `ParseProviderHeaders` keeps the template verbatim; `ExpandedProviderHeaders` → `ExpandEnvTokens` resolves `{env:VAR}` against the process environment **at request time** into `ProviderOptions.Headers` / `McpBuild.ProviderHeaders`. Unresolved tokens are left in place and reported. MCP server `headers`/`env` are likewise plain config values (no token expansion) in `mcp.json`. The base URL is checked against other custom providers and built-in presets, reserved built-in slugs are rejected, and at most 20 custom providers are allowed. Removing the active custom provider falls back to DeepSeek; its key and model ids are kept on disk.
+Custom-provider `headers` values are stored **as raw templates** in `config.json` (plain config values, not DPAPI secrets) and support `{env:VAR}`, `${VAR}` and `%VAR%` templating. `ParseProviderHeaders` keeps the template verbatim; `ExpandedProviderHeaders` → `ExpandEnvTokens` resolves `{env:VAR}` against the process environment **at request time** into `ProviderOptions.Headers` / `McpBuild.ProviderHeaders`. Unresolved tokens are left in place and reported. MCP server request `headers` in `mcp.json` are likewise plain config values but **do** expand the same three token forms at use time (`McpBridge.ExpandHeaderValue`, per request on both HTTP transports); stdio `env`/`cwd` pass through verbatim. The base URL is checked against other custom providers and built-in presets, reserved built-in slugs are rejected, and at most 20 custom providers are allowed. Removing the active custom provider falls back to DeepSeek; its key and model ids are kept on disk.
 
 ## Multi-part builds via the SolidWorks-MCP server (optional)
 
@@ -128,34 +146,38 @@ no extra setup beyond what the server needs:
 2. With SolidWorks open, run `uvx solidworks-mcp --selftest` once to verify your install.
 3. Ask Forge to build something multi-part — it starts the server on first use.
 
-Override the launch in `%APPDATA%\Forge\mcp.json`. Each `servers[]` entry takes `{name, type, command, args, env, cwd, url, headers, enabled, timeoutMs, startTimeoutMs, watchPaths, alwaysAllow, disabledTools}`; `type` defaults to `stdio`:
+Override the launch in `%APPDATA%\Forge\mcp.json`. Each `servers[]` entry takes `{name, type, command, args, env, cwd, url, headers, enabled, timeoutMs, startTimeoutMs, watchPaths, alwaysAllow, disabledTools, oauth:{clientId,authorizationUrl,tokenUrl,scope[],redirectPort}}`; `type` (`stdio` / `http` / `sse`) defaults to `stdio`:
 
 ```json
 {
   "servers": [
     { "name": "default", "type": "stdio", "command": "uvx", "args": ["solidworks-mcp"], "env": {}, "cwd": "", "enabled": true, "timeoutMs": 300000,
       "watchPaths": [], "alwaysAllow": [], "disabledTools": [] },
-    { "name": "remote", "type": "http", "url": "https://example.com/mcp", "headers": { "Authorization": "Bearer <token>" }, "enabled": true, "timeoutMs": 15000 }
+    { "name": "remote", "type": "http", "url": "https://example.com/mcp", "headers": { "Authorization": "Bearer <token>" }, "enabled": true, "timeoutMs": 15000 },
+    { "name": "legacy", "type": "sse", "url": "https://example.com/sse", "enabled": true,
+      "oauth": { "clientId": "<id>", "authorizationUrl": "https://example.com/authorize", "tokenUrl": "https://example.com/token", "scope": ["mcp"], "redirectPort": 53821 } }
   ]
 }
 ```
 
-- For `stdio`, `command` (+ `args`) launches the server; `env` adds environment variables and `cwd` sets the working directory.
-- For `type: "http"`, `url` is required and `headers` are sent on each request. Both JSON and SSE responses are accepted, and a `Mcp-Session-Id` returned by the server is echoed on later calls. Failed HTTP connections are re-handshaken on the next route.
-- Timeouts: `timeoutMs` is the per-call timeout in **milliseconds** — default **300000 ms (300 s) for stdio / 15000 ms (15 s) for HTTP**, with a **1 s minimum** in config. stdio keeps a long default because the first run can download the MCP package and the server may start slowly; remote HTTP stays short for Kilo parity (15 s). `startTimeoutMs` covers launch+handshake and follows `timeoutMs` when unset, but the initialize handshake is bumped to **60 s** whenever the configured value is ≤ 30 s (so a legacy 30 s config still gets a 60 s handshake). The Settings UI shows seconds. A separate catalog fetch is bounded to 60 s (`CatalogPerServerTimeoutMs`) so one dead server can't block the whole run.
+- For `stdio`, `command` (+ `args`) launches the server; `env` adds environment variables verbatim (no token expansion) and `cwd` sets the working directory.
+- For `type: "http"`, `url` is required and `headers` are sent on each request, with `{env:VAR}` / `${VAR}` / `%VAR%` tokens expanded at use time (`ExpandHeaderValue`). Both JSON and SSE responses are accepted, and a `Mcp-Session-Id` returned by the server is echoed on later calls. Failed HTTP connections are re-handshaken on the next route.
+- For `type: "sse"` (legacy SSE-only transport), `url` is the event-stream endpoint: the bridge opens a GET event stream, discovers the POST endpoint, then POSTs JSON-RPC to it. Header expansion and OAuth apply the same as `http`.
+- `oauth` enables per-server OAuth: `StartOAuthAsync` runs a PKCE flow through the system browser with a `127.0.0.1` loopback listener (default port 53821, overridable via `redirectPort`), stores the DPAPI-encrypted token in `%APPDATA%\Forge\mcp-oauth\` (never in `mcp.json`), injects it as a Bearer token per request with proactive refresh, and surfaces `none` / `configured` / `authenticated` / `expired` / `needs_auth` status with a Sign in / Sign out UI.
+- Timeouts: `timeoutMs` is the per-call timeout in **milliseconds** — default **300000 ms (300 s) for stdio / 15000 ms (15 s) for HTTP**, with a **1 s minimum** in config. Stdio keeps a long default because the first run can download the MCP package and the server may start slowly; remote HTTP stays short for Kilo parity (15 s). `startTimeoutMs` covers launch+handshake and follows `timeoutMs` when unset, but the initialize handshake is bumped to **60 s** whenever the configured value is ≤ 30 s (so a legacy 30 s config still gets a 60 s handshake). The Settings UI shows seconds. A separate catalog fetch is bounded to 60 s (`CatalogPerServerTimeoutMs`) so one dead server can't block the whole run.
 - `enabled: false` disables that server; multi-part builds will ask you to re-enable it. Routing is ordered failover across enabled servers.
-- `watchPaths` lists local paths that, when changed, auto-restart that server. `alwaysAllow` and `disabledTools` are per-server glob lists applied to tool names (qualified `{server}_{tool}` or bare); disabled tools are filtered from the catalog.
+- `watchPaths` lists local paths that, when changed, auto-restart that server (2 s poll by design — no native file watcher). `alwaysAllow` and `disabledTools` are per-server glob lists applied to tool names (qualified `{server}_{tool}` or bare); disabled tools are filtered from the catalog.
 - The legacy flat form (`{ "command": "uvx", "args": [...], ... }` with no `servers` key) auto-migrates in-memory to `servers[0]` named `"default"` (`McpBridge.LoadServers`); the `servers[]` form is written back on the next save.
 
-Settings → MCP servers exposes the ordered list with add/edit (`mcpAdd`/`mcpUpdate`), start/stop (`mcpStart`/`mcpStop`), enable/timeout (`mcpSet`), delete (`mcpRemove`) and a per-server log viewer (built from a bounded stdio stderr tail). Start/stop act immediately; enable/transport/timeout take effect on the next build. `/mcps` lists servers in chat and accepts `enable|disable|start|stop <name>` and `timeout <name> <secs>` (name omittable when only one server is configured).
+Settings → MCP servers exposes the ordered list with add/edit (`mcpAdd`/`mcpUpdate`), start/stop (`mcpStart`/`mcpStop`), enable/timeout (`mcpSet`), delete (`mcpRemove`), per-server Ping (`mcpPing` with an `rtt` badge), OAuth Sign in / Sign out (`mcpOAuthStart`/`mcpOAuthClear` with an auth-status badge), and a per-server log viewer (built from a bounded stdio stderr tail). Start/stop act immediately; enable/transport/timeout take effect on the next build. `/mcps` lists servers in chat and accepts `enable|disable|start|stop <name>` and `timeout <name> <secs>` (name omittable when only one server is configured).
 
-Tool names are namespaced `{server}_{tool}` for permission keys; calls resolve qualified name → bare name → glob for back-compat. A winning server's `initialize` instructions are injected into the agent system prompt (4 KB cap) and omitted when every tool of that server is denied. Three read-only tools — `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource` — expose MCP resources to the agent.
+Tool names are namespaced `{server}_{tool}` for permission keys; calls resolve qualified name → bare name → glob for back-compat. A winning server's `initialize` instructions are injected into the agent system prompt (4 KB cap) and omitted when every tool of that server is denied. Five read-only tools — `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`, `list_mcp_prompts`, `get_mcp_prompt` — expose MCP resources and prompts to the agent (all approval-gated, 8 KB result caps). When a server's tool list changes, the host forwards `mcpToolsChanged` and the panel shows a non-blocking toast ("the next run will use the new list").
 
 ### Project-scoped MCP config
 
 When a SolidWorks document is open, server edits are written per project to `%APPDATA%\Forge\mcp-projects\<hash>.json`, keyed by the active document's path (`ProjectKeyForAssembly(ActiveAssemblyPath())`); project entries are merged over the global `mcp.json` by server name. With no document open, edits go to the global file.
 
-Still non-goals: OAuth, the MCP marketplace, a standalone SSE-only transport, and MCP prompts (see `docs/KILO-PARITY.md`, "Known deltas / non-goals").
+Still non-goals: the MCP marketplace, and repo-local `.mcp.json` files (project scope is assembly-keyed instead — see `docs/KILO-PARITY.md`, "Known deltas / non-goals").
 
 ## Keyless mode
 
@@ -181,7 +203,7 @@ Sending while a run is active adds the message to a per-chat follow-up queue ins
 
 The `▲` pill shows the short model id (or `model` when none is set). Its popover has a search box, an effort row (`none`/`low`/`medium`/`high`/`xhigh`/`max`), the list, and a footer with a `Free only` filter, a count, and ↻ Refresh. Rows are grouped as pinned `Custom`, `🕘 Recent`, Favorites, then by vendor when several vendors are present; the list is capped (refine the search for more). Each row can show `Free` / `BYOK` badges; `ⓘ` opens a detail panel with context window (marked `~` when approximate), max output, capabilities, key type, and pricing — currently always **"pricing unknown"**. Star toggles a favorite (`forge_fav_models`); the last five picks go to `forge_recent_models`. Keyboard: Up/Down/Home/End move, Enter picks, Esc closes. Switching applies to the next run.
 
-OpenAI-compatible providers fetch a live list on Refresh. Anthropic-wire endpoints (the `anthropic` preset and custom providers with kind `anthropic`) have no model-list endpoint and report **one fixed model** — "One fixed model on this provider — nothing to load." Set the id in `config.json` or via a custom model entry.
+OpenAI-compatible providers fetch a live list on Refresh; for `opencode-go` the list includes the responses-only and messages-only families alongside chat families (admitted by `WirePathFor`). Anthropic-wire endpoints (the `anthropic` preset and custom providers with kind `anthropic`) have no model-list endpoint and report **one fixed model** — "One fixed model on this provider — nothing to load." Set the id in `config.json` or via a custom model entry.
 
 ### Enhance
 
@@ -199,7 +221,7 @@ The chat-history popover (`🕘` / `/history`) lists chats most-recent-first wit
 
 ### Transcript compaction
 
-`/compact` (aliases `/summarize`, `/smol`, `/condense`) folds older turns into a collapsed block; with a provider connected the host summarizes the folded text, otherwise a numbered titles digest is kept. Settings holds `Auto-compact`, `Compact at` (context-% threshold, default 60, clamped to 10–95 on both host and UI), `Reserved tokens` and `Tail turns`. A value of 0 for reserved tokens or tail turns means "keep the default" — reserved defaults to `min(20 000, the model's max output)` and tail turns to 2. The host fires once session context usage reaches that % of the model window and keeps the newest tail turns; unknown windows are approximate. The `Auto-compact` toggle disables it entirely. A 200-step runaway breaker caps agent loops regardless of approvals.
+`/compact` (aliases `/summarize`, `/smol`, `/condense`) folds older turns into a collapsed block; with a provider connected the host summarizes the folded text, otherwise a numbered titles digest is kept. Settings holds `Auto-compact`, `Compact at` (context-% threshold, default 60, clamped to 1–100 on both host and UI), `Reserved tokens` and `Tail turns`. A value of 0 (or negative) for the threshold keeps the current default (host falls back to stored config, then 60); 0/negative reserved tokens or tail turns likewise keep their defaults — reserved defaults to `min(20 000, the model's max output)` and tail turns to 2 (positive tail values clamp to 10). The host fires once session context usage reaches that % of the model window and keeps the newest tail turns; unknown windows are approximate. The `Auto-compact` toggle disables it entirely. A 200-step runaway breaker caps agent loops regardless of approvals.
 
 ### Top bar
 
@@ -211,7 +233,7 @@ The dispatcher (`slashRun`) supports exactly these commands (aliases in parenthe
 
 `/new` (`/clear`) · `/compact` (`/summarize`, `/smol`, `/condense`) · `/undo` · `/redo` (`/unrevert`) · `/regen` (`/regenerate`) · `/copy` (`/copy-session`) · `/export` · `/model` (`/models`) · `/provider` (`/connect`) · `/mcps` · `/settings` · `/history` (`/sessions`, `/resume`, `/continue`) · `/rename` · `/thinking` (`/toggle-thinking`) · `/status` · `/review` · `/about` · `/help` · `/allow` · `/deny` (`/undeny`) · `/auto-approve` (`/autoapprove`, `/approve-all`, `/approveall`) · `/diff` · `/timeline` · `/share` · `/init` · `/themes`
 
-Notes: `/export` downloads rendered turns as `forge-chat.md`; `/share` saves the transcript to a local file; `/diff` and `/timeline` are host-generated views; `/init` captures CAD context (below); `/themes` offers Dark/Light. `/continue` opens chat history — use the per-turn `⤷ continue` button to resume an interrupted run. Leading-`/` input never reaches the agent; unknown commands render the help text. There is no `/fork`, `/agents` or `/goal` slash command (forking is the per-turn button).
+Notes: `/export` downloads rendered turns as `forge-chat.md`; `/share` saves the transcript to a local file (local-only export — no remote link service; `revokeShare` is an unwired stub); `/diff` and `/timeline` are host-generated views; `/init` captures CAD context (below); `/themes` offers Dark/Light. `/continue` resumes the interrupted turn (falls back to opening chat history when nothing is interrupted) — the per-turn `⤷ continue` button does the same without opening history. Leading-`/` input never reaches the agent; unknown commands render the help text. There is no `/fork`, `/agents` or `/goal` slash command (forking is the per-turn button).
 
 Answers support rendered markdown, including fenced code blocks with a copy button.
 
@@ -231,9 +253,16 @@ You can also paste files directly into the composer (`pasteAttach` → `ApplyPas
 
 ### Settings cog
 
-`⚙` opens Settings: provider dropdown; API-key row (hidden for Ollama, shown only when no key is stored); **Custom providers** (slug/label/kind/URL, headers with `{env:VAR}`); **Custom models** per slug; **Auto-compact** with `Compact at`, `Reserved tokens`, `Tail turns`; **Work style** (Review-first / High-autonomy); **Reasoning** display mode (Expanded/Preview/Headline) plus the effort row in the model picker; **Auto-approve** (master + read/build/destructive, always-allowed and denied lists); **Per-tool policy** dropdowns (explicit entries beat glob rules); **MCP servers** (add/edit/start/stop/enable/timeout/log, with env/cwd/headers/watchPaths/alwaysAllow/disabledTools); **Notifications** toggle for OS toasts; theme toggle (follows OS by default); and a usage-data telemetry opt-in (default off).
+`⚙` opens Settings: provider dropdown; API-key row (hidden for Ollama, shown only when no key is stored); **Custom providers** (slug/label/kind/URL, headers with `{env:VAR}`); **Custom models** per slug; **Auto-compact** with `Compact at`, `Reserved tokens`, `Tail turns`; **Work style** (Review-first / High-autonomy); **Reasoning** display mode (Expanded/Preview/Headline) plus the effort row in the model picker; **Auto-approve** (master + read/build/destructive, always-allowed and denied lists); **Per-tool policy** dropdowns (explicit entries beat glob rules); **MCP servers** (add/edit/start/stop/enable/timeout/log/ping/OAuth sign-in, with env/cwd/headers/watchPaths/alwaysAllow/disabledTools/oauth + auth-status badge); **Notifications** toggle for OS toasts; theme toggle (follows OS by default); and a usage-analytics toggle labeled "Usage analytics (functional intent/Bifrost/provider calls still apply)" (default off).
 
-Traffic the telemetry toggle does not cover is functional, not analytics: hosted intent parsing and cross-tool sync (`/api/intent`, `/api/act`, Bifrost feed) send the current prompt plus coarse model context (component names, centroid positions, materials), and your own provider calls go to the endpoint you configured. The dev-only panel capture (`%TEMP%\forge-capture`, behind `FORGE_PANEL_CAPTURE=1`) never records API keys.
+The toggle label is literal: turning analytics off stops only anonymous masked usage events (`Telemetry`, opt-in, default off; "usage data = anonymous masked events only · off = nothing leaves this machine"). The remaining traffic is functional, not analytics: hosted intent parsing and cross-tool sync (`/api/intent`, `/api/act`, Bifrost feed) send the current prompt plus coarse model context (component names, centroid positions, materials), and your own provider calls go to the endpoint you configured. The dev-only panel capture (`%TEMP%\forge-capture`, behind `FORGE_PANEL_CAPTURE=1`) never records API keys.
+
+### CAD tool additions
+
+Two honestly-scoped additions beyond chat transport (no invented data):
+
+- **Body-level geometry census** — asking "what is this" with no face named returns a whole-document census (`DescribeGeometry.RunBodyCensus`): solid type, body count, volume, bounding-box extents, face-type counts (planar / cylindrical / conical / spherical / toroidal / other), and a hole count. Thread/tap classification is explicitly unavailable — the codebase has no thread/tap detection, so none is claimed.
+- **Flat-pattern DXF export** — `FlatDxf` exports each sheet-metal part via `ExportToDWG2` (geometry + bend-lines flag) into `<model-dir>\Forge-Flat-DXF`, verified on disk before counting. A `BEND` layer-table entry is ensured when the exporter omits it (`EnsureBendLayer` writes only the layer definition and never remaps entities), so **bend geometry stays on layer 0 in this build and the `BEND` layer exists but is empty**.
 
 ### Notifications
 

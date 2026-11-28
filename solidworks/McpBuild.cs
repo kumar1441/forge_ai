@@ -33,6 +33,7 @@ namespace Forge.SolidWorks
 
         public static string ReasoningEffort { get; set; }
         public static Dictionary<string,string> ProviderHeaders;
+        public static string SessionId;
 
         public static int AgentMsgCount { get; private set; }
         private static long _agentTokCount;
@@ -1377,7 +1378,7 @@ namespace Forge.SolidWorks
                     new ChatMessage { Role = "user", Content = oldJson }
                 };
                     var res = await client.CompleteAsync(msgs,
-                        new ProviderOptions { MaxTokens = 800, Model = ProviderFactory.SmallModelForCurrentConfig() ?? model, ReasoningEffort = reasoningEffort, Headers = ProviderHeaders },
+                        new ProviderOptions { MaxTokens = 800, Model = ProviderFactory.SmallModelForCurrentConfig() ?? model, ReasoningEffort = reasoningEffort, Headers = ProviderHeaders, SessionId = SessionId },
                         ct);
                 summary = res != null ? res.Text : null;
                 try { if (res != null) { IntentRate.Note(res.TokIn, res.TokOut); NoteCtx(sid, res.TokIn, res.TokOut); } } catch { }
@@ -1527,7 +1528,7 @@ namespace Forge.SolidWorks
             try
             {
                 // Single-read snapshot: the model for every call in this run (see AuthorPlan).
-                client = ProviderFactory.Resolve(out planModel);
+                client = ForgePanel.ResolveRunClient(out planModel);
                 if (client == null) return outcome; // keyless: fall through to the existing refusal
             }
             catch { return outcome; }
@@ -1690,7 +1691,7 @@ namespace Forge.SolidWorks
             {
                 // Single-read snapshot: every turn in this run uses one model (no mix-and-match
                 // when the picker changes mid-run). The 2000-char history cap bounds a pasted blob.
-                client = ProviderFactory.Resolve(out modelSnapshot);
+                client = ForgePanel.ResolveRunClient(out modelSnapshot);
                 if (client == null) return outcome;
             }
             catch { return outcome; }
@@ -1771,7 +1772,7 @@ namespace Forge.SolidWorks
             SaveSession(sid);
             await CompactHistoryIfNeeded(client, sid, model, ct, effort);
 
-            var opts = new ProviderOptions { MaxTokens = 16000, Model = model, ToolsJson = toolsJson, ToolChoice = "auto", ReasoningEffort = effort, Headers = ProviderHeaders };
+            var opts = new ProviderOptions { MaxTokens = 16000, Model = model, ToolsJson = toolsJson, ToolChoice = "auto", ReasoningEffort = effort, Headers = ProviderHeaders, SessionId = SessionId };
             var log = new List<string>();
             int executed = 0;
             int succeeded = 0; // tool calls that returned Ok: the success line reports these, never attempts
@@ -2020,12 +2021,16 @@ namespace Forge.SolidWorks
         private const string ResourceToolList = "list_mcp_resources";
         private const string ResourceToolTemplates = "list_mcp_resource_templates";
         private const string ResourceToolRead = "read_mcp_resource";
+        private const string PromptToolList = "list_mcp_prompts";
+        private const string PromptToolGet = "get_mcp_prompt";
 
         private static bool IsResourceTool(string name)
         {
             return string.Equals(name, ResourceToolList, StringComparison.OrdinalIgnoreCase)
                 || string.Equals(name, ResourceToolTemplates, StringComparison.OrdinalIgnoreCase)
-                || string.Equals(name, ResourceToolRead, StringComparison.OrdinalIgnoreCase);
+                || string.Equals(name, ResourceToolRead, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, PromptToolList, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, PromptToolGet, StringComparison.OrdinalIgnoreCase);
         }
 
         private static JObject ResourceToolSchema(string name, bool needsUri)
@@ -2051,12 +2056,36 @@ namespace Forge.SolidWorks
             };
         }
 
+        private static JObject PromptToolSchema(string name, bool needsName)
+        {
+            var props = new JObject
+            {
+                ["server"] = new JObject { ["type"] = "string", ["description"] = "MCP server name; omit to use the current route winner." }
+            };
+            if (needsName)
+                props["name"] = new JObject { ["type"] = "string", ["description"] = "Prompt name from list_mcp_prompts." };
+            props["arguments"] = new JObject { ["type"] = "object", ["description"] = "Optional prompt arguments object." };
+            var schema = new JObject { ["type"] = "object", ["properties"] = props };
+            if (needsName) schema["required"] = new JArray("name");
+            string desc = needsName
+                ? "Render one MCP prompt by name on a connected server (read-only, external)."
+                : "List MCP prompts exposed by a connected server (read-only, external).";
+            return new JObject
+            {
+                ["name"] = name,
+                ["description"] = desc,
+                ["inputSchema"] = schema
+            };
+        }
+
         private static void AppendResourceCatalogTools(JArray tools)
         {
             if (tools == null) return;
             tools.Add(ResourceToolSchema(ResourceToolList, false));
             tools.Add(ResourceToolSchema(ResourceToolTemplates, false));
             tools.Add(ResourceToolSchema(ResourceToolRead, true));
+            tools.Add(PromptToolSchema(PromptToolList, false));
+            tools.Add(PromptToolSchema(PromptToolGet, true));
         }
 
         private static string WinnerFromRoute(object route)
@@ -2107,9 +2136,22 @@ namespace Forge.SolidWorks
                     string text = await McpBridge.ReadResourceAsync(server, uri, ct).ConfigureAwait(false);
                     return new McpBridge.ToolResult { Ok = true, Text = string.IsNullOrEmpty(text) ? "(empty resource)" : text };
                 }
-                JArray arr = string.Equals(tool, ResourceToolTemplates, StringComparison.OrdinalIgnoreCase)
+                if (string.Equals(tool, PromptToolGet, StringComparison.OrdinalIgnoreCase))
+                {
+                    string pname = "";
+                    try { pname = (string)args["name"]; } catch { pname = ""; }
+                    if (string.IsNullOrWhiteSpace(pname))
+                        return new McpBridge.ToolResult { Ok = false, Text = "get_mcp_prompt needs a 'name' argument from list_mcp_prompts." };
+                    JObject pargs = null;
+                    try { pargs = args["arguments"] as JObject; } catch { pargs = null; }
+                    string ptext = await McpBridge.GetPromptAsync(server, pname, pargs ?? new JObject(), ct).ConfigureAwait(false);
+                    return new McpBridge.ToolResult { Ok = true, Text = string.IsNullOrEmpty(ptext) ? "(empty prompt)" : ptext };
+                }
+                JArray arr = string.Equals(tool, PromptToolList, StringComparison.OrdinalIgnoreCase)
+                    ? await McpBridge.ListPromptsAsync(server, ct).ConfigureAwait(false)
+                    : (string.Equals(tool, ResourceToolTemplates, StringComparison.OrdinalIgnoreCase)
                     ? await McpBridge.ListResourceTemplatesAsync(server, ct).ConfigureAwait(false)
-                    : await McpBridge.ListResourcesAsync(server, ct).ConfigureAwait(false);
+                    : await McpBridge.ListResourcesAsync(server, ct).ConfigureAwait(false));
                 string json = arr != null ? arr.ToString(Newtonsoft.Json.Formatting.None) : "[]";
                 if (json.Length > 8000) json = json.Substring(0, 8000) + "…(truncated)";
                 return new McpBridge.ToolResult { Ok = true, Text = "Server '" + server + "': " + json };
@@ -2275,7 +2317,7 @@ namespace Forge.SolidWorks
             // Verified live: capped calls complete; uncapped hang past the 10-minute timeout.
             // Model is the run's snapshot (caller's Resolve), never a fresh CurrentModel read.
             // No Temperature: provider default, like Kilo (temp only forced for enhance rewrites).
-            var opts = new ProviderOptions { MaxTokens = 32000, Model = model, ReasoningEffort = reasoningEffort, Headers = ProviderHeaders };
+            var opts = new ProviderOptions { MaxTokens = 32000, Model = model, ReasoningEffort = reasoningEffort, Headers = ProviderHeaders, SessionId = SessionId };
             // The intent is untrusted data (framed as such below, dims verbatim — even inch
             // marks survive); the 2000-char cap keeps a pasted blob from becoming a token blowup.
             string safe = (intent ?? "").Trim();

@@ -54,11 +54,15 @@ namespace Forge.Providers
         // zen/go base URL: chat/completions (unary + streaming). Other gateways are untouched.
         // TryAddWithoutValidation is deliberate — User-Agent / custom headers can be restricted
         // on Framework HttpClient; a refused header must never fail the request.
-        private static void ApplyZenGoHeaders(HttpRequestMessage req, string url)
+        private static void ApplyZenGoHeaders(HttpRequestMessage req, string url, ProviderOptions opts)
         {
             if (string.IsNullOrEmpty(url) || url.IndexOf("/zen/go", StringComparison.OrdinalIgnoreCase) < 0) return;
             string sid = null;
-            try { sid = SessionIdProvider != null ? SessionIdProvider() : null; } catch { sid = null; }
+            if (opts != null && !string.IsNullOrWhiteSpace(opts.SessionId)) sid = opts.SessionId;
+            if (string.IsNullOrWhiteSpace(sid))
+            {
+                try { sid = SessionIdProvider != null ? SessionIdProvider() : null; } catch { sid = null; }
+            }
             if (string.IsNullOrWhiteSpace(sid)) sid = FallbackSessionId;
             req.Headers.TryAddWithoutValidation("x-opencode-session", sid);
             req.Headers.TryAddWithoutValidation("User-Agent", "Forge/1.0 (+SolidWorks add-in)");
@@ -104,7 +108,7 @@ namespace Forge.Providers
                 {
                     if (!string.IsNullOrEmpty(_apiKey))
                         req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + _apiKey);
-                    ApplyZenGoHeaders(req, url);
+                    ApplyZenGoHeaders(req, url, opts);
                     ApplyCustomHeaders(req, opts);
                     req.Content = new StringContent(body, Encoding.UTF8, "application/json");
 
@@ -306,7 +310,7 @@ namespace Forge.Providers
                 catch (Exception ex) { throw new ProviderException("Provider address looks wrong (bad base URL \"" + url + "\") — check the provider URL in settings, then resend: " + Truncate(ex.Message), ex); }
                 if (!string.IsNullOrEmpty(_apiKey))
                     req0.Headers.TryAddWithoutValidation("Authorization", "Bearer " + _apiKey);
-                ApplyZenGoHeaders(req0, url);
+                ApplyZenGoHeaders(req0, url, opts);
                 ApplyCustomHeaders(req0, opts);
                 req0.Content = new StringContent(body, Encoding.UTF8, "application/json");
                 try { resp = await Http.SendAsync(req0, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false); }

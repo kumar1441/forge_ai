@@ -468,7 +468,7 @@ namespace Forge.SolidWorks
                     { Send(new { type = "error", message = "Nothing to compact yet — send a prompt first, then /compact." }); return; }
                     IProviderClient c2;
                     string compactModel;
-                    try { c2 = ProviderFactory.Resolve(out compactModel); } catch { c2 = null; compactModel = null; }
+                    try { c2 = ResolveRunClient(out compactModel); } catch { c2 = null; compactModel = null; }
                     if (c2 == null)
                     {
                         string cslug = null;
@@ -503,7 +503,7 @@ namespace Forge.SolidWorks
                         string compactUseModel = ProviderFactory.SmallModelForCurrentConfig() ?? compactModel;
                         try { McpBuild.ReasoningEffort = ConfiguredReasoningEffortFor(compactUseModel); } catch { }
                         var res = await c2.CompleteAsync(msgs,
-                            new ProviderOptions { MaxTokens = 1000, Model = compactUseModel, ReasoningEffort = ConfiguredReasoningEffort(compactUseModel), Headers = ExpandedHeaderDictionary(CurrentProviderSlug()) },
+                            new ProviderOptions { MaxTokens = 1000, Model = compactUseModel, ReasoningEffort = ConfiguredReasoningEffort(compactUseModel), Headers = ExpandedHeaderDictionary(CurrentProviderSlug()), SessionId = ActiveSidForProvider() },
                             compactCt);
                         if (myRun != _currentRunId) return; // superseded while awaiting: the new run owns the panel
                         string s = res != null ? res.Text : null;
@@ -544,7 +544,7 @@ namespace Forge.SolidWorks
                             if (at <= 0) { try { at = McpBuild.CompactAt; } catch { at = 0; } }
                         }
                         if (at <= 0) at = 60;
-                        if (at < 10) at = 10; if (at > 95) at = 95;
+                        if (at < 1) at = 1; if (at > 100) at = 100;
                         int reserve = CompactReservedTokens, tail = CompactTailTurns;
                         try { var rv = msg.reservedTokens; if (rv != null) { int v = Convert.ToInt32((object)rv); if (v > 0) reserve = v; } } catch { }
                         try { var tv = msg.tailTurns; if (tv != null) { int v = Convert.ToInt32((object)tv); if (v > 0) tail = v; } } catch { }
@@ -856,47 +856,6 @@ namespace Forge.SolidWorks
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't load chat history (" + BoundDetail(ex.Message, 200) + ") — try again." }); }
                 }
-                else if (action == "mcpStatus")
-                {
-                    try
-                    {
-                        Newtonsoft.Json.Linq.JArray servers = new Newtonsoft.Json.Linq.JArray();
-                        try { servers = McpBridge.DescribeAll(); } catch { }
-                        var lines = new System.Collections.Generic.List<string>();
-                        try
-                        {
-                            foreach (var t in servers)
-                            {
-                                try
-                                {
-                                    var o = t as Newtonsoft.Json.Linq.JObject;
-                                    if (o == null) continue;
-                                    string nm = (string)o["name"] ?? "default";
-                                    bool en = false; try { en = (bool)o["enabled"]; } catch { en = true; }
-                                    bool rn = false; try { rn = (bool)o["running"]; } catch { }
-                                    string ty = (string)o["type"]; if (string.IsNullOrWhiteSpace(ty)) ty = "stdio";
-                                    string url = (string)o["url"] ?? "";
-                                    string cc = (string)o["command"] ?? "uvx";
-                                    string aa = (string)o["args"] ?? "";
-                                    int tm = 300000; try { tm = (int)o["timeoutMs"]; } catch { }
-                                    if (tm < McpMinTimeoutMs) tm = 300000;
-                                    string target = ty == "http" ? url : (cc + " " + aa).Trim();
-                                    if (string.IsNullOrWhiteSpace(target)) target = "(no command/url)";
-                                    string extra = !string.IsNullOrWhiteSpace(url) && ty != "http" ? " url=" + url : "";
-                                    string state = rn ? "running" : (en ? "not running (starts on next build)" : "disabled in Settings");
-                                    lines.Add(nm + " [" + ty + "]: " + state + " — `" + target + "`" + extra + " (" + (tm / 1000) + "s timeout)");
-                                }
-                                catch { }
-                            }
-                        }
-                        catch { }
-                        string answer = lines.Count > 0
-                            ? "MCP servers (" + lines.Count + "):\n" + string.Join("\n", lines.ToArray()) + "\nToggle + timeout live under Settings → MCP server."
-                            : "No MCP servers are configured — add one under Settings → MCP server first.";
-                        Send(new { type = "answer", answer = answer, servers = servers });
-                    }
-                    catch (Exception ex) { Send(new { type = "error", message = "Couldn't read MCP status (" + BoundDetail(ex.Message, 200) + ") — check Settings → MCP server, then try again." }); }
-                }
                 else if (action == "mcpConfig")
                 {
                     try
@@ -905,7 +864,7 @@ namespace Forge.SolidWorks
                         McpBridge.DescribeFull(out cmd, out args, out enabled, out tmo);
                         bool running = false;
                         try { running = McpBridge.IsRunning; } catch { }
-                        Send(new { type = "mcpConfig", enabled = enabled, timeoutMs = tmo, command = cmd, args = args, running = running, servers = McpBridge.DescribeAll() });
+                        Send(new { type = "mcpConfig", enabled = enabled, timeoutMs = tmo, command = cmd, args = args, running = running, servers = AttachMcpOAuthStatus(McpBridge.DescribeAll()) });
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't read MCP config (" + BoundDetail(ex.Message, 200) + ") — check Settings → MCP server, then try again." }); }
                 }
@@ -1033,6 +992,54 @@ namespace Forge.SolidWorks
                     }
                     catch (Exception ex) { Send(new { type = "error", message = "Couldn't stop the MCP server (" + BoundDetail(ex.Message, 200) + ") — it may already be stopped." }); }
                 }
+                else if (action == "mcpOAuthStart")
+                {
+                    string oaName = null;
+                    try { oaName = (string)msg.name; } catch { }
+                    string resolved, rerr;
+                    if (!TryResolveServerName(oaName, out resolved, out rerr))
+                    { Send(new { type = "error", message = rerr }); }
+                    else
+                    {
+                        string st = "none";
+                        try
+                        {
+                            bool ok = false;
+                            using (var oats = new System.Threading.CancellationTokenSource(System.TimeSpan.FromMinutes(6)))
+                            { try { ok = await McpBridge.StartOAuthAsync(resolved, oats.Token); } catch (System.OperationCanceledException) { ok = false; } }
+                            try { st = McpBridge.OAuthStatus(resolved) ?? "none"; } catch { st = "none"; }
+                            Send(new { type = "mcpAuthStatus", name = resolved, status = st, needsAuth = McpBridge.IsOAuthRequired(resolved) });
+                            if (ok) SendMcpConfig();
+                            else Send(new { type = "error", message = "OAuth sign-in for '" + resolved + "' did not complete (status: " + st + ") — run Sign in again and approve the browser request." });
+                        }
+                        catch (System.OperationCanceledException) { Send(new { type = "error", message = "OAuth sign-in for '" + resolved + "' stopped — resend to try again." }); }
+                        catch (System.Exception ex)
+                        {
+                            try { st = McpBridge.OAuthStatus(resolved) ?? "none"; } catch { st = "none"; }
+                            Send(new { type = "mcpAuthStatus", name = resolved, status = st, needsAuth = McpBridge.IsOAuthRequired(resolved) });
+                            Send(new { type = "error", message = "Couldn't sign in '" + resolved + "' (" + BoundDetail(ex.Message, 200) + ") — check the oauth block in Settings → MCP server, then try again." });
+                        }
+                    }
+                }
+                else if (action == "mcpOAuthClear")
+                {
+                    string ocName = null;
+                    try { ocName = (string)msg.name; } catch { }
+                    string resolved, rerr;
+                    if (!TryResolveServerName(ocName, out resolved, out rerr))
+                    { Send(new { type = "error", message = rerr }); }
+                    else
+                    {
+                        try { McpBridge.ClearOAuthToken(resolved); } catch { }
+                        string st = "none";
+                        try { st = McpBridge.OAuthStatus(resolved) ?? "none"; } catch { st = "none"; }
+                        bool need = false;
+                        try { need = McpBridge.IsOAuthRequired(resolved); } catch { need = false; }
+                        Send(new { type = "mcpAuthStatus", name = resolved, status = st, needsAuth = need });
+                        SendMcpConfig();
+                        Send(new { type = "answer", answer = "MCP server '" + resolved + "' signed out — run Sign in before the next build." });
+                    }
+                }
                 else if (action == "mcpLog")
                 {
                     string lname = null;
@@ -1040,6 +1047,25 @@ namespace Forge.SolidWorks
                     string text = "";
                     try { text = McpBridge.ServerLog(string.IsNullOrWhiteSpace(lname) ? null : lname.Trim()) ?? ""; } catch { }
                     Send(new { type = "mcpLog", name = lname, text });
+                }
+                else if (action == "mcpPing")
+                {
+                    string pingName = null;
+                    try { pingName = (string)msg.name; } catch { }
+                    try
+                    {
+                        string target = string.IsNullOrWhiteSpace(pingName) ? null : pingName.Trim();
+                        var pingWatch = System.Diagnostics.Stopwatch.StartNew();
+                        bool pingOk = false;
+                        try { pingOk = await McpBridge.PingAsync(target, System.Threading.CancellationToken.None); } catch { pingOk = false; }
+                        pingWatch.Stop();
+                        int pingRtt = (int)pingWatch.ElapsedMilliseconds;
+                        string pingDisplay = target;
+                        try { string pr, pe; if (TryResolveServerName(target, out pr, out pe)) pingDisplay = pr; } catch { }
+                        if (pingOk) Send(new { type = "mcpPing", name = pingDisplay, ok = true, rttMs = pingRtt });
+                        else Send(new { type = "mcpPing", name = pingDisplay, ok = false, rttMs = pingRtt, hint = "No reply — start the server in Settings → MCP servers, then ping again." });
+                    }
+                    catch { try { Send(new { type = "mcpPing", name = pingName, ok = false, rttMs = 0, hint = "Ping failed before a reply — check Settings → MCP servers, then try again." }); } catch { } }
                 }
                 else if (action == "reset")   // rehearsal/recording: wipe the panel + every pending thread for a clean take
                 {
@@ -1451,6 +1477,32 @@ namespace Forge.SolidWorks
         }
 
         /// <summary>Push the full MCP server list to the panel (legacy fields kept for back-compat).</summary>
+        private static Newtonsoft.Json.Linq.JArray AttachMcpOAuthStatus(Newtonsoft.Json.Linq.JArray servers)
+        {
+            try
+            {
+                if (servers != null) foreach (var t in servers)
+                {
+                    try
+                    {
+                        var o = t as Newtonsoft.Json.Linq.JObject;
+                        if (o == null) continue;
+                        string nm = (string)o["name"];
+                        if (string.IsNullOrWhiteSpace(nm)) nm = "default";
+                        string st = "none";
+                        try { st = McpBridge.OAuthStatus(nm) ?? "none"; } catch { st = "none"; }
+                        bool need = false;
+                        try { need = McpBridge.IsOAuthRequired(nm); } catch { need = false; }
+                        o["authStatus"] = st;
+                        o["needsAuth"] = need;
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return servers;
+        }
+
         private void SendMcpConfig()
         {
             string cmd, args; bool enabled; int tmo;
@@ -1459,6 +1511,7 @@ namespace Forge.SolidWorks
             try { running = McpBridge.IsRunning; } catch { }
             Newtonsoft.Json.Linq.JArray servers = new Newtonsoft.Json.Linq.JArray();
             try { servers = McpBridge.DescribeAll(); } catch { }
+            try { AttachMcpOAuthStatus(servers); } catch { }
             Send(new { type = "mcpConfig", enabled = enabled, timeoutMs = tmo, command = cmd, args = args, running = running, servers = servers });
         }
 
@@ -1623,15 +1676,25 @@ namespace Forge.SolidWorks
                 if (McpHas(msg, "type"))
                 {
                     s = McpStr(msg, "type");
-                    if (string.IsNullOrWhiteSpace(s)) return "MCP server 'type' must be 'stdio' or 'http'.";
+                    if (string.IsNullOrWhiteSpace(s)) return "MCP server 'type' must be 'stdio', 'http', or 'sse'.";
                     s = s.Trim().ToLowerInvariant();
-                    if (s != "stdio" && s != "http") return "MCP server 'type' must be 'stdio' or 'http'.";
+                    if (s != "stdio" && s != "http" && s != "sse") return "MCP server 'type' must be 'stdio', 'http', or 'sse'.";
                     entry.Type = s;
                 }
                 else if (createIfMissing) entry.Type = "stdio";
 
-                if (McpHas(msg, "url")) entry.Url = McpStr(msg, "url") ?? "";
-                if (McpHas(msg, "cwd")) entry.Cwd = McpStr(msg, "cwd") ?? "";
+                if (McpHas(msg, "url"))
+                {
+                    s = McpStr(msg, "url");
+                    if (createIfMissing) entry.Url = s ?? "";
+                    else if (!string.IsNullOrWhiteSpace(s)) entry.Url = s.Trim();
+                }
+                if (McpHas(msg, "cwd"))
+                {
+                    s = McpStr(msg, "cwd");
+                    if (createIfMissing) entry.Cwd = s ?? "";
+                    else if (!string.IsNullOrWhiteSpace(s)) entry.Cwd = s.Trim();
+                }
 
                 System.Collections.Generic.Dictionary<string, string> map;
                 Newtonsoft.Json.Linq.JToken tok;
@@ -1687,7 +1750,9 @@ namespace Forge.SolidWorks
 
                 string ty = entry.Type;
                 if (string.IsNullOrWhiteSpace(ty)) ty = "stdio";
-                if (string.Equals(ty, "http", System.StringComparison.OrdinalIgnoreCase))
+                bool tyRemote = string.Equals(ty, "http", System.StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(ty, "sse", System.StringComparison.OrdinalIgnoreCase);
+                if (tyRemote)
                 {
                     if (string.IsNullOrWhiteSpace(entry.Url)) return "HTTP MCP servers need a url — set \"url\" in the server entry and try again.";
                 }
@@ -1697,6 +1762,98 @@ namespace Forge.SolidWorks
                 if (McpHas(msg, "watchPaths")) entry.WatchPaths = McpStringArray(McpTok(msg, "watchPaths"));
                 if (McpHas(msg, "alwaysAllow")) entry.AlwaysAllow = McpStringArray(McpTok(msg, "alwaysAllow"));
                 if (McpHas(msg, "disabledTools")) entry.DisabledTools = McpStringArray(McpTok(msg, "disabledTools"));
+                if (McpHas(msg, "oauth"))
+                {
+                    tok = McpTok(msg, "oauth");
+                    if (tok == null || tok.Type != Newtonsoft.Json.Linq.JTokenType.Object)
+                    {
+                        if (tok != null && tok.Type != Newtonsoft.Json.Linq.JTokenType.Null)
+                            return "MCP 'oauth' must be an object with clientId, authorizationUrl, and tokenUrl.";
+                        entry.OAuth = null;
+                    }
+                    else
+                    {
+                        var oo = (Newtonsoft.Json.Linq.JObject)tok;
+                        bool hasOAuthUpdate = false;
+                        try
+                        {
+                            Newtonsoft.Json.Linq.JToken ht;
+                            ht = oo["clientId"];
+                            if (ht != null && ht.Type == Newtonsoft.Json.Linq.JTokenType.String && !string.IsNullOrWhiteSpace((string)ht)) hasOAuthUpdate = true;
+                            ht = oo["authorizationUrl"];
+                            if (ht != null && ht.Type == Newtonsoft.Json.Linq.JTokenType.String && !string.IsNullOrWhiteSpace((string)ht)) hasOAuthUpdate = true;
+                            ht = oo["tokenUrl"];
+                            if (ht != null && ht.Type == Newtonsoft.Json.Linq.JTokenType.String && !string.IsNullOrWhiteSpace((string)ht)) hasOAuthUpdate = true;
+                            ht = oo["scope"];
+                            if (ht != null && ht.Type != Newtonsoft.Json.Linq.JTokenType.Null)
+                            {
+                                if (ht.Type == Newtonsoft.Json.Linq.JTokenType.Array)
+                                {
+                                    foreach (var e in (Newtonsoft.Json.Linq.JArray)ht)
+                                    {
+                                        string sv = null;
+                                        try { sv = (string)e; } catch { sv = null; }
+                                        if (!string.IsNullOrWhiteSpace(sv)) { hasOAuthUpdate = true; break; }
+                                    }
+                                }
+                                else hasOAuthUpdate = true;
+                            }
+                            ht = oo["redirectPort"];
+                            if (ht != null && ht.Type != Newtonsoft.Json.Linq.JTokenType.Null) hasOAuthUpdate = true;
+                        }
+                        catch { }
+                        if (createIfMissing || hasOAuthUpdate)
+                        {
+                            var oc = entry.OAuth ?? new McpBridge.McpServerConfig.McpOAuthConfig();
+                            Newtonsoft.Json.Linq.JToken of;
+                            of = oo["clientId"];
+                            if (of != null && of.Type == Newtonsoft.Json.Linq.JTokenType.String) oc.ClientId = ((string)of ?? "").Trim();
+                            of = oo["authorizationUrl"];
+                            if (of != null && of.Type == Newtonsoft.Json.Linq.JTokenType.String) oc.AuthorizationUrl = ((string)of ?? "").Trim();
+                            of = oo["tokenUrl"];
+                            if (of != null && of.Type == Newtonsoft.Json.Linq.JTokenType.String) oc.TokenUrl = ((string)of ?? "").Trim();
+                            of = oo["scope"];
+                            if (of != null)
+                            {
+                                if (of.Type == Newtonsoft.Json.Linq.JTokenType.Array)
+                                {
+                                    var sc = new System.Collections.Generic.List<string>();
+                                    foreach (var e in (Newtonsoft.Json.Linq.JArray)of)
+                                    {
+                                        string sv = null;
+                                        try { sv = (string)e; } catch { sv = null; }
+                                        if (!string.IsNullOrWhiteSpace(sv) && sc.Count < 200) sc.Add(sv.Trim());
+                                    }
+                                    oc.Scope = sc.ToArray();
+                                }
+                                else if (of.Type == Newtonsoft.Json.Linq.JTokenType.String)
+                                {
+                                    string raw = ((string)of ?? "").Trim();
+                                    oc.Scope = raw.Length == 0 ? new string[0]
+                                        : raw.Split(new char[] { ' ', '\t', '\r', '\n' }, System.StringSplitOptions.RemoveEmptyEntries);
+                                }
+                                else return "MCP 'oauth.scope' must be an array of strings.";
+                            }
+                            of = oo["redirectPort"];
+                            if (of != null && of.Type != Newtonsoft.Json.Linq.JTokenType.Null)
+                            {
+                                int rp = 0;
+                                try { rp = System.Convert.ToInt32(of.ToString()); }
+                                catch { return "MCP 'oauth.redirectPort' must be a port number (1-65535)."; }
+                                if (rp < 1 || rp > 65535) return "MCP 'oauth.redirectPort' must be a port number (1-65535).";
+                                oc.RedirectPort = rp;
+                            }
+                            entry.OAuth = oc;
+                        }
+                    }
+                }
+                if (entry.OAuth != null && tyRemote)
+                {
+                    if (string.IsNullOrWhiteSpace(entry.OAuth.ClientId)
+                        || string.IsNullOrWhiteSpace(entry.OAuth.AuthorizationUrl)
+                        || string.IsNullOrWhiteSpace(entry.OAuth.TokenUrl))
+                        return "MCP servers of type 'http'/'sse' with OAuth need clientId, authorizationUrl, and tokenUrl — set all three in the oauth block, then try again.";
+                }
                 if (scoped) McpBridge.SaveServersForProject(scopeKey, list);
                 else McpBridge.SaveServers(list);
                 return null;
@@ -1988,7 +2145,38 @@ namespace Forge.SolidWorks
             });
         }
 
-        private static string SwVer() { try { return SwAddin.SwApp.RevisionNumber(); } catch { return null; } }
+        private static string SwVer() { try { return SwAddin.SwApp.RevisionNumber(); }             catch { return null; }
+        }
+
+        private static string ActiveSidForProvider()
+        {
+            try { if (!string.IsNullOrWhiteSpace(_activeRunSid)) return _activeRunSid; } catch { }
+            try { if (!string.IsNullOrWhiteSpace(_lastRunSid)) return _lastRunSid; } catch { }
+            return null;
+        }
+
+        private static void SetMcpBuildSessionId(string sid)
+        {
+            try
+            {
+                var f = typeof(McpBuild).GetField("SessionId", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                if (f == null || f.FieldType != typeof(string)) return;
+                try { f.SetValue(null, sid); } catch { }
+            }
+            catch { }
+        }
+
+        private static string GetMcpBuildSessionId()
+        {
+            try
+            {
+                var f = typeof(McpBuild).GetField("SessionId", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                if (f == null || f.FieldType != typeof(string)) return null;
+                try { return f.GetValue(null) as string; } catch { }
+            }
+            catch { }
+            return null;
+        }
 
         // ---- BYOK wiring (README "Get a free key" + ProviderFactory): writes %APPDATA%\Forge\config.json
         //      {provider, baseUrl, model} â€” the API key is NEVER in the file â€” and stores the key via
@@ -2685,6 +2873,35 @@ namespace Forge.SolidWorks
             return StoredProviderKey(pid);
         }
 
+        internal static IProviderClient ResolveRunClient(out string model)
+        {
+            model = null;
+            try
+            {
+                JObject cfg = ReadForgeConfig();
+                string provider = null, baseUrl = null, m = null;
+                try { provider = (string)cfg["provider"]; } catch { provider = null; }
+                try { baseUrl = (string)cfg["baseUrl"]; } catch { baseUrl = null; }
+                try { m = (string)cfg["model"]; } catch { m = null; }
+                if (m != null) { m = m.Trim(); if (m.Length == 0) m = null; }
+                model = m;
+                string slug = null;
+                try { slug = PresetSlugFor(provider, baseUrl); } catch { slug = null; }
+                string key = null;
+                try { key = StoredProviderKeyForSlug(slug, provider); } catch { key = null; }
+                if (!string.IsNullOrWhiteSpace(model) && !string.IsNullOrWhiteSpace(baseUrl) && !string.IsNullOrWhiteSpace(key))
+                {
+                    IProviderClient c = null;
+                    try { c = ProviderFactory.ResolveFor(slug, baseUrl, model, key); } catch { c = null; }
+                    if (c != null) return c;
+                }
+            }
+            catch { }
+            model = null;
+            try { return ProviderFactory.Resolve(out model); }
+            catch { model = null; return null; }
+        }
+
         // A 401/403 from /models almost always means a wrong or revoked key, not a broken
         // endpoint — report "nokey" so the panel shows key guidance instead of a raw HTTP error.
         // Anything else is an actionable wrapper, never the raw exception text: a bare
@@ -2735,23 +2952,29 @@ namespace Forge.SolidWorks
                         string lc = id.ToLowerInvariant();
                         bool skip = false;
                         foreach (var h in NonChatModelHints) { if (lc.Contains(h)) { skip = true; break; } }
-                        if (!skip && families != null)
+                    if (!skip && families != null)
+                    {
+                        string name = lc;
+                        int slash = name.LastIndexOf('/');
+                        if (slash >= 0) name = name.Substring(slash + 1);
+                        bool allowedFamily = false;
+                        foreach (var f in families)
                         {
-                            string name = lc;
-                            int slash = name.LastIndexOf('/');
-                            if (slash >= 0) name = name.Substring(slash + 1);
-                            bool allowedFamily = false;
-                            foreach (var f in families)
-                            {
-                                if (name == f || name.StartsWith(f + "-", StringComparison.Ordinal)) { allowedFamily = true; break; }
-                                // Go-only: a non-letter boundary still belongs to the leading
-                                // family (hy3-preview, hy4, minimax-m3). The public Zen list
-                                // keeps its strict prefix rule so qwen3.*-(max|plus) stay out.
-                                if (go && name.Length > f.Length && name.StartsWith(f, StringComparison.Ordinal)
-                                    && !char.IsLetter(name[f.Length])) { allowedFamily = true; break; }
-                            }
-                            if (!allowedFamily) skip = true;
+                            if (name == f || name.StartsWith(f + "-", StringComparison.Ordinal)) { allowedFamily = true; break; }
+                            // Go-only: a non-letter boundary still belongs to the leading
+                            // family (hy3-preview, hy4, minimax-m3). The public Zen list
+                            // keeps its strict prefix rule so qwen3.*-(max|plus) stay out.
+                            if (go && name.Length > f.Length && name.StartsWith(f, StringComparison.Ordinal)
+                                && !char.IsLetter(name[f.Length])) { allowedFamily = true; break; }
                         }
+                        if (!allowedFamily)
+                        {
+                            string path = "chat";
+                            try { path = ProviderFactory.WirePathFor(baseUrl, id); } catch { path = "chat"; }
+                            if (!string.Equals(path, "chat", StringComparison.OrdinalIgnoreCase)) allowedFamily = true;
+                        }
+                        if (!allowedFamily) skip = true;
+                    }
                         if (!skip) ids.Add(id);
                     }
                 }
@@ -2817,7 +3040,7 @@ namespace Forge.SolidWorks
             }
             IProviderClient client;
             string picked;
-            try { client = ProviderFactory.Resolve(out picked); }
+            try { client = ResolveRunClient(out picked); }
             catch { client = null; picked = null; }
             if (client == null)
             {
@@ -2868,7 +3091,7 @@ namespace Forge.SolidWorks
                 try
                 {
                     res = await client.CompleteStreamingAsync(msgs,
-                        new ProviderOptions { MaxTokens = 32000, Temperature = enhanceTemp, Model = useModel, ReasoningEffort = enhanceEffort, Headers = ExpandedHeaderDictionary(CurrentProviderSlug()) },
+                        new ProviderOptions { MaxTokens = 32000, Temperature = enhanceTemp, Model = useModel, ReasoningEffort = enhanceEffort, Headers = ExpandedHeaderDictionary(CurrentProviderSlug()), SessionId = ActiveSidForProvider() },
                         ect,
                         (kind, delta) =>
                         {
@@ -2886,7 +3109,7 @@ namespace Forge.SolidWorks
                 {
                     // Non-streaming backends (Anthropic): same prompt as one unary call, no live deltas.
                     res = await client.CompleteAsync(msgs,
-                        new ProviderOptions { MaxTokens = 32000, Temperature = enhanceTemp, Model = useModel, ReasoningEffort = enhanceEffort, Headers = ExpandedHeaderDictionary(CurrentProviderSlug()) },
+                        new ProviderOptions { MaxTokens = 32000, Temperature = enhanceTemp, Model = useModel, ReasoningEffort = enhanceEffort, Headers = ExpandedHeaderDictionary(CurrentProviderSlug()), SessionId = ActiveSidForProvider() },
                         ect);
                 }
                 watch.Stop();
@@ -4110,6 +4333,7 @@ namespace Forge.SolidWorks
             _activeRunSid = sid;
             if (continued) lock (InterruptedBySid) { InterruptedBySid[sid] = false; }
             Func<string> priorSidProvider = null;
+            string priorMcpBuildSid = null;
             try
             {
                 priorSidProvider = OpenAiCompatibleClient.SessionIdProvider;
@@ -4117,6 +4341,8 @@ namespace Forge.SolidWorks
                 OpenAiCompatibleClient.SessionIdProvider = () => capturedSid;
             }
             catch { }
+            try { priorMcpBuildSid = GetMcpBuildSessionId(); } catch { }
+            try { SetMcpBuildSessionId(sid); } catch { }
             System.Threading.Interlocked.Increment(ref _activeRuns);
             try { await Generate(intent, sid, paths); }
             catch (OperationCanceledException) { }
@@ -4124,6 +4350,7 @@ namespace Forge.SolidWorks
             finally
             {
                 try { if (priorSidProvider != null) OpenAiCompatibleClient.SessionIdProvider = priorSidProvider; } catch { }
+                try { SetMcpBuildSessionId(priorMcpBuildSid); } catch { }
                 if (string.Equals(_activeRunSid, sid, StringComparison.OrdinalIgnoreCase)) _activeRunSid = null;
                 System.Threading.Interlocked.Decrement(ref _activeRuns);
                 if (dispatchOwner) lock (QueueLock) { Dispatching.Remove(sid); }

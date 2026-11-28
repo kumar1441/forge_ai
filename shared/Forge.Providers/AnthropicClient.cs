@@ -21,6 +21,7 @@ namespace Forge.Providers
         private readonly string _apiKey;
         private readonly string _baseUrl;
         private readonly string _defaultModel;
+        private static readonly string FallbackSessionId = Guid.NewGuid().ToString("N");
 
         public AnthropicClient(string apiKey, string baseUrl = "https://api.anthropic.com/v1", string defaultModel = null)
         {
@@ -52,6 +53,20 @@ namespace Forge.Providers
             }
         }
 
+        private static void ApplyZenGoHeaders(HttpRequestMessage req, string url, ProviderOptions opts)
+        {
+            if (string.IsNullOrEmpty(url) || url.IndexOf("/zen/go", StringComparison.OrdinalIgnoreCase) < 0) return;
+            string sid = null;
+            if (opts != null && !string.IsNullOrWhiteSpace(opts.SessionId)) sid = opts.SessionId;
+            if (string.IsNullOrWhiteSpace(sid))
+            {
+                try { sid = OpenAiCompatibleClient.SessionIdProvider != null ? OpenAiCompatibleClient.SessionIdProvider() : null; } catch { sid = null; }
+            }
+            if (string.IsNullOrWhiteSpace(sid)) sid = FallbackSessionId;
+            req.Headers.TryAddWithoutValidation("x-opencode-session", sid);
+            req.Headers.TryAddWithoutValidation("User-Agent", "Forge/1.0 (+SolidWorks add-in)");
+        }
+
         public async Task<ProviderResult> CompleteAsync(IReadOnlyList<ChatMessage> messages, ProviderOptions opts, CancellationToken ct)
         {
             if (messages == null) throw new ArgumentNullException("messages");
@@ -80,6 +95,7 @@ namespace Forge.Providers
                     if (!string.IsNullOrEmpty(_apiKey))
                         req.Headers.TryAddWithoutValidation("x-api-key", _apiKey);
                     req.Headers.TryAddWithoutValidation("anthropic-version", ApiVersion);
+                    ApplyZenGoHeaders(req, url, opts);
                     ApplyCustomHeaders(req, opts);
                     req.Content = new StringContent(body, Encoding.UTF8, "application/json");
 
@@ -151,6 +167,7 @@ namespace Forge.Providers
                 if (!string.IsNullOrEmpty(_apiKey))
                     req0.Headers.TryAddWithoutValidation("x-api-key", _apiKey);
                 req0.Headers.TryAddWithoutValidation("anthropic-version", ApiVersion);
+                ApplyZenGoHeaders(req0, url, opts);
                 ApplyCustomHeaders(req0, opts);
                 req0.Content = new StringContent(body, Encoding.UTF8, "application/json");
                 try { resp = await Http.SendAsync(req0, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false); }

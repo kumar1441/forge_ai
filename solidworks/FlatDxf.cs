@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using SolidWorks.Interop.sldworks;
@@ -143,12 +144,8 @@ namespace Forge.SolidWorks
             return res;
         }
 
-        // ---- export ONE part's flat pattern to a DXF. Sheet-metal action + flat pattern; keeping bends
-        //      (SheetMetalOptions = None, NOT RemoveBends) so bend lines ARE in the DXF. NOTE (2026-07-25,
-        //      verified against the exported file): on this build everything lands on layer "0" — SW's native
-        //      layering does NOT separate bend lines onto their own layer here. TODO: map bend lines to a
-        //      dedicated layer (DXF/DWG layer mapping) + verify the layer count in the harness before claiming it.
-        //      Reads the part and writes a DXF only — does NOT save/modify the source. Uses IPartDoc. ----
+        private const int SheetMetalExportGeometryAndBendLines = 1 | 4;
+
         private static bool ExportPartFlatDxf(IModelDoc2 partDoc, string dxfPath, out string diag)
         {
             diag = null;
@@ -173,12 +170,80 @@ namespace Forge.SolidWorks
                     align,                                                         // Alignment
                     false,                                                         // IsXDirFlipped
                     false,                                                         // IsYDirFlipped
-                    (int)swExportFlatPatternViewOptions_e.swExportFlatPatternOption_None,  // keep bends → bend lines on own layer
+                    SheetMetalExportGeometryAndBendLines,
                     null);                                                         // Views
             }
             catch (Exception ex) { diag = "ExportToDWG2 threw: " + ex.Message; return false; }
-            if (!ok) diag = "ExportToDWG2 returned false";
-            return ok;
+            if (!ok) { diag = "ExportToDWG2 returned false"; return false; }
+            try { EnsureBendLayer(dxfPath); } catch { }
+            return true;
+        }
+
+        private static bool EnsureBendLayer(string dxfPath)
+        {
+            Encoding latin1 = Encoding.GetEncoding("iso-8859-1");
+            string original;
+            try { original = File.ReadAllText(dxfPath, latin1); }
+            catch { return false; }
+            if (string.IsNullOrEmpty(original)) return false;
+            string newline = original.Contains("\r\n") ? "\r\n" : "\n";
+            string[] lines = original.Split(new string[] { "\r\n", "\n" }, StringSplitOptions.None);
+            bool pendingSectionName = false;
+            bool inTables = false;
+            bool pendingTableName = false;
+            string openTable = null;
+            bool inLayerEntry = false;
+            bool inLtypeEntry = false;
+            bool bendPresent = false;
+            bool dashedDefined = false;
+            int layerEndPair = -1;
+            for (int i = 0; i + 1 < lines.Length; i += 2)
+            {
+                string code = lines[i].Trim();
+                string value = lines[i + 1].Trim();
+                if (code == "0")
+                {
+                    if (value == "SECTION") pendingSectionName = true;
+                    else if (value == "ENDSEC") { inTables = false; pendingSectionName = false; pendingTableName = false; openTable = null; inLayerEntry = false; inLtypeEntry = false; }
+                    else if (value == "TABLE") pendingTableName = true;
+                    else if (value == "ENDTAB") { if (openTable == "LAYER" && layerEndPair < 0) layerEndPair = i; openTable = null; pendingTableName = false; inLayerEntry = false; inLtypeEntry = false; }
+                    else if (value == "LAYER") { if (inTables && openTable == "LAYER") inLayerEntry = true; }
+                    else if (value == "LTYPE") { if (inTables && openTable == "LTYPE") inLtypeEntry = true; }
+                    else { pendingTableName = false; inLayerEntry = false; inLtypeEntry = false; }
+                }
+                else if (code == "2")
+                {
+                    if (pendingSectionName) { inTables = value == "TABLES"; pendingSectionName = false; }
+                    else if (pendingTableName) { openTable = value; pendingTableName = false; }
+                    else if (inLayerEntry && value.Equals("BEND", StringComparison.OrdinalIgnoreCase)) { bendPresent = true; inLayerEntry = false; }
+                    else if (inLtypeEntry && value.Equals("DASHED", StringComparison.OrdinalIgnoreCase)) { dashedDefined = true; inLtypeEntry = false; }
+                }
+            }
+            if (bendPresent) return true;
+            if (layerEndPair < 0) return false;
+            string ltype = dashedDefined ? "DASHED" : "CONTINUOUS";
+            var updated = new List<string>(lines.Length + 10);
+            for (int i = 0; i < layerEndPair; i++) updated.Add(lines[i]);
+            updated.Add("0");
+            updated.Add("LAYER");
+            updated.Add("2");
+            updated.Add("BEND");
+            updated.Add("70");
+            updated.Add("0");
+            updated.Add("62");
+            updated.Add("1");
+            updated.Add("6");
+            updated.Add(ltype);
+            for (int i = layerEndPair; i < lines.Length; i++) updated.Add(lines[i]);
+            try
+            {
+                string tmp = dxfPath + ".bendtmp";
+                File.WriteAllText(tmp, string.Join(newline, updated), latin1);
+                File.Copy(tmp, dxfPath, true);
+                try { File.Delete(tmp); } catch { }
+            }
+            catch { return false; }
+            return true;
         }
 
         // ---- sheet-metal test: the feature tree carries a SheetMetal / FlatPattern / SM-prefixed feature.

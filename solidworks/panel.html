@@ -640,7 +640,7 @@
         <span class="toggle"><input type="checkbox" id="compacttgl" checked /><span class="tk"></span></span>
       </div>
       <div class="srow" id="compactatrow"><label>Compact at</label>
-        <span class="skeywrap"><input type="number" id="compactat" min="10" max="95" step="5" value="60" title="Context % used before older turns are summarized" /><span style="font-size:11px;color:var(--faint)">%</span></span>
+        <span class="skeywrap"><input type="number" id="compactat" min="1" max="100" step="5" value="60" title="Context % used before older turns are summarized" /><span style="font-size:11px;color:var(--faint)">%</span></span>
       </div>
       <div class="srow" id="compactreservedrow"><label>Reserved tokens</label>
         <span class="skeywrap"><input type="number" id="compactreserved" min="0" step="512" value="0" title="Tokens kept for the answer" /></span>
@@ -689,7 +689,7 @@
           <span class="skeywrap"><input type="text" id="mcpname" placeholder="default" autocomplete="off" /></span>
         </div>
         <div class="srow"><label>Transport</label>
-          <span class="mseg" id="mcptypeseg"><button type="button" data-type="stdio" class="on">stdio</button><button type="button" data-type="http">http</button></span>
+          <span class="mseg" id="mcptypeseg"><button type="button" data-type="stdio" class="on">stdio</button><button type="button" data-type="http">http</button><button type="button" data-type="sse">sse</button></span>
         </div>
         <div id="mcpsstdio">
           <div class="srow"><label>Command</label>
@@ -713,8 +713,25 @@
             <span class="skeywrap"><textarea id="mcpaddheaders" class="mta" rows="2" placeholder="KEY=VALUE per line" spellcheck="false"></textarea></span>
           </div>
         </div>
+        <div id="mcpsoauth">
+          <div class="srow"><label>OAuth client</label>
+            <span class="skeywrap"><input type="text" id="mcpaddoauthcid" class="mwide" placeholder="oauth client id" autocomplete="off" /></span>
+          </div>
+          <div class="srow"><label>OAuth auth URL</label>
+            <span class="skeywrap"><input type="text" id="mcpaddoauthauth" class="mwide" placeholder="https://…/authorize" autocomplete="off" /></span>
+          </div>
+          <div class="srow"><label>OAuth token URL</label>
+            <span class="skeywrap"><input type="text" id="mcpaddoauthtok" class="mwide" placeholder="https://…/token" autocomplete="off" /></span>
+          </div>
+          <div class="srow"><label>OAuth scope</label>
+            <span class="skeywrap"><textarea id="mcpaddoauthscope" class="mta" rows="2" placeholder="scope lines (one per line)" spellcheck="false"></textarea></span>
+          </div>
+          <div class="srow"><label>OAuth port</label>
+            <span class="skeywrap"><input type="number" id="mcpaddoauthport" min="1" max="65535" step="1" placeholder="53821" /></span>
+          </div>
+        </div>
         <div class="srow"><label>Timeout</label>
-          <span class="skeywrap"><input type="number" id="mcpaddtimeout" min="1" step="1" value="300" title="Per-tool-call timeout in seconds — 1s minimum (stdio default 300s, HTTP default 15s)" /><span style="font-size:11px;color:var(--faint)">sec</span></span>
+          <span class="skeywrap"><input type="number" id="mcpaddtimeout" min="1" step="1" value="300" title="Per-tool-call timeout in seconds — 1s minimum (stdio default 300s, HTTP/SSE default 15s)" /><span style="font-size:11px;color:var(--faint)">sec</span></span>
         </div>
         <div class="srow"><label></label>
           <span class="skeywrap"><button id="mcpaddgo" title="Save the new server">Add server</button><button id="mcpaddcancel" title="Close without adding">Cancel</button></span>
@@ -731,7 +748,7 @@
       </div>
       <div class="ssub">approval + done + teammate toasts</div>
       <div class="ssep"></div>
-      <div class="srow"><label>Usage data</label>
+      <div class="srow"><label>Usage analytics (functional intent/Bifrost/provider calls still apply)</label>
         <span class="toggle"><input type="checkbox" id="telmtgl" /><span class="tk"></span></span>
       </div>
       <div class="sfoot">usage data = anonymous masked events only · off = nothing leaves this machine</div>
@@ -839,7 +856,7 @@
   const intent = $("intent");
   const escHtml = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   const EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"];
-  const INFORMATIONAL_TYPES = new Set(["models", "model", "provider", "mcpConfig", "mcpStatus", "mcpToolsChanged", "toolPolicy", "rules", "usage", "notifyConfig", "variants", "files", "status", "queued", "queueState", "workStyle", "reasoningEffort", "compactConfig", "mcpLog", "attached", "attachCleared", "enhanced", "historyLoaded", "diff", "timeline", "shared", "forked", "continued", "initContext", "firstrun", "telemetryState", "compacted", "bifrost"]);
+  const INFORMATIONAL_TYPES = new Set(["models", "model", "provider", "mcpConfig", "mcpToolsChanged", "toolPolicy", "rules", "usage", "notifyConfig", "variants", "files", "status", "queued", "queueState", "workStyle", "reasoningEffort", "compactConfig", "mcpLog", "mcpPing", "mcpAuthStatus", "attached", "attachCleared", "enhanced", "historyLoaded", "diff", "timeline", "shared", "forked", "continued", "initContext", "firstrun", "telemetryState", "compacted", "bifrost"]);
   let queue = [], queuePaused = false, queueSid = null;
   let workStyle = null, reasoningEffort = null, reasoningEffortSupported = false, reasoningEffortCapability = null;
   let modelMetaMap = {}, freeOnly = false;
@@ -1065,6 +1082,49 @@
 
   // ---- MCP servers (ordered failover list; host persists to mcp.json) ----
   let mcpServers = [];
+  let mcpListPending = false;
+  function mcpListText(list) {
+    const arr = Array.isArray(list) ? list : [];
+    const lines = [];
+    arr.forEach((o) => {
+      if (!o) return;
+      const nm = (o && o.name) || "default";
+      let en = true;
+      try { if (o.enabled !== undefined && o.enabled !== null) en = !!o.enabled; } catch (e) {}
+      const rn = !!(o && o.running);
+      let ty = (o && o.type) || "stdio";
+      if (ty !== "http" && ty !== "sse") ty = "stdio";
+      const url = (o && o.url) || "";
+      const cc = (o && o.command) || "uvx";
+      const aa = (o && o.args) || "";
+      let tm = Number(o && o.timeoutMs) || 300000;
+      if (!(tm >= 1000)) tm = 300000;
+      const target = (ty === "http" || ty === "sse") ? url : String(cc + " " + aa).trim();
+      const shown = target || "(no command/url)";
+      const extra = (url && ty !== "http" && ty !== "sse") ? " url=" + url : "";
+      const state = rn ? "running" : (en ? "not running (starts on next build)" : "disabled in Settings");
+      lines.push(nm + " [" + ty + "]: " + state + " — `" + shown + "`" + extra + " (" + (tm / 1000) + "s timeout)");
+    });
+    if (!lines.length) return "No MCP servers are configured — add one under Settings → MCP server first.";
+    return "MCP servers (" + lines.length + "):\n" + lines.join("\n") + "\nToggle + timeout live under Settings → MCP server.";
+  }
+  let mcpPingCache = {};
+  let mcpAuthCache = {};
+  const mcpAuthNeedsHint = (s) => {
+    try {
+      const cached = s && s.name ? mcpAuthCache[s.name] : null;
+      if (cached && typeof cached.needsAuth === "boolean") return cached.needsAuth;
+      if (typeof s.needsAuth === "boolean") return s.needsAuth;
+      const st = String((cached && cached.status) || (s && s.authStatus) || "");
+      return st === "needs_auth" || st === "configured" || st === "expired";
+    } catch (e) { return false; }
+  };
+  const mcpAuthStatusOf = (s) => {
+    try {
+      const cached = s && s.name ? mcpAuthCache[s.name] : null;
+      return String((cached && cached.status) || (s && s.authStatus) || "none");
+    } catch (e) { return "none"; }
+  };
   let mcpAddType = "stdio";
   function mcpKvRead(ta) {
     const out = {};
@@ -1081,25 +1141,42 @@
     if (!obj || typeof obj !== "object") return "";
     return Object.keys(obj).filter(k => typeof k === "string" && k).map(k => k + "=" + (obj[k] == null ? "" : obj[k])).join("\n");
   }
-  function mcpTypeOf(s) { return s && s.type === "http" ? "http" : "stdio"; }
-  function mcpDefaultSecs(s) { return mcpTypeOf(s) === "http" ? 15 : 300; }
+  function mcpTypeOf(s) { return s && (s.type === "http" || s.type === "sse") ? s.type : "stdio"; }
+  function mcpDefaultSecs(s) { const t = mcpTypeOf(s); return (t === "http" || t === "sse") ? 15 : 300; }
   function mcpSecsOf(s) {
     const ms = s && Number(s.timeoutMs);
     return (ms != null && !isNaN(ms) && ms >= 1000) ? Math.max(1, Math.round(ms / 1000)) : mcpDefaultSecs(s);
   }
-  function mcpFields(action, name, type, command, args, cwd, url, envTa, headersTa, secs, alwaysAllowTa, disabledTa, watchTa) {
+  function mcpFields(action, name, type, command, args, cwd, url, envTa, headersTa, secs, alwaysAllowTa, disabledTa, watchTa, oauth) {
     const p = { action: action, name: name, type: type, command: String(command || "").trim(), args: String(args || "").trim(), cwd: String(cwd || "").trim(), url: String(url || "").trim(), timeoutMs: secs * 1000 };
     const env = type === "stdio" ? mcpKvRead(envTa) : {}; if (Object.keys(env).length) p.env = env;
-    const headers = type === "http" ? mcpKvRead(headersTa) : {}; if (Object.keys(headers).length) p.headers = headers;
+    const headers = (type === "http" || type === "sse") ? mcpKvRead(headersTa) : {}; if (Object.keys(headers).length) p.headers = headers;
     const lines = (ta) => String(ta && ta.value != null ? ta.value : ta || "").split(/\r?\n/).map(s => s.trim()).filter(Boolean);
     const al = alwaysAllowTa ? lines(alwaysAllowTa) : []; if (al.length) p.alwaysAllow = al;
     const dt = disabledTa ? lines(disabledTa) : []; if (dt.length) p.disabledTools = dt;
     const wp = watchTa ? lines(watchTa) : []; if (wp.length) p.watchPaths = wp;
+    if (oauth && typeof oauth === "object") p.oauth = oauth;
     return p;
+  }
+  function mcpOAuthOf(clientIdEl, authUrlEl, tokenUrlEl, scopeTa, portEl) {
+    const cid = clientIdEl && clientIdEl.value != null ? String(clientIdEl.value).trim() : "";
+    const aur = authUrlEl && authUrlEl.value != null ? String(authUrlEl.value).trim() : "";
+    const tur = tokenUrlEl && tokenUrlEl.value != null ? String(tokenUrlEl.value).trim() : "";
+    const sc = String(scopeTa && scopeTa.value != null ? scopeTa.value : "").split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    let port = 0;
+    try { port = parseInt(portEl && portEl.value != null ? portEl.value : "", 10); } catch (e) { port = 0; }
+    if (!cid && !aur && !tur && !sc.length && !(port >= 1)) return undefined;
+    const o = {};
+    if (cid) o.clientId = cid;
+    if (aur) o.authorizationUrl = aur;
+    if (tur) o.tokenUrl = tur;
+    if (sc.length) o.scope = sc;
+    if (port >= 1 && port <= 65535) o.redirectPort = port;
+    return o;
   }
   function mcpSeg(current, onChange) {
     const seg = document.createElement("span"); seg.className = "mseg";
-    ["stdio", "http"].forEach(v => {
+    ["stdio", "http", "sse"].forEach(v => {
       const b = document.createElement("button"); b.type = "button"; b.textContent = v; b.dataset.v = v;
       b.className = v === current ? "on" : "";
       b.addEventListener("click", () => {
@@ -1131,8 +1208,8 @@
     const form = document.createElement("div"); form.style.display = "none"; form.setAttribute("data-mcpedit", name);
     const stdio = document.createElement("div"), http = document.createElement("div");
     stdio.style.display = cur === "stdio" ? "" : "none";
-    http.style.display = cur === "http" ? "" : "none";
-    const seg = mcpSeg(cur, (v) => { cur = v; stdio.style.display = v === "stdio" ? "" : "none"; http.style.display = v === "http" ? "" : "none"; });
+    http.style.display = (cur === "http" || cur === "sse") ? "" : "none";
+    const seg = mcpSeg(cur, (v) => { cur = v; stdio.style.display = v === "stdio" ? "" : "none"; http.style.display = (v === "http" || v === "sse") ? "" : "none"; });
     form.appendChild(mcpRow("Transport", seg));
     const cmd = mcpText((s && s.command) || "uvx", "uvx", false);
     const args = mcpText(Array.isArray(s && s.args) ? s.args.join(" ") : ((s && s.args) || ""), "solidworks-mcp", false);
@@ -1147,10 +1224,22 @@
     form.appendChild(http);
     const tmo = document.createElement("input"); tmo.type = "number"; tmo.min = "1"; tmo.step = "1";
     tmo.value = mcpSecsOf(s);
-    tmo.title = "Per-tool-call timeout in seconds — 1s minimum (stdio default 300s, HTTP default 15s)";
+    tmo.title = "Per-tool-call timeout in seconds — 1s minimum (stdio default 300s, HTTP/SSE default 15s)";
     const tmoWrap = document.createElement("span"); tmoWrap.className = "skeywrap"; tmoWrap.appendChild(tmo);
     const unit = document.createElement("span"); unit.style.fontSize = "11px"; unit.style.color = "var(--faint)"; unit.textContent = "sec";
     tmoWrap.appendChild(unit); form.appendChild(mcpRow("Timeout", tmoWrap));
+    const oau = (s && s.oauth) || {};
+    const ocid = mcpText(oau.clientId || "", "oauth client id", true);
+    const oaur = mcpText(oau.authorizationUrl || "", "https://…/authorize", true);
+    const otur = mcpText(oau.tokenUrl || "", "https://…/token", true);
+    const osco = mcpKvBox(Array.isArray(oau.scope) ? oau.scope.join("\n") : (oau.scope || ""), "scope lines (one per line)");
+    const ored = document.createElement("input"); ored.type = "number"; ored.min = "1"; ored.max = "65535"; ored.step = "1";
+    ored.value = oau.redirectPort || ""; ored.placeholder = "53821";
+    form.appendChild(mcpRow("OAuth client", ocid));
+    form.appendChild(mcpRow("OAuth auth URL", oaur));
+    form.appendChild(mcpRow("OAuth token URL", otur));
+    form.appendChild(mcpRow("OAuth scope", osco));
+    form.appendChild(mcpRow("OAuth port", ored));
     const alwaysAllow = mcpKvBox(Array.isArray(s && s.alwaysAllow) ? s.alwaysAllow.join("\n") : ((s && s.alwaysAllow) || ""), "tool names/globs (auto-allow)");
     const disabled = mcpKvBox(Array.isArray(s && s.disabledTools) ? s.disabledTools.join("\n") : ((s && s.disabledTools) || ""), "tool names/globs (hidden + denied)");
     const watch = mcpKvBox(Array.isArray(s && s.watchPaths) ? s.watchPaths.join("\n") : ((s && s.watchPaths) || ""), "paths to watch (restart on change)");
@@ -1161,7 +1250,7 @@
     const save = document.createElement("button"); save.textContent = "Save"; save.title = "Save changes to " + name;
     save.addEventListener("click", () => {
       let secs = parseInt(tmo.value, 10); if (isNaN(secs) || secs < 1) secs = 1; tmo.value = secs;
-      post(mcpFields("mcpUpdate", name, cur, cmd.value, args.value, cwd.value, url.value, env, headers, secs, alwaysAllow, disabled, watch));
+      post(mcpFields("mcpUpdate", name, cur, cmd.value, args.value, cwd.value, url.value, env, headers, secs, alwaysAllow, disabled, watch, mcpOAuthOf(ocid, oaur, otur, osco, ored)));
       onSaved();
     });
     const cancel = document.createElement("button"); cancel.textContent = "Cancel"; cancel.title = "Close without saving";
@@ -1178,10 +1267,10 @@
       const lab = document.createElement("label"); lab.textContent = name;
       const type = mcpTypeOf(s);
       const badge = document.createElement("span"); badge.className = "mbadge"; badge.textContent = type; lab.appendChild(badge);
-      if (type === "http" && s && s.url) {
+      if ((type === "http" || type === "sse") && s && s.url) {
         const u = document.createElement("span"); u.className = "murl"; u.textContent = s.url; u.title = s.url; lab.appendChild(u);
       }
-      lab.title = type === "http" ? ((s && s.url) || "http") : (((s && s.command) || "uvx") + " " + ((s && s.args) || "solidworks-mcp"));
+      lab.title = (type === "http" || type === "sse") ? ((s && s.url) || type) : (((s && s.command) || "uvx") + " " + ((s && s.args) || "solidworks-mcp"));
       row.appendChild(lab);
       const wrap = document.createElement("span"); wrap.className = "skeywrap";
       const tgl = document.createElement("input"); tgl.type = "checkbox"; tgl.checked = !!(s && s.enabled); tgl.title = "Enable " + name;
@@ -1190,7 +1279,7 @@
       wrap.appendChild(tgl);
       const tmo = document.createElement("input"); tmo.type = "number"; tmo.min = "1"; tmo.step = "1";
       tmo.value = mcpSecsOf(s);
-      tmo.title = "Per-tool-call timeout in seconds — 1s minimum (stdio default 300s, HTTP default 15s)";
+      tmo.title = "Per-tool-call timeout in seconds — 1s minimum (stdio default 300s, HTTP/SSE default 15s)";
       tmo.addEventListener("change", () => {
         let secs = parseInt(tmo.value, 10); if (isNaN(secs) || secs < 1) secs = 1; tmo.value = secs;
         post({ action: "mcpSet", name: name, timeoutMs: secs * 1000 });
@@ -1207,6 +1296,30 @@
       const lg = document.createElement("button"); lg.textContent = "log"; lg.title = "View recent stderr from " + name;
       lg.addEventListener("click", () => post({ action: "mcpLog", name: name }));
       wrap.appendChild(lg);
+      const pg = document.createElement("button"); pg.textContent = "Ping"; pg.title = "Ping " + name;
+      pg.addEventListener("click", () => { post({ action: "mcpPing", name: name }); try { const b = wrap.querySelector('[data-mcpping="' + String(name).replace(/"/g, "") + '"]'); if (b) { b.textContent = "…"; b.style.color = "var(--faint)"; } } catch (e) {} });
+      wrap.appendChild(pg);
+      const pb = document.createElement("span"); pb.setAttribute("data-mcpping", name); pb.style.fontSize = "10.5px"; pb.style.minWidth = "34px"; pb.style.color = "var(--faint)"; try { const prior = mcpPingCache[name]; if (prior) { pb.textContent = prior.text; pb.style.color = prior.color; } } catch (e) {}
+      wrap.appendChild(pb);
+      const astat = mcpAuthStatusOf(s);
+      if (astat !== "none") {
+        const ab = document.createElement("span"); ab.setAttribute("data-mcpauth", name);
+        ab.className = "mbadge"; ab.textContent = astat; ab.title = "OAuth status for " + name;
+        try { ab.style.color = astat === "authenticated" ? "var(--mint)" : "var(--amber)"; } catch (e) {}
+        wrap.appendChild(ab);
+        const si = document.createElement("button"); si.textContent = "Sign in"; si.title = "OAuth sign-in for " + name;
+        si.addEventListener("click", () => { post({ action: "mcpOAuthStart", name: name }); });
+        wrap.appendChild(si);
+        const so = document.createElement("button"); so.textContent = "Sign out"; so.title = "Clear the OAuth token for " + name;
+        so.addEventListener("click", () => { post({ action: "mcpOAuthClear", name: name }); });
+        wrap.appendChild(so);
+        if (mcpAuthNeedsHint(s)) {
+          const ah = document.createElement("span"); ah.setAttribute("data-mcpahint", name);
+          ah.style.fontSize = "10.5px"; ah.style.color = "var(--amber)";
+          ah.textContent = "Authorization required — Sign in";
+          wrap.appendChild(ah);
+        }
+      }
       const del = document.createElement("button"); del.textContent = "delete"; del.title = "Remove " + name;
       del.addEventListener("click", () => { post({ action: "mcpRemove", name: name }); });
       wrap.appendChild(del);
@@ -1231,24 +1344,25 @@
     Array.prototype.forEach.call($("mcptypeseg").querySelectorAll("button"), x => { x.className = x.dataset.type === mcpAddType ? "on" : ""; });
     const sio = $("mcpsstdio"), ht = $("mcpshttp");
     if (sio) sio.style.display = mcpAddType === "stdio" ? "" : "none";
-    if (ht) ht.style.display = mcpAddType === "http" ? "" : "none";
+    if (ht) ht.style.display = (mcpAddType === "http" || mcpAddType === "sse") ? "" : "none";
     const t = $("mcpaddtimeout");
     if (t) {
-      const other = mcpAddType === "http" ? 300 : 15;
-      if (parseInt(t.value, 10) === other) t.value = mcpAddType === "http" ? 15 : 300;
+      const other = (mcpAddType === "http" || mcpAddType === "sse") ? 300 : 15;
+      if (parseInt(t.value, 10) === other) t.value = (mcpAddType === "http" || mcpAddType === "sse") ? 15 : 300;
     }
   });
   if ($("mcpaddgo")) $("mcpaddgo").addEventListener("click", () => {
     const name = $("mcpname") ? $("mcpname").value.trim() : "";
-    let secs = $("mcpaddtimeout") ? parseInt($("mcpaddtimeout").value, 10) : (mcpAddType === "http" ? 15 : 300);
+    let secs = $("mcpaddtimeout") ? parseInt($("mcpaddtimeout").value, 10) : ((mcpAddType === "http" || mcpAddType === "sse") ? 15 : 300);
     if (isNaN(secs) || secs < 1) secs = 1;
     if (!name) return;
     const command = mcpAddType === "stdio" ? (($("mcpcmd") && $("mcpcmd").value.trim()) || "uvx") : "";
     post(mcpFields("mcpAdd", name, mcpAddType, command,
       mcpAddType === "stdio" && $("mcpargs") ? $("mcpargs").value : "",
       mcpAddType === "stdio" && $("mcpaddcwd") ? $("mcpaddcwd").value : "",
-      mcpAddType === "http" && $("mcpurl") ? $("mcpurl").value : "",
-      $("mcpaddenv"), $("mcpaddheaders"), secs));
+      (mcpAddType === "http" || mcpAddType === "sse") && $("mcpurl") ? $("mcpurl").value : "",
+      $("mcpaddenv"), $("mcpaddheaders"), secs, undefined, undefined, undefined,
+      mcpOAuthOf($("mcpaddoauthcid"), $("mcpaddoauthauth"), $("mcpaddoauthtok"), $("mcpaddoauthscope"), $("mcpaddoauthport"))));
     if ($("mcpname")) $("mcpname").value = "";
     const f = $("mcpadd"); if (f) f.style.display = "none";
   });
@@ -1276,7 +1390,7 @@
     try {
       const on = safeGet("forge_compact_on");
       const at = safeGet("forge_compact_at");
-      let atn = at === null ? 60 : parseInt(at, 10); if (isNaN(atn)) atn = 60; if (atn < 10) atn = 10; if (atn > 95) atn = 95;
+      let atn = at === null ? 60 : parseInt(at, 10); if (isNaN(atn) || atn <= 0) atn = 60; else { if (atn < 1) atn = 1; if (atn > 100) atn = 100; }
       const init = { action: "setCompact", on: on === null ? true : on === "1", at: atn, thresholdPct: atn };
       const rvRaw = safeGet("forge_compact_reserved");
       if (rvRaw !== null) { const rv = parseInt(rvRaw, 10); if (!isNaN(rv) && rv >= 0) init.reservedTokens = rv; }
@@ -1676,14 +1790,14 @@
 
   // ---- auto-compaction controls (Kilo parity: threshold + off switch, persisted, pushed to host) ----
   const autoCompactOn = () => { try { return safeGet("forge_compact_on") !== "0"; } catch (e) { return true; } };
-  const effectiveCompactAt = (fb) => { try { const a = parseInt(safeGet("forge_compact_at"), 10); if (!isNaN(a) && a >= 10 && a <= 95) return a; } catch (e) {} return fb || 60; };
+  const effectiveCompactAt = (fb) => { try { const a = parseInt(safeGet("forge_compact_at"), 10); if (!isNaN(a) && a >= 1 && a <= 100) return a; } catch (e) {} return fb || 60; };
   function loadCompactCfg() {
     try {
       const on = safeGet("forge_compact_on");
       const at = safeGet("forge_compact_at");
       $("compacttgl").checked = on === null ? true : on === "1";
       let n = at === null ? 60 : parseInt(at, 10);
-      if (isNaN(n)) n = 60; if (n < 10) n = 10; if (n > 95) n = 95;
+      if (isNaN(n) || n <= 0) n = 60; else { if (n < 1) n = 1; if (n > 100) n = 100; }
       $("compactat").value = n;
       let rv = parseInt(safeGet("forge_compact_reserved"), 10); if (isNaN(rv) || rv < 0) rv = 0;
       let tt = parseInt(safeGet("forge_compact_tail"), 10); if (isNaN(tt) || tt < 0) tt = 0;
@@ -1697,7 +1811,7 @@
     ["compactatrow", "compactreservedrow", "tailturnsrow"].forEach(id => { const r = $(id); if (r) r.style.opacity = on ? "" : ".4"; });
   }
   function pushCompactCfg() {
-    let at = parseInt($("compactat").value, 10); if (isNaN(at) || at < 10) at = 10; if (at > 95) at = 95;
+    let at = parseInt($("compactat").value, 10); if (isNaN(at) || at <= 0) at = 60; else { if (at < 1) at = 1; if (at > 100) at = 100; }
     $("compactat").value = at;
     let rv = parseInt(($("compactreserved") && $("compactreserved").value) || "0", 10); if (isNaN(rv) || rv < 0) rv = 0;
     let tt = parseInt(($("tailturns") && $("tailturns").value) || "0", 10); if (isNaN(tt) || tt < 0) tt = 0;
@@ -2072,7 +2186,7 @@
     ["provider", "switch provider · /connect"],
     ["mcps", "MCP servers: list, enable, disable, start, stop, timeout"],
     ["settings", "open settings"],
-    ["history", "search and restore chats · /sessions /resume /continue"],
+    ["history", "search and restore chats · /sessions /resume · /continue resumes the interrupted turn (or opens history)"],
     ["rename", "rename the current chat"],
     ["thinking", "show or hide thinking blocks · /toggle-thinking"],
     ["status", "live context and usage"],
@@ -2085,7 +2199,7 @@
     ["unrevert", "restore the last reverted turns"],
     ["diff", "show the change diff for this session"],
     ["timeline", "show the session event timeline"],
-    ["share", "save this transcript to a file"],
+    ["share", "save this transcript locally (local-only export, no remote link service)"],
     ["init", "capture the current assembly context"],
     ["themes", "switch the dark / light palette"]
   ];
@@ -2391,7 +2505,7 @@
   }
 
   // ---- slash commands (Kilo-style: local, instant, no LLM round-trip) ----
-  const SLASH_HELP = "/compact — summarize older turns into an expandable block (aliases: /summarize, /smol, /condense)\n/settings — open Settings\n/clear, /new — start a fresh chat\n/regen, /regenerate — re-run the last prompt\n/model, /models — open the model picker\n/provider [slug] — switch provider (deepseek|openrouter|nvidia|openai|anthropic|opencode|opencode-go|ollama) or open settings\n/connect — open provider settings (Kilo-style connect)\n/allow <tool> — always allow one tool going forward\n/deny <tool> — block one tool outright · /undeny <tool> — unblock it\n/auto-approve [on|off] — master switch for unattended tool runs (aliases: /autoapprove /approve-all /approveall)\n/mcps — list servers · /mcps enable|disable|start|stop <name> · /mcps timeout <name> <secs>\n/history, /sessions — open chat history · /resume, /continue — same list\n/rename <title> — rename the current chat\n/status — show usage details\n/undo — revert the last turn · /redo — restore it · /copy — copy last answer · /copy-session — copy whole chat · /export — save transcript as markdown (rendered turns only) · /about — panel/provider info (no diagnostics copy) · /review — design review of the active model (ignores extra args) · /thinking, /toggle-thinking — toggle thinking blocks\n/help — this list\n/unrevert — restore the last reverted turns\n/diff — show the change diff · /timeline — show the event timeline · /share — save this transcript to a file · /init — capture the current assembly context · /themes — switch dark/light palette\nNotifications — Settings toggle for approval + done + teammate OS toasts";
+  const SLASH_HELP = "/compact — summarize older turns into an expandable block (aliases: /summarize, /smol, /condense)\n/settings — open Settings\n/clear, /new — start a fresh chat\n/regen, /regenerate — re-run the last prompt\n/model, /models — open the model picker\n/provider [slug] — switch provider (deepseek|openrouter|nvidia|openai|anthropic|opencode|opencode-go|ollama) or open settings\n/connect — open provider settings (Kilo-style connect)\n/allow <tool> — always allow one tool going forward\n/deny <tool> — block one tool outright · /undeny <tool> — unblock it\n/auto-approve [on|off] — master switch for unattended tool runs (aliases: /autoapprove /approve-all /approveall)\n/mcps — list servers · /mcps enable|disable|start|stop <name> · /mcps timeout <name> <secs>\n/history, /sessions — open chat history · /resume — same list · /continue — resume the interrupted turn (or open history)\n/rename <title> — rename the current chat\n/status — show usage details\n/undo — revert the last turn · /redo — restore it · /copy — copy last answer · /copy-session — copy whole chat · /export — save transcript as markdown (rendered turns only) · /about — panel/provider info (no diagnostics copy) · /review — design review of the active model (ignores extra args) · /thinking, /toggle-thinking — toggle thinking blocks\n/help — this list\n/unrevert — restore the last reverted turns\n/diff — show the change diff · /timeline — show the event timeline · /share — save this transcript locally (local-only export, no remote link service) · /init — capture the current assembly context · /themes — switch dark/light palette\nNotifications — Settings toggle for approval + done + teammate OS toasts";
   function fallbackCopy(text) {
     try {
       const ta = document.createElement("textarea");
@@ -2455,13 +2569,14 @@
           systemCard(`Auto-approve is <b>${$("apprtgl").checked ? "on" : "off"}</b>. Usage: <b>/auto-approve on|off</b>.`);
         }
         break;
-      case "history": case "sessions": case "resume": case "continue": showPop("history"); renderHistoryList(); setExpanded("histbtn", true); setTimeout(() => $("hsearch").focus(), 0); break;
+      case "history": case "sessions": case "resume": showPop("history"); renderHistoryList(); setExpanded("histbtn", true); setTimeout(() => $("hsearch").focus(), 0); break;
+      case "continue": { if (working) { systemCard("Still working — wait for this run (or Esc to stop it), then Continue."); break; } let intr = runInterrupted; try { if (!intr && transcript.querySelector('.turn[data-interrupted="1"]')) intr = true; } catch (e) {} if (intr) { post({ action: "continue", sid: sessionId }); } else { showPop("history"); renderHistoryList(); setExpanded("histbtn", true); setTimeout(() => $("hsearch").focus(), 0); } break; }
       case "mcps": {
         if (!hasBridge) { systemCard(needBridgeMsg("MCP server status")); break; }
         (function () {
           var sub = (args[0] || "").toLowerCase();
-          if (!sub) { post({ action: "mcpStatus" }); return; }
-          if (sub === "list") { post({ action: "mcpStatus" }); return; }
+          if (!sub) { mcpListPending = true; post({ action: "mcpConfig" }); return; }
+          if (sub === "list") { mcpListPending = true; post({ action: "mcpConfig" }); return; }
           var names = [];
           try { names = (mcpServers || []).map(function (s) { return (s && s.name) || "default"; }); } catch (e) { names = []; }
           function esc(s) { return String(s == null ? "" : s).replace(/</g, "&lt;"); }
@@ -3189,6 +3304,7 @@
       if (Array.isArray(m.servers)) mcpServers = m.servers;
       else if (m.command != null || m.args != null) mcpServers = [{ name: "default", command: m.command || "uvx", args: m.args || "solidworks-mcp", enabled: !!m.enabled, timeoutMs: m.timeoutMs || 300000, running: !!m.running }];
       renderMcpServers();
+      if (mcpListPending) { mcpListPending = false; try { systemCard(`<div class="card"><div class="answer">${renderMarkdown(mcpListText(mcpServers))}</div></div>`); } catch (e) {} }
     }
 
     else if (m.type === "notifyConfig") {
@@ -3393,7 +3509,7 @@
       try {
         if (typeof m.on === "boolean") { $("compacttgl").checked = m.on; safeSet("forge_compact_on", m.on ? "1" : "0"); }
         const pct = parseInt(m.thresholdPct, 10);
-        if (!isNaN(pct)) { let p = pct; if (p < 10) p = 10; if (p > 95) p = 95; $("compactat").value = p; safeSet("forge_compact_at", String(p)); }
+        if (!isNaN(pct)) { let p = pct; if (p <= 0) p = 60; else { if (p < 1) p = 1; if (p > 100) p = 100; } $("compactat").value = p; safeSet("forge_compact_at", String(p)); }
         const rv = parseInt(m.reservedTokens, 10);
         if (!isNaN(rv) && rv >= 0 && $("compactreserved")) { $("compactreserved").value = rv; safeSet("forge_compact_reserved", String(rv)); }
         const tt = parseInt(m.tailTurns, 10);
@@ -3409,6 +3525,36 @@
       $("mcplog").textContent = txt.length > 8192 ? "…" + txt.slice(txt.length - 8192) : txt;
     }
     else if (m.type === "mcpToolsChanged") { mcpToolsNote(m.name); }
+    else if (m.type === "mcpPing") {
+      try {
+        const nm = m.name || "default";
+        const ok = !!m.ok;
+        const rtt = m.rttMs;
+        const txt = ok ? ((rtt == null || rtt === "") ? "ok" : String(rtt) + " ms") : "unreachable";
+        const col = ok ? "var(--mint)" : "var(--red)";
+        try { mcpPingCache[nm] = { text: txt, color: col }; } catch (e2) {}
+        try { const el = document.querySelector('[data-mcpping="' + String(nm).replace(/"/g, "") + '"]'); if (el) { el.textContent = txt; el.style.color = col; } } catch (e3) {}
+      } catch (e) {}
+    }
+    else if (m.type === "mcpAuthStatus") {
+      try {
+        const nm = m.name || "default";
+        try { mcpAuthCache[nm] = { status: String(m.status || "none"), needsAuth: !!m.needsAuth }; } catch (e2) {}
+        try {
+          const el = document.querySelector('[data-mcpauth="' + String(nm).replace(/"/g, "") + '"]');
+          if (el) {
+            el.textContent = String(m.status || "none");
+            el.style.color = m.status === "authenticated" ? "var(--mint)" : "var(--amber)";
+          }
+        } catch (e3) {}
+        try {
+          let hint = document.querySelector('[data-mcpahint="' + String(nm).replace(/"/g, "") + '"]');
+          if (m.needsAuth && !hint) renderMcpServers();
+          else if (!m.needsAuth && hint) renderMcpServers();
+          else if (hint) hint.textContent = "Authorization required — Sign in";
+        } catch (e4) {}
+      } catch (e) {}
+    }
     // safety net: an unknown TERMINAL card must still stop the gerund + end the turn (never leave it looping).
     // Known informational traffic is ignored instead — it must never abort a live run.
     else if (working && !INFORMATIONAL_TYPES.has(String(m.type || ""))) { finish(m.info ? `<div class="card ok"><div class="sub">${String(m.info).replace(/</g,"<")}</div></div>` : ""); }
@@ -3932,7 +4078,7 @@
   const ZEN_FAMILIES = ["big-pickle", "minimax", "nemotron", "deepseek", "glm", "kimi", "grok", "ling", "mimo", "qwen"];
   // Go subscription catalog: chat-completions families only. Leading-token grouping keeps
   // digit-suffixed ids (hy3-preview, hy4, minimax-m3) under their family label.
-  const ZEN_GO_FAMILIES = ["glm", "kimi", "minimax", "deepseek", "mimo", "longcat", "hy", "space-bunny"];
+  const ZEN_GO_FAMILIES = ["glm", "kimi", "minimax", "deepseek", "mimo", "longcat", "hy", "space-bunny", "grok", "gpt", "muse-spark", "qwen", "claude", "gemini", "jev"];
   const metaFor = (id) => modelMetaMap[String(id || "").toLowerCase()] || null;
   function syncEffortUI() {
     const row = $("effrow");

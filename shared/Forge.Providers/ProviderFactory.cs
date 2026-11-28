@@ -182,6 +182,76 @@ namespace Forge.Providers
             return string.IsNullOrEmpty(sl);
         }
 
+        public static bool IsResponsesModel(string modelId)
+        {
+            try
+            {
+                string m = (modelId ?? "").Trim().ToLowerInvariant();
+                if (m.Length == 0) return false;
+                int slash = m.LastIndexOf('/');
+                if (slash >= 0) m = m.Substring(slash + 1);
+                if (m.StartsWith("grok-") || m == "grok" || m.StartsWith("grok_")) return true;
+                if (m.StartsWith("muse-spark-") || m == "muse-spark" || m.StartsWith("muse-spark_")) return true;
+                if (m.StartsWith("gpt-") && m.Contains("-luna")) return true;
+                return false;
+            }
+            catch { return false; }
+        }
+
+        public static bool IsGoMessagesModel(string modelId)
+        {
+            try
+            {
+                string m = (modelId ?? "").Trim().ToLowerInvariant();
+                if (m.Length == 0) return false;
+                int slash = m.LastIndexOf('/');
+                if (slash >= 0) m = m.Substring(slash + 1);
+                if (m.StartsWith("qwen3.") || m.StartsWith("qwen3-"))
+                {
+                    if (m.StartsWith("qwen3.7") || m.StartsWith("qwen3.8")) return true;
+                    if (m.Contains("-max") || m.Contains("-plus")) return true;
+                    return false;
+                }
+                if (m.StartsWith("claude-") || m == "claude" || m.StartsWith("claude_")) return true;
+                if (m.StartsWith("gemini-") || m == "gemini" || m.StartsWith("gemini_")) return true;
+                if (m.StartsWith("jev")) return true;
+                return false;
+            }
+            catch { return false; }
+        }
+
+        public static string WirePathFor(string baseUrl, string modelId)
+        {
+            try
+            {
+                string bu = (baseUrl ?? "").Trim().ToLowerInvariant();
+                if (bu.Length == 0) return "chat";
+                if (bu.IndexOf("opencode.ai") < 0) return "chat";
+                if (bu.IndexOf("/zen/go") < 0) return "chat";
+                if (IsResponsesModel(modelId)) return "responses";
+                if (IsGoMessagesModel(modelId)) return "messages";
+                return "chat";
+            }
+            catch { return "chat"; }
+        }
+
+        public static IProviderClient ResolveFor(string slug, string baseUrl, string modelId, string key)
+        {
+            try
+            {
+                string path = null;
+                try { path = WirePathFor(baseUrl, modelId); } catch { path = "chat"; }
+                if (string.Equals(path, "responses", StringComparison.OrdinalIgnoreCase))
+                    return new OpenAiResponsesClient(key, baseUrl, modelId);
+                if (string.Equals(path, "messages", StringComparison.OrdinalIgnoreCase))
+                    return new AnthropicClient(key, baseUrl, modelId);
+                if (string.Equals((slug ?? "").Trim(), "anthropic", StringComparison.OrdinalIgnoreCase))
+                    return new AnthropicClient(key, baseUrl, modelId);
+                return new OpenAiCompatibleClient(key, baseUrl, modelId);
+            }
+            catch { return new OpenAiCompatibleClient(key, baseUrl, modelId); }
+        }
+
         public static bool SupportsExtendedThinking(string model)
         {
             if (IsReasoningModel(model)) return true;

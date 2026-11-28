@@ -1,0 +1,40 @@
+sign-msi:
+  needs: build-msi
+  runs-on: windows-latest
+  steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Download MSI artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: forge-msi
+        path: dist
+    - name: Sign MSI with SignPath
+      shell: pwsh
+      env:
+        SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+        SIGNPATH_ORGANIZATION_ID: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+        SIGNPATH_ORG_ID: ${{ secrets.SIGNPATH_ORG_ID }}
+        SIGNPATH_PROJECT_SLUG: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+        SIGNPATH_SIGNING_POLICY_SLUG: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
+      run: |
+        $msi = Get-ChildItem -LiteralPath dist -Filter *.msi | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if (-not $msi) { throw 'No MSI artifact to sign.' }
+        pwsh -NoProfile -ExecutionPolicy Bypass -File installer/sign-with-signpath.ps1 -MsiPath $msi.FullName
+    - name: Verify Authenticode signature
+      shell: pwsh
+      run: |
+        $signed = Get-ChildItem -LiteralPath dist -Filter *.signed.msi | Select-Object -First 1
+        if (-not $signed) { throw 'Signed MSI missing; refusing to publish unsigned output.' }
+        $sig = Get-AuthenticodeSignature -LiteralPath $signed.FullName
+        if ($sig.Status -ne 'Valid') { throw ('Signature status: ' + $sig.Status) }
+    - name: Upload signed MSI artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: forge-msi-signed
+        path: dist/*.signed.msi
+    - name: Attach SIGNED MSI to release (on tag)
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v2
+      with:
+        files: dist/*.signed.msi

@@ -4,9 +4,11 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
@@ -77,10 +79,41 @@ namespace Forge.SolidWorks
             public string[] WatchPaths = new string[0];
             public string[] AlwaysAllow = new string[0];
             public string[] DisabledTools = new string[0];
+            public McpOAuthConfig OAuth;
+
+            public class McpOAuthConfig
+            {
+                public string ClientId = "";
+                public string AuthorizationUrl = "";
+                public string TokenUrl = "";
+                public string[] Scope = new string[0];
+                public int RedirectPort = 53821;
+            }
+
+            public bool HasOAuth
+            {
+                get
+                {
+                    return OAuth != null
+                        && !string.IsNullOrWhiteSpace(OAuth.ClientId)
+                        && !string.IsNullOrWhiteSpace(OAuth.AuthorizationUrl)
+                        && !string.IsNullOrWhiteSpace(OAuth.TokenUrl);
+                }
+            }
 
             public bool IsHttp
             {
                 get { return string.Equals(Type, "http", StringComparison.OrdinalIgnoreCase); }
+            }
+
+            public bool IsSse
+            {
+                get { return string.Equals(Type, "sse", StringComparison.OrdinalIgnoreCase); }
+            }
+
+            public bool IsRemote
+            {
+                get { return IsHttp || IsSse; }
             }
 
             public int EffectiveStartTimeoutMs
@@ -113,15 +146,22 @@ namespace Forge.SolidWorks
             public JArray CachedTools;
             public JArray CachedResources;
             public JArray CachedResourceTemplates;
+            public JArray CachedPrompts;
             public Timer WatchTimer;
             public string[] WatchPaths;
             public readonly Dictionary<string, DateTime> WatchStamps = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
             public int WatchBusy;
             public string Instructions = "";
             public bool IsHttp;
+            public bool IsSse;
             public string Url;
+            public string SsePostUrl;
             public Dictionary<string, string> Headers;
             public HttpClient Http;
+            public CancellationTokenSource SseCts;
+            public Thread SseThread;
+            public HttpResponseMessage SseResponse;
+            public HttpClient SseClient;
             public string SessionId;
             public bool HttpReady;
             public bool HttpFailed;
@@ -145,15 +185,6 @@ namespace Forge.SolidWorks
         private class WatchState
         {
             public string Name;
-        }
-
-        private class McpConfig
-        {
-            public string Command = "uvx";
-            public string[] Args = new[] { "solidworks-mcp" };
-            public int StartTimeoutMs;
-            public bool Enabled = true;
-            public int TimeoutMs = DefaultStdioTimeoutMs;
         }
 
         private static McpServerConfig DefaultServerConfig()
@@ -259,6 +290,15 @@ namespace Forge.SolidWorks
             c.WatchPaths = s.WatchPaths != null ? (string[])s.WatchPaths.Clone() : new string[0];
             c.AlwaysAllow = s.AlwaysAllow != null ? (string[])s.AlwaysAllow.Clone() : new string[0];
             c.DisabledTools = s.DisabledTools != null ? (string[])s.DisabledTools.Clone() : new string[0];
+            if (s.OAuth != null)
+            {
+                c.OAuth = new McpServerConfig.McpOAuthConfig();
+                c.OAuth.ClientId = s.OAuth.ClientId ?? "";
+                c.OAuth.AuthorizationUrl = s.OAuth.AuthorizationUrl ?? "";
+                c.OAuth.TokenUrl = s.OAuth.TokenUrl ?? "";
+                c.OAuth.Scope = s.OAuth.Scope != null ? (string[])s.OAuth.Scope.Clone() : new string[0];
+                c.OAuth.RedirectPort = s.OAuth.RedirectPort > 0 ? s.OAuth.RedirectPort : 53821;
+            }
             return c;
         }
 
@@ -273,11 +313,11 @@ namespace Forge.SolidWorks
             if (p.Args != null && p.Args.Length > 0 && !IsDefaultArgs(p.Args)) g.Args = (string[])p.Args.Clone();
             if (p.StartTimeoutMs >= MinConfiguredTimeoutMs) g.StartTimeoutMs = p.StartTimeoutMs;
             if (!p.Enabled) g.Enabled = false;
-            int projectDefaultTimeout = p.IsHttp ? DefaultHttpTimeoutMs : DefaultStdioTimeoutMs;
+            int projectDefaultTimeout = p.IsRemote ? DefaultHttpTimeoutMs : DefaultStdioTimeoutMs;
             if (p.TimeoutMs >= MinConfiguredTimeoutMs && p.TimeoutMs != projectDefaultTimeout) g.TimeoutMs = p.TimeoutMs;
-            if (p.IsHttp)
+            if (p.IsRemote)
             {
-                g.Type = "http";
+                g.Type = p.IsSse ? "sse" : "http";
                 if (!string.IsNullOrWhiteSpace(p.Url)) g.Url = p.Url.Trim();
                 if (p.Headers != null && p.Headers.Count > 0)
                     g.Headers = new Dictionary<string, string>(p.Headers, StringComparer.OrdinalIgnoreCase);
@@ -291,6 +331,19 @@ namespace Forge.SolidWorks
             if (p.WatchPaths != null && p.WatchPaths.Length > 0) g.WatchPaths = (string[])p.WatchPaths.Clone();
             if (p.AlwaysAllow != null && p.AlwaysAllow.Length > 0) g.AlwaysAllow = (string[])p.AlwaysAllow.Clone();
             if (p.DisabledTools != null && p.DisabledTools.Length > 0) g.DisabledTools = (string[])p.DisabledTools.Clone();
+            if (p.OAuth != null
+                && !string.IsNullOrWhiteSpace(p.OAuth.ClientId)
+                && !string.IsNullOrWhiteSpace(p.OAuth.AuthorizationUrl)
+                && !string.IsNullOrWhiteSpace(p.OAuth.TokenUrl))
+            {
+                var oc = new McpServerConfig.McpOAuthConfig();
+                oc.ClientId = (p.OAuth.ClientId ?? "").Trim();
+                oc.AuthorizationUrl = (p.OAuth.AuthorizationUrl ?? "").Trim();
+                oc.TokenUrl = (p.OAuth.TokenUrl ?? "").Trim();
+                oc.Scope = p.OAuth.Scope != null ? (string[])p.OAuth.Scope.Clone() : new string[0];
+                oc.RedirectPort = p.OAuth.RedirectPort > 0 && p.OAuth.RedirectPort <= 65535 ? p.OAuth.RedirectPort : 53821;
+                g.OAuth = oc;
+            }
             return g;
         }
 
@@ -403,8 +456,9 @@ namespace Forge.SolidWorks
                                 }
                             }
                             string type = ((string)o["type"] ?? "").Trim();
-                            s.Type = string.Equals(type, "http", StringComparison.OrdinalIgnoreCase) ? "http" : "stdio";
-                            if (s.IsHttp)
+                            s.Type = string.Equals(type, "http", StringComparison.OrdinalIgnoreCase) ? "http"
+                                : (string.Equals(type, "sse", StringComparison.OrdinalIgnoreCase) ? "sse" : "stdio");
+                            if (s.IsRemote)
                             {
                                 string url = ((string)o["url"] ?? "").Trim();
                                 if (url.Length > 0) s.Url = url;
@@ -420,12 +474,13 @@ namespace Forge.SolidWorks
                             int? tmo = (int?)o["timeoutMs"];
                             s.TimeoutMs = (tmo.HasValue && tmo.Value >= MinConfiguredTimeoutMs)
                                 ? tmo.Value
-                                : (s.IsHttp ? DefaultHttpTimeoutMs : DefaultStdioTimeoutMs);
+                                : (s.IsRemote ? DefaultHttpTimeoutMs : DefaultStdioTimeoutMs);
                             int stmo = (int?)o["startTimeoutMs"] ?? 0;
                             s.StartTimeoutMs = stmo >= MinConfiguredTimeoutMs ? stmo : 0;
                             s.WatchPaths = ParseStringArray(o["watchPaths"]);
                             s.AlwaysAllow = ParseStringArray(o["alwaysAllow"]);
                             s.DisabledTools = ParseStringArray(o["disabledTools"]);
+                            s.OAuth = ParseOAuthConfig(o["oauth"]);
                             list.Add(s);
                         }
                         catch { }
@@ -560,7 +615,7 @@ namespace Forge.SolidWorks
                         if (ja.Count == 0) ja.Add("solidworks-mcp");
                         int tmo = s.TimeoutMs >= MinConfiguredTimeoutMs
                             ? s.TimeoutMs
-                            : (s.IsHttp ? DefaultHttpTimeoutMs : DefaultStdioTimeoutMs);
+                            : (s.IsRemote ? DefaultHttpTimeoutMs : DefaultStdioTimeoutMs);
                         var o = new JObject
                         {
                             ["name"] = s.Name.Trim(),
@@ -571,9 +626,9 @@ namespace Forge.SolidWorks
                         };
                         if (s.StartTimeoutMs >= MinConfiguredTimeoutMs && s.StartTimeoutMs != tmo)
                             o["startTimeoutMs"] = s.StartTimeoutMs;
-                        if (s.IsHttp)
+                        if (s.IsRemote)
                         {
-                            o["type"] = "http";
+                            o["type"] = s.IsSse ? "sse" : "http";
                             o["url"] = s.Url ?? "";
                             if (s.Headers != null && s.Headers.Count > 0) o["headers"] = StringMapJson(s.Headers);
                         }
@@ -585,6 +640,18 @@ namespace Forge.SolidWorks
                         if (s.WatchPaths != null && s.WatchPaths.Length > 0) o["watchPaths"] = StringArrayJson(s.WatchPaths);
                         if (s.AlwaysAllow != null && s.AlwaysAllow.Length > 0) o["alwaysAllow"] = StringArrayJson(s.AlwaysAllow);
                         if (s.DisabledTools != null && s.DisabledTools.Length > 0) o["disabledTools"] = StringArrayJson(s.DisabledTools);
+                        if (s.OAuth != null && (!string.IsNullOrWhiteSpace(s.OAuth.ClientId) || !string.IsNullOrWhiteSpace(s.OAuth.AuthorizationUrl) || !string.IsNullOrWhiteSpace(s.OAuth.TokenUrl)))
+                        {
+                            var oo = new JObject
+                            {
+                                ["clientId"] = (s.OAuth.ClientId ?? "").Trim(),
+                                ["authorizationUrl"] = (s.OAuth.AuthorizationUrl ?? "").Trim(),
+                                ["tokenUrl"] = (s.OAuth.TokenUrl ?? "").Trim(),
+                                ["redirectPort"] = s.OAuth.RedirectPort > 0 ? s.OAuth.RedirectPort : 53821
+                            };
+                            if (s.OAuth.Scope != null && s.OAuth.Scope.Length > 0) oo["scope"] = StringArrayJson(s.OAuth.Scope);
+                            o["oauth"] = oo;
+                        }
                         arr.Add(o);
                     }
                     catch { }
@@ -660,40 +727,6 @@ namespace Forge.SolidWorks
             catch { }
         }
 
-        /// <summary>Legacy single-config read — thin shim over servers[0] (or default when empty).</summary>
-        private static McpConfig LoadConfig()
-        {
-            var cfg = new McpConfig();
-            try
-            {
-                var list = LoadServers();
-                var s = (list != null && list.Count > 0) ? list[0] : DefaultServerConfig();
-                if (s == null) s = DefaultServerConfig();
-                cfg.Command = string.IsNullOrWhiteSpace(s.Command) ? "uvx" : s.Command;
-                cfg.Args = (s.Args != null && s.Args.Length > 0) ? s.Args : new[] { "solidworks-mcp" };
-                cfg.StartTimeoutMs = s.EffectiveStartTimeoutMs;
-                cfg.Enabled = s.Enabled;
-                cfg.TimeoutMs = s.TimeoutMs >= MinConfiguredTimeoutMs ? s.TimeoutMs : DefaultStdioTimeoutMs;
-            }
-            catch { }
-            return cfg;
-        }
-
-        /// <summary>Legacy persist — thin shim: merges enabled/timeoutMs into servers[0] (writes `servers` form).</summary>
-        public static void SaveConfig(bool? enabled, int timeoutMs)
-        {
-            try
-            {
-                var list = LoadServers();
-                if (list == null || list.Count == 0) list = new List<McpServerConfig> { DefaultServerConfig() };
-                var first = list[0];
-                if (enabled.HasValue) first.Enabled = enabled.Value;
-                if (timeoutMs >= MinConfiguredTimeoutMs) first.TimeoutMs = timeoutMs;
-                SaveServers(list);
-            }
-            catch { }
-        }
-
         private static string ResolveName(string serverName)
         {
             try
@@ -740,6 +773,12 @@ namespace Forge.SolidWorks
         {
             var cfg = FindServer(name);
             return cfg != null && cfg.IsHttp;
+        }
+
+        private static bool IsSseServer(string name)
+        {
+            var cfg = FindServer(name);
+            return cfg != null && cfg.IsSse;
         }
 
         public static bool TrySplitQualified(string qualified, IEnumerable<string> serverNames, out string server, out string tool)
@@ -820,9 +859,9 @@ namespace Forge.SolidWorks
             {
                 lock (Gate)
                 {
-                    if (conn != null) { conn.CachedTools = null; conn.CachedResources = null; conn.CachedResourceTemplates = null; }
+                    if (conn != null) { conn.CachedTools = null; conn.CachedResources = null; conn.CachedResourceTemplates = null; conn.CachedPrompts = null; }
                     McpConn cur;
-                    if (Conns.TryGetValue(target, out cur) && cur != null) { cur.CachedTools = null; cur.CachedResources = null; cur.CachedResourceTemplates = null; }
+                    if (Conns.TryGetValue(target, out cur) && cur != null) { cur.CachedTools = null; cur.CachedResources = null; cur.CachedResourceTemplates = null; cur.CachedPrompts = null; }
                 }
             }
             catch { }
@@ -844,7 +883,8 @@ namespace Forge.SolidWorks
                 if (string.IsNullOrEmpty(m)) return false;
                 if (string.Equals(m, "notifications/tools/list_changed", StringComparison.Ordinal) ||
                     string.Equals(m, "notifications/resources/list_changed", StringComparison.Ordinal) ||
-                    string.Equals(m, "notifications/resources/updated", StringComparison.Ordinal))
+                    string.Equals(m, "notifications/resources/updated", StringComparison.Ordinal) ||
+                    string.Equals(m, "notifications/prompts/list_changed", StringComparison.Ordinal))
                 {
                     string target = ResolveName(serverName);
                     McpConn conn = null;
@@ -906,7 +946,7 @@ namespace Forge.SolidWorks
                 {
                     McpConn c;
                     if (!Conns.TryGetValue(name, out c) || c == null) return false;
-                    if (c.IsHttp) return c.HttpReady && !c.HttpFailed;
+                    if (c.IsHttp || c.IsSse) return c.HttpReady && !c.HttpFailed;
                     if (c.Proc == null) return false;
                     try { return !c.Proc.HasExited; } catch { return false; }
                 }
@@ -929,20 +969,41 @@ namespace Forge.SolidWorks
                         if (s == null) continue;
                         bool running = false;
                         try { running = IsRunningServer(s.Name); } catch { }
-                        arr.Add(new JObject
+                        var jo = new JObject
                         {
                             ["name"] = s.Name ?? "default",
                             ["command"] = s.Command ?? "uvx",
                             ["args"] = s.Args != null ? string.Join(" ", s.Args) : "",
                             ["enabled"] = s.Enabled,
-                            ["timeoutMs"] = s.TimeoutMs >= MinConfiguredTimeoutMs ? s.TimeoutMs : (s.IsHttp ? DefaultHttpTimeoutMs : DefaultStdioTimeoutMs),
-                            ["type"] = s.IsHttp ? "http" : "stdio",
-                            ["url"] = s.IsHttp ? (s.Url ?? "") : "",
+                            ["timeoutMs"] = s.TimeoutMs >= MinConfiguredTimeoutMs ? s.TimeoutMs : (s.IsRemote ? DefaultHttpTimeoutMs : DefaultStdioTimeoutMs),
+                            ["startTimeoutMs"] = s.StartTimeoutMs,
+                            ["type"] = s.IsSse ? "sse" : (s.IsHttp ? "http" : "stdio"),
+                            ["url"] = s.IsRemote ? (s.Url ?? "") : "",
                             ["running"] = running,
+                            ["cwd"] = s.Cwd ?? "",
+                            ["env"] = StringMapJson(s.Env),
+                            ["headers"] = StringMapJson(s.Headers),
                             ["watchPaths"] = StringArrayJson(s.WatchPaths),
                             ["alwaysAllow"] = StringArrayJson(s.AlwaysAllow),
                             ["disabledTools"] = StringArrayJson(s.DisabledTools)
-                        });
+                        };
+                        if (s.OAuth != null)
+                        {
+                            var oo = new JObject
+                            {
+                                ["clientId"] = (s.OAuth.ClientId ?? "").Trim(),
+                                ["authorizationUrl"] = (s.OAuth.AuthorizationUrl ?? "").Trim(),
+                                ["tokenUrl"] = (s.OAuth.TokenUrl ?? "").Trim(),
+                                ["redirectPort"] = s.OAuth.RedirectPort > 0 ? s.OAuth.RedirectPort : OAuthRedirectPortDefault,
+                                ["scope"] = StringArrayJson(s.OAuth.Scope)
+                            };
+                            jo["oauth"] = oo;
+                        }
+                        else
+                        {
+                            jo["oauth"] = JValue.CreateNull();
+                        }
+                        arr.Add(jo);
                     }
                     catch { }
                 }
@@ -962,11 +1023,21 @@ namespace Forge.SolidWorks
         /// <summary>Legacy full describe — thin shim over servers[0] (or default when empty).</summary>
         public static void DescribeFull(out string command, out string args, out bool enabled, out int timeoutMs)
         {
-            var cfg = LoadConfig();
-            command = cfg.Command ?? "";
-            args = cfg.Args != null ? string.Join(" ", cfg.Args) : "";
-            enabled = cfg.Enabled;
-            timeoutMs = cfg.TimeoutMs;
+            command = "uvx";
+            args = "solidworks-mcp";
+            enabled = true;
+            timeoutMs = DefaultStdioTimeoutMs;
+            try
+            {
+                var list = LoadServers();
+                var s = (list != null && list.Count > 0) ? list[0] : DefaultServerConfig();
+                if (s == null) s = DefaultServerConfig();
+                command = string.IsNullOrWhiteSpace(s.Command) ? "uvx" : s.Command;
+                args = (s.Args != null && s.Args.Length > 0) ? string.Join(" ", s.Args) : "solidworks-mcp";
+                enabled = s.Enabled;
+                timeoutMs = s.TimeoutMs >= MinConfiguredTimeoutMs ? s.TimeoutMs : DefaultStdioTimeoutMs;
+            }
+            catch { }
         }
 
         /// <summary>
@@ -1061,7 +1132,8 @@ namespace Forge.SolidWorks
                     ["capabilities"] = new JObject
                     {
                         ["tools"] = new JObject { ["listChanged"] = true },
-                        ["resources"] = new JObject { ["subscribe"] = false, ["listChanged"] = true }
+                        ["resources"] = new JObject { ["subscribe"] = false, ["listChanged"] = true },
+                        ["prompts"] = new JObject { ["listChanged"] = true }
                     },
                     ["clientInfo"] = new JObject { ["name"] = "Forge", ["version"] = "1.0" }
                 };
@@ -1100,6 +1172,43 @@ namespace Forge.SolidWorks
                         Stop(name);
                         if (ex is McpException) throw;
                         throw new McpException("MCP server '" + name + "' handshake failed: " + ex.Message + " — check the MCP server URL and retry.");
+                    }
+                }
+                else if (cfg.IsSse)
+                {
+                    bool alreadyReady;
+                    lock (Gate)
+                    {
+                        var conn = GetConnLocked(name);
+                        alreadyReady = (conn.IsSse && conn.HttpReady && !conn.HttpFailed && !string.IsNullOrEmpty(conn.SsePostUrl));
+                        if (!alreadyReady)
+                        {
+                            conn.IsHttp = false;
+                            conn.IsSse = true;
+                            conn.Url = cfg.Url;
+                            conn.Headers = cfg.Headers;
+                            EnsureHttpClientLocked(conn);
+                        }
+                    }
+                    if (alreadyReady) { RegisterWatch(name); return; }
+                    try
+                    {
+                        JObject res = await RpcOnServerAsync(name, "initialize", init, initTimeout, ct).ConfigureAwait(false);
+                        if (res == null) throw new McpException("MCP server '" + name + "' returned an empty initialize response — check the server SSE URL and retry.");
+                        StoreInstructions(name, res);
+                        await NotifyOnServerAsync(name, "notifications/initialized", new JObject()).ConfigureAwait(false);
+                        bool notifyFailed;
+                        lock (Gate) { var c = GetConnLocked(name); notifyFailed = c.HttpFailed; if (!notifyFailed) c.HttpReady = true; }
+                        if (notifyFailed)
+                            throw new McpException("MCP server '" + name + "' failed to confirm initialization — check the SSE URL/headers and the server logs, then retry.");
+                        RegisterWatch(name);
+                    }
+                    catch (OperationCanceledException) { Stop(name); throw; }
+                    catch (Exception ex)
+                    {
+                        Stop(name);
+                        if (ex is McpException) throw;
+                        throw new McpException("MCP server '" + name + "' handshake failed: " + ex.Message + " — check the MCP server SSE URL and retry.");
                     }
                 }
                 else
@@ -1342,7 +1451,8 @@ namespace Forge.SolidWorks
                                 string m = (string)msg["method"];
                                     if (string.Equals(m, "notifications/tools/list_changed", StringComparison.Ordinal) ||
                                         string.Equals(m, "notifications/resources/list_changed", StringComparison.Ordinal) ||
-                                        string.Equals(m, "notifications/resources/updated", StringComparison.Ordinal))
+                                        string.Equals(m, "notifications/resources/updated", StringComparison.Ordinal) ||
+                                        string.Equals(m, "notifications/prompts/list_changed", StringComparison.Ordinal))
                                         OnToolsListChanged(rs.Name, conn);
                             }
                             catch { }
@@ -1456,10 +1566,20 @@ namespace Forge.SolidWorks
             conn.WatchPaths = null;
             try { conn.WatchStamps.Clear(); } catch { }
             conn.WatchBusy = 0;
-            conn.CachedTools = null; // invalidate: a restarted server may serve a different tool set
+            conn.CachedTools = null;
             conn.CachedResources = null;
             conn.CachedResourceTemplates = null;
+            conn.CachedPrompts = null;
             conn.Instructions = "";
+            try { if (conn.SseCts != null) conn.SseCts.Cancel(); } catch { }
+            conn.SseCts = null;
+            conn.SseThread = null;
+            try { if (conn.SseResponse != null) conn.SseResponse.Dispose(); } catch { }
+            conn.SseResponse = null;
+            try { if (conn.SseClient != null) conn.SseClient.Dispose(); } catch { }
+            conn.SseClient = null;
+            conn.SsePostUrl = null;
+            conn.IsSse = false;
             conn.HttpReady = false;
             conn.HttpFailed = false;
             conn.SessionId = null;
@@ -1510,6 +1630,7 @@ namespace Forge.SolidWorks
         {
             string name = ResolveName(serverName);
             if (IsHttpServer(name)) return HttpNotifyAsync(name, method, p);
+            if (IsSseServer(name)) return SseNotifyAsync(name, method, p);
             var msg = new JObject { ["jsonrpc"] = "2.0", ["method"] = method };
             if (p != null) msg["params"] = p;
             lock (Gate)
@@ -1574,13 +1695,21 @@ namespace Forge.SolidWorks
             if (timeoutMs <= 0) timeoutMs = 60000; // Task.Delay throws on 0/negative: bound it instead
             if (string.IsNullOrWhiteSpace(method)) throw new McpException("MCP method must not be empty.");
             bool http;
+            bool sse;
             lock (Gate)
             {
                 McpConn existing;
                 http = Conns.TryGetValue(name, out existing) && existing != null && existing.IsHttp;
+                sse = !http && Conns.TryGetValue(name, out existing) && existing != null && existing.IsSse;
             }
-            if (!http) http = IsHttpServer(name);
+            if (!http && !sse)
+            {
+                var cfgs = FindServer(name);
+                http = cfgs != null && cfgs.IsHttp;
+                sse = !http && cfgs != null && cfgs.IsSse;
+            }
             if (http) return await HttpRpcAsync(name, method, p, timeoutMs, ct).ConfigureAwait(false);
+            if (sse) return await SseRpcAsync(name, method, p, timeoutMs, ct).ConfigureAwait(false);
             int id = Interlocked.Increment(ref NextId);
             var msg = new JObject { ["jsonrpc"] = "2.0", ["id"] = id, ["method"] = method };
             if (p != null) msg["params"] = p;
@@ -1660,6 +1789,27 @@ namespace Forge.SolidWorks
             try { lock (Gate) { conn.HttpFailed = true; conn.SessionId = null; } } catch { }
         }
 
+        private static string ExpandEnvToken(string name, string original)
+        {
+            try
+            {
+                string v = Environment.GetEnvironmentVariable(name);
+                if (!string.IsNullOrEmpty(v)) return v;
+            }
+            catch { }
+            return original;
+        }
+
+        private static string ExpandHeaderValue(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return value;
+            string s = value;
+            try { s = Regex.Replace(s, @"\{env:([A-Za-z_][A-Za-z0-9_]*)\}", m => ExpandEnvToken(m.Groups[1].Value, m.Value)); } catch { }
+            try { s = Regex.Replace(s, @"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", m => ExpandEnvToken(m.Groups[1].Value, m.Value)); } catch { }
+            try { s = Regex.Replace(s, @"%([A-Za-z_][A-Za-z0-9_]*)%", m => ExpandEnvToken(m.Groups[1].Value, m.Value)); } catch { }
+            return s;
+        }
+
         private static JObject TryParseRpcData(string data, string serverName)
         {
             try
@@ -1730,13 +1880,17 @@ namespace Forge.SolidWorks
                 conn = GetConnLocked(name);
                 EnsureHttpClientLocked(conn);
                 http = conn.Http;
-                url = conn.Url;
+                url = !string.IsNullOrEmpty(conn.SsePostUrl) ? conn.SsePostUrl : conn.Url;
                 sid = conn.SessionId;
                 hdrs = conn.Headers;
                 int n;
                 HttpInFlight.TryGetValue(http, out n);
                 HttpInFlight[http] = n + 1;
             }
+            string oauthBearer = null;
+            try { oauthBearer = await GetOAuthBearerAsync(name, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { throw; }
+            catch { oauthBearer = null; }
             try
             {
                 if (string.IsNullOrWhiteSpace(url)) throw new McpException("MCP server '" + name + "' has no URL configured — add a URL in Settings → MCP servers, then retry.");
@@ -1753,13 +1907,17 @@ namespace Forge.SolidWorks
                             req.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
                             req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
                             req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+                            bool hasAuthHeader = false;
                             if (hdrs != null)
                                 foreach (var kv in hdrs)
                                 {
                                     if (string.IsNullOrEmpty(kv.Key) || kv.Value == null) continue;
-                                    if (!req.Headers.TryAddWithoutValidation(kv.Key, kv.Value))
-                                        req.Content.Headers.TryAddWithoutValidation(kv.Key, kv.Value);
+                                    string xv = ExpandHeaderValue(kv.Value);
+                                    if (!req.Headers.TryAddWithoutValidation(kv.Key, xv))
+                                        req.Content.Headers.TryAddWithoutValidation(kv.Key, xv);
+                                    if (string.Equals(kv.Key, "Authorization", StringComparison.OrdinalIgnoreCase)) hasAuthHeader = true;
                                 }
+                            if (!hasAuthHeader && !string.IsNullOrEmpty(oauthBearer)) req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + oauthBearer);
                             if (!string.IsNullOrEmpty(sid)) req.Headers.TryAddWithoutValidation("Mcp-Session-Id", sid);
                             respMsg = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, linked.Token).ConfigureAwait(false);
                         }
@@ -1819,8 +1977,14 @@ namespace Forge.SolidWorks
                         if (!respMsg.IsSuccessStatusCode)
                         {
                             MarkHttpFailed(conn);
+                            int httpCode = (int)respMsg.StatusCode;
                             string why = respMsg.ReasonPhrase ?? "";
-                            throw new McpException("MCP server '" + name + "' returned HTTP " + (int)respMsg.StatusCode + (string.IsNullOrEmpty(why) ? "" : " " + why) + " for `" + method + "`" + (string.IsNullOrEmpty(text) ? "" : ": " + Trunc(text, 200)) + " — check the URL/headers and the server logs, then retry.");
+                            if ((httpCode == 401 || LooksLikeNeedsAuth(text)) && ServerHasOAuth(name))
+                            {
+                                MarkOAuthNeedsAuth(name);
+                                throw new McpException("MCP server '" + name + "' requires OAuth sign-in (HTTP " + httpCode + (string.IsNullOrEmpty(why) ? "" : " " + why) + " for `" + method + "`) — run OAuth sign-in for this server, then retry. [needs_auth]");
+                            }
+                            throw new McpException("MCP server '" + name + "' returned HTTP " + httpCode + (string.IsNullOrEmpty(why) ? "" : " " + why) + " for `" + method + "`" + (string.IsNullOrEmpty(text) ? "" : ": " + Trunc(text, 200)) + " — check the URL/headers and the server logs, then retry.");
                         }
                         JObject parsed = ParseRpcResponse(text, name);
                         if (parsed == null)
@@ -1830,6 +1994,7 @@ namespace Forge.SolidWorks
                             throw new McpException("MCP server '" + name + "' returned an unreadable response to `" + method + "` (" + (text != null ? text.Length : 0) + " chars): " + Trunc(text, 200) + " — check the server logs and retry.");
                         }
                         lock (Gate) { conn.HttpFailed = false; }
+                        try { ClearOAuthNeedsAuth(name); } catch { }
                         return parsed;
                     }
                 }
@@ -1859,13 +2024,7 @@ namespace Forge.SolidWorks
             if (p != null) msg["params"] = p;
             JObject resp = await HttpPostAsync(name, method, msg.ToString(Newtonsoft.Json.Formatting.None), timeoutMs, ct).ConfigureAwait(false);
             var err = resp["error"];
-            if (err != null)
-            {
-                string em = null;
-                try { em = (string)err["message"]; } catch { }
-                if (string.IsNullOrEmpty(em)) { try { em = err.ToString(); } catch { em = "unknown error"; } }
-                throw new McpException("MCP server '" + name + "' rejected `" + method + "`: " + Trunc(em, 500) + " — check the tool name/arguments and the server logs, then retry.");
-            }
+            if (err != null) throw RpcError(name, method, err);
             JToken rid = resp["id"];
             if (rid != null && rid.Type != JTokenType.Null)
             {
@@ -1885,6 +2044,381 @@ namespace Forge.SolidWorks
         {
             try
             {
+                var msg = new JObject { ["jsonrpc"] = "2.0", ["method"] = method };
+                if (p != null) msg["params"] = p;
+                await HttpPostAsync(name, method, msg.ToString(Newtonsoft.Json.Formatting.None), 60000, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch { }
+        }
+
+        private class SseReaderState
+        {
+            public string Name;
+            public McpConn Conn;
+            public HttpClient Client;
+            public HttpResponseMessage Response;
+            public Stream Stream;
+            public CancellationTokenSource Cts;
+            public TaskCompletionSource<string> EndpointTcs;
+        }
+
+        private static void TryAdoptSseEndpoint(string name, McpConn conn, SseReaderState rs, string endpoint)
+        {
+            try
+            {
+                string ep = (endpoint ?? "").Trim().Trim('"');
+                if (ep.Length == 0) return;
+                string baseUrl;
+                lock (Gate) { baseUrl = conn.Url; if (!string.IsNullOrEmpty(conn.SsePostUrl)) return; }
+                if (string.IsNullOrWhiteSpace(baseUrl)) return;
+                string post;
+                try
+                {
+                    if (ep.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || ep.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) post = ep;
+                    else post = new Uri(new Uri(baseUrl), ep).ToString();
+                }
+                catch { return; }
+                lock (Gate) { if (string.IsNullOrEmpty(conn.SsePostUrl)) conn.SsePostUrl = post; }
+                try { if (rs.EndpointTcs != null) rs.EndpointTcs.TrySetResult(post); } catch { }
+            }
+            catch { }
+        }
+
+        private static void DispatchSseFrame(string name, McpConn conn, SseReaderState rs, string evt, string payload)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(payload) || payload.Trim() == "[DONE]") return;
+                string t = payload.Trim();
+                if (!t.StartsWith("{"))
+                {
+                    if (string.Equals(evt, "endpoint", StringComparison.OrdinalIgnoreCase) || string.IsNullOrEmpty(evt))
+                        TryAdoptSseEndpoint(name, conn, rs, t);
+                    return;
+                }
+                JObject o = null;
+                try { o = JObject.Parse(t); } catch { return; }
+                if (o == null) return;
+                var jt = o["id"];
+                if (jt == null || jt.Type == JTokenType.Null)
+                {
+                    HandleNotification(name, o);
+                    return;
+                }
+                int id = -1;
+                try
+                {
+                    if (jt.Type == JTokenType.Integer) id = jt.Value<int>();
+                    else if (jt.Type == JTokenType.String) { if (!int.TryParse((string)jt, out id)) return; }
+                    else { try { id = Convert.ToInt32(((JValue)jt).Value); } catch { return; } }
+                }
+                catch { return; }
+                TaskCompletionSource<string> tcs;
+                if (conn.Pending.TryRemove(id, out tcs))
+                    try { tcs.TrySetResult(t); } catch { }
+            }
+            catch { }
+        }
+
+        private static void FailSsePending(McpConn conn, string message)
+        {
+            try
+            {
+                foreach (var kv in conn.Pending)
+                {
+                    TaskCompletionSource<string> tcs;
+                    if (conn.Pending.TryRemove(kv.Key, out tcs))
+                        try { tcs.TrySetException(new McpException(message)); } catch { }
+                }
+            }
+            catch { }
+        }
+
+        private static void SseReaderLoop(object state)
+        {
+            var rs = state as SseReaderState;
+            if (rs == null || rs.Conn == null) return;
+            var conn = rs.Conn;
+            string name = rs.Name;
+            try
+            {
+                using (var reader = new StreamReader(rs.Stream, Encoding.UTF8, true))
+                {
+                    string evt = null;
+                    var data = new StringBuilder();
+                    string line;
+                    while ((line = reader.ReadLine()) != null)
+                    {
+                        bool cancel = false;
+                        try { cancel = rs.Cts.IsCancellationRequested; } catch { cancel = true; }
+                        if (cancel) break;
+                        if (line.StartsWith(":")) continue;
+                        if (line.Length == 0)
+                        {
+                            string payload = data.Length > 0 ? data.ToString() : null;
+                            string ev = evt;
+                            evt = null;
+                            data.Length = 0;
+                            if (payload != null) DispatchSseFrame(name, conn, rs, ev, payload);
+                            continue;
+                        }
+                        if (line.StartsWith("event:"))
+                        {
+                            string e = line.Substring(6).Trim();
+                            evt = e;
+                            continue;
+                        }
+                        if (line.StartsWith("data:"))
+                        {
+                            string d = line.Substring(5);
+                            if (d.StartsWith(" ")) d = d.Substring(1);
+                            if (data.Length > 0) data.Append('\n');
+                            if (data.Length < 4 * 1024 * 1024) data.Append(d);
+                        }
+                    }
+                }
+            }
+            catch { }
+            bool expected = true;
+            try { expected = rs.Cts.IsCancellationRequested; } catch { expected = true; }
+            if (!expected)
+            {
+                AppendServerLog(name, "[forge] MCP SSE stream closed");
+                MarkHttpFailed(conn);
+                FailSsePending(conn, "MCP server '" + name + "' SSE stream closed — retry the call.");
+            }
+            try
+            {
+                lock (Gate)
+                {
+                    McpConn cur;
+                    if (Conns.TryGetValue(ResolveName(name), out cur) && object.ReferenceEquals(cur, conn))
+                        if (object.ReferenceEquals(conn.SseThread, Thread.CurrentThread)) conn.SseThread = null;
+                }
+            }
+            catch { }
+            try { if (rs.Response != null) rs.Response.Dispose(); } catch { }
+            try { if (rs.Client != null) rs.Client.Dispose(); } catch { }
+        }
+
+        private static async Task<string> SseConnectAsync(string name, int timeoutMs, CancellationToken ct)
+        {
+            McpConn conn;
+            string url;
+            Dictionary<string, string> hdrs;
+            lock (Gate)
+            {
+                conn = GetConnLocked(name);
+                if (!string.IsNullOrEmpty(conn.SsePostUrl) && !conn.HttpFailed && conn.SseThread != null && conn.SseThread.IsAlive)
+                    return conn.SsePostUrl;
+                try { if (conn.SseCts != null) conn.SseCts.Cancel(); } catch { }
+                conn.SseCts = null;
+                conn.SseThread = null;
+                try { if (conn.SseResponse != null) conn.SseResponse.Dispose(); } catch { }
+                conn.SseResponse = null;
+                try { if (conn.SseClient != null) conn.SseClient.Dispose(); } catch { }
+                conn.SseClient = null;
+                conn.SsePostUrl = null;
+                url = conn.Url;
+                hdrs = conn.Headers;
+            }
+            if (string.IsNullOrWhiteSpace(url)) throw new McpException("MCP server '" + name + "' has no URL configured — add an SSE URL in Settings → MCP servers, then retry.");
+            string oauthBearer = null;
+            try { oauthBearer = await GetOAuthBearerAsync(name, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { throw; }
+            catch { oauthBearer = null; }
+            if (timeoutMs <= 0) timeoutMs = 60000;
+            var client = new HttpClient();
+            try { client.Timeout = Timeout.InfiniteTimeSpan; } catch { }
+            bool handedOff = false;
+            HttpResponseMessage resp = null;
+            try
+            {
+                using (var req = new HttpRequestMessage(HttpMethod.Get, url))
+                {
+                    req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+                    bool hasAuthHeader = false;
+                    if (hdrs != null)
+                        foreach (var kv in hdrs)
+                        {
+                            if (string.IsNullOrEmpty(kv.Key) || kv.Value == null) continue;
+                            req.Headers.TryAddWithoutValidation(kv.Key, ExpandHeaderValue(kv.Value));
+                            if (string.Equals(kv.Key, "Authorization", StringComparison.OrdinalIgnoreCase)) hasAuthHeader = true;
+                        }
+                    if (!hasAuthHeader && !string.IsNullOrEmpty(oauthBearer)) req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + oauthBearer);
+                    try { resp = await client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { throw new OperationCanceledException(ct); }
+                    catch (Exception ex) { throw new McpException("MCP server '" + name + "' unavailable (" + ex.Message + ") — check its SSE URL and retry."); }
+                }
+                if (!resp.IsSuccessStatusCode)
+                {
+                    string why = resp.ReasonPhrase ?? "";
+                    int code = (int)resp.StatusCode;
+                    try { resp.Dispose(); } catch { }
+                    try { client.Dispose(); } catch { }
+                    MarkHttpFailed(conn);
+                    if (code == 401 && ServerHasOAuth(name))
+                    {
+                        MarkOAuthNeedsAuth(name);
+                        throw new McpException("MCP server '" + name + "' requires OAuth sign-in (HTTP 401 for the SSE stream) — run OAuth sign-in for this server, then retry. [needs_auth]");
+                    }
+                    throw new McpException("MCP server '" + name + "' returned HTTP " + code + (string.IsNullOrEmpty(why) ? "" : " " + why) + " for the SSE stream — check the SSE URL/headers and the server logs, then retry.");
+                }
+                Stream stream = null;
+                try { stream = await resp.Content.ReadAsStreamAsync().ConfigureAwait(false); }
+                catch (Exception ex)
+                {
+                    try { resp.Dispose(); } catch { }
+                    try { client.Dispose(); } catch { }
+                    MarkHttpFailed(conn);
+                    throw new McpException("MCP server '" + name + "' unavailable (" + ex.Message + ") — check its SSE URL and retry.");
+                }
+                var rs = new SseReaderState();
+                rs.Name = name;
+                rs.Conn = conn;
+                rs.Client = client;
+                rs.Response = resp;
+                rs.Stream = stream;
+                rs.Cts = new CancellationTokenSource();
+                rs.EndpointTcs = new TaskCompletionSource<string>();
+                lock (Gate)
+                {
+                    McpConn cur = GetConnLocked(name);
+                    if (!object.ReferenceEquals(cur, conn))
+                    {
+                        try { resp.Dispose(); } catch { }
+                        try { client.Dispose(); } catch { }
+                        throw new McpException("MCP server '" + name + "' was replaced during connect — retry the call.");
+                    }
+                    conn.SseCts = rs.Cts;
+                    conn.SseResponse = resp;
+                    conn.SseClient = client;
+                    conn.SseThread = new Thread(SseReaderLoop) { IsBackground = true, Name = "forge-mcp-sse" };
+                    conn.SseThread.Start(rs);
+                }
+                handedOff = true;
+                object winner;
+                using (var timeoutCts = new CancellationTokenSource())
+                {
+                    var timeoutTask = Task.Delay(timeoutMs, timeoutCts.Token);
+                    if (ct.CanBeCanceled)
+                        winner = await Task.WhenAny(rs.EndpointTcs.Task, timeoutTask, Task.Delay(-1, ct)).ConfigureAwait(false);
+                    else
+                        winner = await Task.WhenAny(rs.EndpointTcs.Task, timeoutTask).ConfigureAwait(false);
+                    try { timeoutCts.Cancel(); } catch { }
+                }
+                if (ct.IsCancellationRequested)
+                {
+                    try { rs.Cts.Cancel(); } catch { }
+                    throw new OperationCanceledException(ct);
+                }
+                if (winner == rs.EndpointTcs.Task)
+                    return await rs.EndpointTcs.Task.ConfigureAwait(false);
+                try { rs.Cts.Cancel(); } catch { }
+                MarkHttpFailed(conn);
+                throw new McpException("MCP server '" + name + "' did not send an SSE endpoint after " + (timeoutMs / 1000) + "s — check its SSE URL/logs, then retry.");
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (McpException) { throw; }
+            catch (Exception ex)
+            {
+                MarkHttpFailed(conn);
+                throw new McpException("MCP server '" + name + "' unavailable (" + ex.Message + ") — check its SSE URL and retry.");
+            }
+            finally
+            {
+                if (!handedOff)
+                {
+                    try { if (resp != null) resp.Dispose(); } catch { }
+                    try { client.Dispose(); } catch { }
+                }
+            }
+        }
+
+        private static async Task<JObject> SseRpcAsync(string name, string method, JObject p, int timeoutMs, CancellationToken ct)
+        {
+            if (timeoutMs <= 0) timeoutMs = 60000;
+            int start = Environment.TickCount;
+            await SseConnectAsync(name, timeoutMs, ct).ConfigureAwait(false);
+            int id = Interlocked.Increment(ref NextId);
+            var msg = new JObject { ["jsonrpc"] = "2.0", ["id"] = id, ["method"] = method };
+            if (p != null) msg["params"] = p;
+            var tcs = new TaskCompletionSource<string>();
+            McpConn conn;
+            lock (Gate) { conn = GetConnLocked(name); conn.Pending[id] = tcs; }
+            string body = msg.ToString(Newtonsoft.Json.Formatting.None);
+            JObject resp = null;
+            bool posted = false;
+            try { resp = await HttpPostAsync(name, method, body, timeoutMs, ct).ConfigureAwait(false); posted = true; }
+            catch { posted = false; }
+            if (posted && resp != null)
+            {
+                bool mine = false;
+                try
+                {
+                    var rid = resp["id"];
+                    if (rid != null && rid.Type != JTokenType.Null)
+                    {
+                        string got = rid.Type == JTokenType.String ? (string)rid : rid.ToString(Newtonsoft.Json.Formatting.None);
+                        mine = string.Equals(got.Trim('"'), id.ToString(System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal);
+                    }
+                    else mine = resp["result"] != null || resp["error"] != null;
+                }
+                catch { mine = false; }
+                if (mine)
+                {
+                    TaskCompletionSource<string> dropped;
+                    conn.Pending.TryRemove(id, out dropped);
+                    var err = resp["error"];
+                    if (err != null) throw RpcError(name, method, err);
+                    return resp["result"] as JObject;
+                }
+            }
+            int elapsed = unchecked(Environment.TickCount - start);
+            int rest = timeoutMs - elapsed;
+            if (rest < 1000) rest = 1000;
+            object winner;
+            using (var timeoutCts = new CancellationTokenSource())
+            {
+                var timeoutTask = Task.Delay(rest, timeoutCts.Token);
+                if (ct.CanBeCanceled)
+                    winner = await Task.WhenAny(tcs.Task, timeoutTask, Task.Delay(-1, ct)).ConfigureAwait(false);
+                else
+                    winner = await Task.WhenAny(tcs.Task, timeoutTask).ConfigureAwait(false);
+                try { timeoutCts.Cancel(); } catch { }
+            }
+            McpConn wconn;
+            lock (Gate) { wconn = GetConnLocked(name); }
+            if (ct.IsCancellationRequested)
+            {
+                TaskCompletionSource<string> dropped;
+                wconn.Pending.TryRemove(id, out dropped);
+                try { tcs.TrySetException(new OperationCanceledException(ct)); } catch { }
+                ObserveFault(tcs.Task);
+                throw new OperationCanceledException(ct);
+            }
+            if (winner != tcs.Task)
+            {
+                TaskCompletionSource<string> dropped;
+                wconn.Pending.TryRemove(id, out dropped);
+                try { tcs.TrySetException(new McpException("MCP server '" + name + "' timed out on `" + method + "`.")); } catch { }
+                ObserveFault(tcs.Task);
+                throw new McpException("MCP server '" + name + "' timed out on `" + method + "` after " + (timeoutMs / 1000) + "s — check its SSE URL/logs, then retry.");
+            }
+            string line = await tcs.Task.ConfigureAwait(false);
+            JObject parsed;
+            try { parsed = JObject.Parse(line); }
+            catch { throw new McpException("MCP server '" + name + "' returned non-JSON text for `" + method + "` (" + (line != null ? line.Length : 0) + " chars): " + Trunc(line, 200) + " — check the server logs and retry."); }
+            var streamErr = parsed["error"];
+            if (streamErr != null) throw RpcError(name, method, streamErr);
+            return parsed["result"] as JObject;
+        }
+
+        private static async Task SseNotifyAsync(string name, string method, JObject p)
+        {
+            try
+            {
+                await SseConnectAsync(name, 60000, CancellationToken.None).ConfigureAwait(false);
                 var msg = new JObject { ["jsonrpc"] = "2.0", ["method"] = method };
                 if (p != null) msg["params"] = p;
                 await HttpPostAsync(name, method, msg.ToString(Newtonsoft.Json.Formatting.None), 60000, CancellationToken.None).ConfigureAwait(false);
@@ -2088,6 +2622,107 @@ namespace Forge.SolidWorks
             return s.Length > 8000 ? s.Substring(0, 8000) + "…(truncated)" : s;
         }
 
+        public static Task<JArray> ListPromptsAsync(CancellationToken ct = default(CancellationToken), string serverName = null)
+        {
+            return ListPromptsOnAsync(ResolveName(serverName), ct);
+        }
+
+        public static Task<JArray> ListPromptsAsync(string serverName, CancellationToken ct)
+        {
+            return ListPromptsOnAsync(ResolveName(serverName), ct);
+        }
+
+        private static async Task<JArray> ListPromptsOnAsync(string name, CancellationToken ct)
+        {
+            await EnsureStartedOnAsync(name, 0, ct).ConfigureAwait(false);
+            McpConn conn;
+            lock (Gate) { conn = GetConnLocked(name); if (conn.CachedPrompts != null) return conn.CachedPrompts; }
+            JObject res = await RpcOnServerAsync(name, "prompts/list", new JObject(), 60000, ct).ConfigureAwait(false);
+            var prompts = res != null ? res["prompts"] as JArray : null;
+            if (prompts == null || prompts.Count == 0) return new JArray();
+            var capped = new JArray();
+            int used = 2;
+            foreach (var pr in prompts)
+            {
+                string js;
+                try { js = pr != null ? pr.ToString(Newtonsoft.Json.Formatting.None) : ""; } catch { continue; }
+                if (string.IsNullOrEmpty(js)) continue;
+                if (used + js.Length > 8000) break;
+                try { capped.Add(pr.DeepClone()); } catch { continue; }
+                used += js.Length + 1;
+            }
+            lock (Gate) { conn.CachedPrompts = capped; }
+            return capped;
+        }
+
+        public static Task<string> GetPromptAsync(string promptName, JObject arguments, CancellationToken ct = default(CancellationToken), string serverName = null)
+        {
+            return GetPromptOnAsync(ResolveName(serverName), promptName, arguments, ct);
+        }
+
+        public static Task<string> GetPromptAsync(string serverName, string promptName, JObject arguments, CancellationToken ct)
+        {
+            return GetPromptOnAsync(ResolveName(serverName), promptName, arguments, ct);
+        }
+
+        private static void AppendPromptContent(StringBuilder sb, JToken content)
+        {
+            if (sb == null || content == null) return;
+            try
+            {
+                if (content.Type == JTokenType.String)
+                {
+                    string t = (string)content;
+                    if (!string.IsNullOrEmpty(t)) { if (sb.Length > 0) sb.Append('\n'); sb.Append(t); }
+                    return;
+                }
+                var arr = content as JArray;
+                if (arr != null)
+                {
+                    foreach (var c in arr) AppendPromptContent(sb, c);
+                    return;
+                }
+                var o = content as JObject;
+                if (o != null)
+                {
+                    string type = null;
+                    try { type = (string)o["type"]; } catch { type = null; }
+                    string text = null;
+                    try { text = (string)o["text"]; } catch { text = null; }
+                    if (!string.IsNullOrEmpty(text) && (string.IsNullOrEmpty(type) || string.Equals(type, "text", StringComparison.OrdinalIgnoreCase)))
+                    { if (sb.Length > 0) sb.Append('\n'); sb.Append(text); }
+                }
+            }
+            catch { }
+        }
+
+        private static async Task<string> GetPromptOnAsync(string name, string promptName, JObject arguments, CancellationToken ct)
+        {
+            if (string.IsNullOrWhiteSpace(promptName)) throw new McpException("A prompt name is required — pass a name returned by list_mcp_prompts.");
+            await EnsureStartedOnAsync(name, 0, ct).ConfigureAwait(false);
+            int tmo;
+            try { var cfg = FindServer(name); tmo = cfg != null && cfg.TimeoutMs >= MinConfiguredTimeoutMs ? cfg.TimeoutMs : DefaultStdioTimeoutMs; }
+            catch { tmo = DefaultStdioTimeoutMs; }
+            var p = new JObject { ["name"] = promptName.Trim() };
+            if (arguments != null) p["arguments"] = arguments;
+            JObject res = await RpcOnServerAsync(name, "prompts/get", p, tmo, ct).ConfigureAwait(false);
+            var messages = res != null ? res["messages"] as JArray : null;
+            var sb = new StringBuilder();
+            if (messages != null)
+                foreach (var m in messages)
+                {
+                    try
+                    {
+                        var o = m as JObject;
+                        if (o == null) continue;
+                        AppendPromptContent(sb, o["content"]);
+                    }
+                    catch { }
+                }
+            string s = sb.ToString();
+            return s.Length > 8000 ? s.Substring(0, 8000) + "…(truncated)" : s;
+        }
+
         public class ToolResult
         {
             public bool Ok = true;
@@ -2181,6 +2816,584 @@ namespace Forge.SolidWorks
             }
             catch { out_.Text = res != null ? Trunc(res.ToString(), 2000) : ""; }
             return out_;
+        }
+
+        private static readonly object OAuthGate = new object();
+        private static readonly HashSet<string> OAuthNeedsAuth = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private const int OAuthRedirectPortDefault = 53821;
+        private const int OAuthCallbackTimeoutMs = 300000;
+        private const int OAuthExpirySkewSeconds = 60;
+
+        private class OAuthToken
+        {
+            public string AccessToken = "";
+            public string RefreshToken = "";
+            public DateTime ExpiresAtUtc = DateTime.MinValue;
+            public string Scope = "";
+        }
+
+        private static string FirstStr(JObject o, params string[] keys)
+        {
+            try
+            {
+                if (o == null || keys == null) return "";
+                foreach (var k in keys)
+                {
+                    try
+                    {
+                        string v = (string)o[k];
+                        if (!string.IsNullOrWhiteSpace(v)) return v.Trim();
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return "";
+        }
+
+        private static McpServerConfig.McpOAuthConfig ParseOAuthConfig(JToken tok)
+        {
+            try
+            {
+                var o = tok as JObject;
+                if (o == null) return null;
+                var c = new McpServerConfig.McpOAuthConfig();
+                c.ClientId = FirstStr(o, "clientId", "client_id", "ClientId");
+                c.AuthorizationUrl = FirstStr(o, "authorizationUrl", "authorization_url", "AuthorizationUrl");
+                c.TokenUrl = FirstStr(o, "tokenUrl", "token_url", "TokenUrl");
+                var scopes = new List<string>();
+                var ja = o["scope"] as JArray;
+                if (ja != null)
+                {
+                    foreach (var t in ja)
+                    {
+                        string s = null;
+                        try { s = (string)t; } catch { s = null; }
+                        if (!string.IsNullOrWhiteSpace(s)) scopes.Add(s.Trim());
+                    }
+                }
+                else
+                {
+                    string one = FirstStr(o, "scope", "Scope");
+                    if (!string.IsNullOrWhiteSpace(one))
+                        foreach (var s in one.Split(new[] { ' ', ',', ';', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+                            if (!string.IsNullOrWhiteSpace(s)) scopes.Add(s.Trim());
+                }
+                c.Scope = scopes.ToArray();
+                int port = 0;
+                try
+                {
+                    JToken pt = o["redirectPort"];
+                    if (pt == null) pt = o["redirect_port"];
+                    if (pt == null) pt = o["RedirectPort"];
+                    if (pt != null) port = pt.Value<int>();
+                }
+                catch { port = 0; }
+                c.RedirectPort = port > 0 && port <= 65535 ? port : OAuthRedirectPortDefault;
+                if (c.ClientId.Length == 0 && c.AuthorizationUrl.Length == 0 && c.TokenUrl.Length == 0) return null;
+                return c;
+            }
+            catch { return null; }
+        }
+
+        private static string OAuthTokenDir()
+        {
+            try { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Forge", "mcp-oauth"); }
+            catch { return ""; }
+        }
+
+        private static string OAuthTokenPath(string serverName)
+        {
+            try
+            {
+                string key = ((serverName ?? "").Trim().ToLowerInvariant());
+                byte[] hash;
+                using (var sha = System.Security.Cryptography.SHA256.Create())
+                    hash = sha.ComputeHash(Encoding.UTF8.GetBytes(key));
+                var sb = new StringBuilder();
+                for (int i = 0; i < 16; i++) sb.Append(hash[i].ToString("x2", System.Globalization.CultureInfo.InvariantCulture));
+                string dir = OAuthTokenDir();
+                if (string.IsNullOrEmpty(dir)) return "";
+                return Path.Combine(dir, sb.ToString() + ".token.json");
+            }
+            catch { return ""; }
+        }
+
+        private static bool ServerHasOAuth(string name)
+        {
+            try
+            {
+                var cfg = FindServer(name);
+                return cfg != null && cfg.HasOAuth;
+            }
+            catch { return false; }
+        }
+
+        private static void MarkOAuthNeedsAuth(string name)
+        {
+            try
+            {
+                string n = (name ?? "").Trim();
+                if (n.Length == 0) return;
+                lock (OAuthGate) { OAuthNeedsAuth.Add(n); }
+            }
+            catch { }
+        }
+
+        private static void ClearOAuthNeedsAuth(string name)
+        {
+            try
+            {
+                string n = (name ?? "").Trim();
+                if (n.Length == 0) return;
+                lock (OAuthGate) { OAuthNeedsAuth.Remove(n); }
+            }
+            catch { }
+        }
+
+        private static bool HasOAuthNeedsAuthFlag(string name)
+        {
+            try
+            {
+                string n = (name ?? "").Trim();
+                if (n.Length == 0) return false;
+                lock (OAuthGate) { return OAuthNeedsAuth.Contains(n); }
+            }
+            catch { return false; }
+        }
+
+        private static bool LooksLikeNeedsAuth(string text)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(text)) return false;
+                return text.IndexOf("needs_auth", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+            catch { return false; }
+        }
+
+        private static McpException RpcError(string name, string method, JToken err)
+        {
+            string em = null;
+            try { em = (string)err["message"]; } catch { }
+            if (string.IsNullOrEmpty(em)) { try { em = err.ToString(); } catch { em = "unknown error"; } }
+            string marked = OAuthAuthMarker(name, em);
+            if (marked != null) return new McpException(marked);
+            return new McpException("MCP server '" + name + "' rejected `" + method + "`: " + Trunc(em, 500) + " — check the tool name/arguments and the server logs, then retry.");
+        }
+
+        private static string OAuthAuthMarker(string name, string detail)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(detail)) return null;
+                if (detail.IndexOf("needs_auth", StringComparison.OrdinalIgnoreCase) < 0) return null;
+                if (!ServerHasOAuth(name)) return null;
+                MarkOAuthNeedsAuth(name);
+                return "MCP server '" + name + "' requires OAuth sign-in (" + Trunc(detail, 200) + ") — run OAuth sign-in for this server, then retry. [needs_auth]";
+            }
+            catch { return null; }
+        }
+
+        private static OAuthToken LoadOAuthToken(string serverName)
+        {
+            try
+            {
+                string path = OAuthTokenPath(serverName);
+                if (string.IsNullOrEmpty(path)) return null;
+                string b64;
+                lock (OAuthGate)
+                {
+                    if (!File.Exists(path)) return null;
+                    b64 = File.ReadAllText(path);
+                }
+                if (string.IsNullOrWhiteSpace(b64)) return null;
+                byte[] prot = Convert.FromBase64String(b64.Trim());
+                byte[] raw = System.Security.Cryptography.ProtectedData.Unprotect(prot, null, System.Security.Cryptography.DataProtectionScope.CurrentUser);
+                if (raw == null || raw.Length == 0) return null;
+                JObject o = JObject.Parse(Encoding.UTF8.GetString(raw));
+                if (o == null) return null;
+                var t = new OAuthToken();
+                t.AccessToken = (string)o["accessToken"] ?? "";
+                t.RefreshToken = (string)o["refreshToken"] ?? "";
+                string exp = (string)o["expiresAtUtc"];
+                DateTime dt;
+                if (!string.IsNullOrWhiteSpace(exp) && DateTime.TryParse(exp, null, System.Globalization.DateTimeStyles.RoundtripKind, out dt))
+                    t.ExpiresAtUtc = dt.ToUniversalTime();
+                else
+                    t.ExpiresAtUtc = DateTime.MinValue;
+                t.Scope = (string)o["scope"] ?? "";
+                if (t.AccessToken.Length == 0) return null;
+                return t;
+            }
+            catch { return null; }
+        }
+
+        private static bool SaveOAuthToken(string serverName, OAuthToken token)
+        {
+            try
+            {
+                if (token == null || string.IsNullOrEmpty(token.AccessToken)) return false;
+                string path = OAuthTokenPath(serverName);
+                if (string.IsNullOrEmpty(path)) return false;
+                var o = new JObject
+                {
+                    ["accessToken"] = token.AccessToken,
+                    ["refreshToken"] = token.RefreshToken ?? "",
+                    ["expiresAtUtc"] = token.ExpiresAtUtc.ToUniversalTime().ToString("o"),
+                    ["scope"] = token.Scope ?? ""
+                };
+                byte[] prot = System.Security.Cryptography.ProtectedData.Protect(Encoding.UTF8.GetBytes(o.ToString(Newtonsoft.Json.Formatting.None)), null, System.Security.Cryptography.DataProtectionScope.CurrentUser);
+                string b64 = Convert.ToBase64String(prot);
+                lock (OAuthGate)
+                {
+                    try
+                    {
+                        try { Directory.CreateDirectory(Path.GetDirectoryName(path)); } catch { }
+                        File.WriteAllText(path, b64);
+                    }
+                    catch { return false; }
+                }
+                try { RestrictOAuthTokenFile(path); } catch { }
+                return true;
+            }
+            catch { return false; }
+        }
+
+        private static void RestrictOAuthTokenFile(string path)
+        {
+            try
+            {
+                try { File.SetAttributes(path, FileAttributes.Hidden); } catch { }
+                try
+                {
+                    var acl = File.GetAccessControl(path);
+                    acl.SetAccessRuleProtection(true, false);
+                    var user = System.Security.Principal.WindowsIdentity.GetCurrent().User;
+                    if (user != null)
+                        acl.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(user, System.Security.AccessControl.FileSystemRights.FullControl, System.Security.AccessControl.AccessControlType.Allow));
+                    File.SetAccessControl(path, acl);
+                }
+                catch { }
+            }
+            catch { }
+        }
+
+        public static void ClearOAuthToken(string serverName)
+        {
+            try
+            {
+                string name = ResolveName(serverName);
+                ClearOAuthNeedsAuth(name);
+                string path = OAuthTokenPath(name);
+                if (string.IsNullOrEmpty(path)) return;
+                lock (OAuthGate)
+                {
+                    try { if (File.Exists(path)) File.Delete(path); } catch { }
+                }
+            }
+            catch { }
+        }
+
+        private static byte[] OAuthRandomBytes(int count)
+        {
+            try
+            {
+                if (count <= 0) count = 32;
+                if (count > 256) count = 256;
+                byte[] buf = new byte[count];
+                using (var rng = new System.Security.Cryptography.RNGCryptoServiceProvider())
+                    rng.GetBytes(buf);
+                return buf;
+            }
+            catch
+            {
+                byte[] fallback = new byte[count > 0 ? count : 32];
+                try
+                {
+                    var rnd = new Random();
+                    rnd.NextBytes(fallback);
+                }
+                catch { }
+                return fallback;
+            }
+        }
+
+        private static string OAuthBase64Url(byte[] data)
+        {
+            try
+            {
+                if (data == null || data.Length == 0) return "";
+                return Convert.ToBase64String(data).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+            }
+            catch { return ""; }
+        }
+
+        private static async Task<string> GetOAuthBearerAsync(string serverName, CancellationToken ct)
+        {
+            string name;
+            try { name = ResolveName(serverName); } catch { return null; }
+            McpServerConfig cfg;
+            try
+            {
+                cfg = FindServer(name);
+                if (cfg == null || !cfg.HasOAuth) return null;
+            }
+            catch { return null; }
+            OAuthToken tok;
+            try { tok = LoadOAuthToken(name); } catch { return null; }
+            if (tok == null || string.IsNullOrEmpty(tok.AccessToken)) return null;
+            bool fresh;
+            try { fresh = (tok.ExpiresAtUtc - DateTime.UtcNow).TotalSeconds > OAuthExpirySkewSeconds; }
+            catch { fresh = false; }
+            if (fresh) return tok.AccessToken;
+            if (string.IsNullOrEmpty(tok.RefreshToken)) return tok.AccessToken;
+            string renewed = null;
+            try { renewed = await RefreshOAuthTokenAsync(cfg, tok, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { throw; }
+            catch { renewed = null; }
+            return !string.IsNullOrEmpty(renewed) ? renewed : tok.AccessToken;
+        }
+
+        private static async Task<string> RefreshOAuthTokenAsync(McpServerConfig cfg, OAuthToken current, CancellationToken ct)
+        {
+            try
+            {
+                if (cfg == null || cfg.OAuth == null || string.IsNullOrWhiteSpace(cfg.OAuth.TokenUrl)) return null;
+                if (current == null || string.IsNullOrEmpty(current.RefreshToken)) return null;
+                var fields = new List<KeyValuePair<string, string>>();
+                fields.Add(new KeyValuePair<string, string>("grant_type", "refresh_token"));
+                fields.Add(new KeyValuePair<string, string>("refresh_token", current.RefreshToken));
+                fields.Add(new KeyValuePair<string, string>("client_id", cfg.OAuth.ClientId ?? ""));
+                if (cfg.OAuth.Scope != null && cfg.OAuth.Scope.Length > 0)
+                    fields.Add(new KeyValuePair<string, string>("scope", string.Join(" ", cfg.OAuth.Scope)));
+                OAuthToken next = await ExchangeOAuthTokenAsync(cfg.OAuth.TokenUrl, fields, ct).ConfigureAwait(false);
+                if (next == null || string.IsNullOrEmpty(next.AccessToken)) return null;
+                if (string.IsNullOrEmpty(next.RefreshToken)) next.RefreshToken = current.RefreshToken;
+                if (string.IsNullOrEmpty(next.Scope)) next.Scope = current.Scope;
+                try { SaveOAuthToken(cfg.Name, next); } catch { }
+                ClearOAuthNeedsAuth(cfg.Name);
+                return next.AccessToken;
+            }
+            catch { return null; }
+        }
+
+        private static async Task<OAuthToken> ExchangeOAuthTokenAsync(string tokenUrl, List<KeyValuePair<string, string>> fields, CancellationToken ct)
+        {
+            using (var http = new HttpClient())
+            {
+                try { http.Timeout = TimeSpan.FromSeconds(30); } catch { }
+                CancellationToken useCt = CancellationToken.None;
+                try { if (ct.CanBeCanceled) ct.ThrowIfCancellationRequested(); useCt = ct; } catch (OperationCanceledException) { throw; } catch { useCt = CancellationToken.None; }
+                using (var content = new FormUrlEncodedContent(fields))
+                using (var resp = await http.PostAsync(tokenUrl, content, useCt).ConfigureAwait(false))
+                {
+                    string text = "";
+                    try { text = await resp.Content.ReadAsStringAsync().ConfigureAwait(false); } catch { text = ""; }
+                    if (!resp.IsSuccessStatusCode)
+                    {
+                        string why = "";
+                        try { why = ((int)resp.StatusCode) + " " + (resp.ReasonPhrase ?? ""); } catch { why = ""; }
+                        throw new McpException("OAuth token endpoint returned " + why.Trim() + " — check the MCP server OAuth configuration and retry.");
+                    }
+                    JObject o = null;
+                    try { o = JObject.Parse(text ?? ""); } catch { o = null; }
+                    if (o == null) throw new McpException("OAuth token endpoint returned an unreadable response — check the MCP server OAuth configuration and retry.");
+                    string access = (string)o["access_token"];
+                    if (string.IsNullOrEmpty(access)) access = (string)o["accessToken"];
+                    if (string.IsNullOrEmpty(access))
+                    {
+                        string desc = (string)o["error_description"];
+                        if (string.IsNullOrEmpty(desc)) desc = (string)o["error"];
+                        throw new McpException("OAuth token request was rejected" + (string.IsNullOrEmpty(desc) ? "" : ": " + Trunc(desc, 200)) + " — run OAuth sign-in again, then retry.");
+                    }
+                    var t = new OAuthToken();
+                    t.AccessToken = access;
+                    t.RefreshToken = (string)o["refresh_token"];
+                    if (string.IsNullOrEmpty(t.RefreshToken)) t.RefreshToken = (string)o["refreshToken"];
+                    if (t.RefreshToken == null) t.RefreshToken = "";
+                    int expiresIn = 0;
+                    try
+                    {
+                        JToken e = o["expires_in"];
+                        if (e == null) e = o["expiresIn"];
+                        if (e != null) expiresIn = e.Value<int>();
+                    }
+                    catch { expiresIn = 0; }
+                    if (expiresIn <= 0) expiresIn = 3600;
+                    try { t.ExpiresAtUtc = DateTime.UtcNow.AddSeconds(expiresIn); } catch { t.ExpiresAtUtc = DateTime.UtcNow.AddHours(1); }
+                    t.Scope = (string)o["scope"];
+                    if (t.Scope == null) t.Scope = "";
+                    return t;
+                }
+            }
+        }
+
+        private static async Task<HttpListenerContext> WaitOAuthCallbackAsync(HttpListener listener, int timeoutMs, CancellationToken ct)
+        {
+            Task<HttpListenerContext> get = null;
+            try
+            {
+                if (listener == null || !listener.IsListening) return null;
+                try { get = listener.GetContextAsync(); }
+                catch { return null; }
+                using (var timeoutCts = new CancellationTokenSource())
+                {
+                    var timeoutTask = Task.Delay(timeoutMs <= 0 ? OAuthCallbackTimeoutMs : timeoutMs, timeoutCts.Token);
+                    Task winner;
+                    if (ct.CanBeCanceled)
+                        winner = await Task.WhenAny(get, timeoutTask, Task.Delay(-1, ct)).ConfigureAwait(false);
+                    else
+                        winner = await Task.WhenAny(get, timeoutTask).ConfigureAwait(false);
+                    try { timeoutCts.Cancel(); } catch { }
+                    if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
+                    if (winner == get)
+                    {
+                        try { return await get.ConfigureAwait(false); }
+                        catch { return null; }
+                    }
+                    try { ObserveFault(get); } catch { }
+                    return null;
+                }
+            }
+            catch (OperationCanceledException) { try { if (get != null) ObserveFault(get); } catch { } throw; }
+            catch { try { if (get != null) ObserveFault(get); } catch { } return null; }
+        }
+
+        private static void ReplyOAuthCallback(HttpListenerContext ctx, bool ok)
+        {
+            try
+            {
+                if (ctx == null) return;
+                string title = ok ? "Sign-in complete" : "Sign-in failed";
+                string msg = ok ? "OAuth sign-in completed. Return to the application." : "OAuth sign-in failed. Return to the application and retry.";
+                string html = "<html><head><title>" + title + "</title></head><body><h3>" + title + "</h3><p>" + msg + "</p></body></html>";
+                byte[] bytes = Encoding.UTF8.GetBytes(html);
+                try
+                {
+                    ctx.Response.StatusCode = ok ? 200 : 400;
+                    ctx.Response.ContentType = "text/html; charset=utf-8";
+                    ctx.Response.ContentLength64 = bytes.Length;
+                    ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+                }
+                catch { }
+                try { ctx.Response.OutputStream.Close(); } catch { }
+                try { ctx.Response.Close(); } catch { }
+            }
+            catch { }
+        }
+
+        public static async Task<bool> StartOAuthAsync(string serverName, CancellationToken ct)
+        {
+            string name = ResolveName(serverName);
+            var cfg = FindServer(name);
+            if (cfg == null || !cfg.HasOAuth)
+                throw new McpException("MCP server '" + name + "' has no OAuth configuration — add an `oauth` block (clientId, authorizationUrl, tokenUrl) to its mcp.json entry, then retry.");
+            string verifier = OAuthBase64Url(OAuthRandomBytes(32));
+            string challenge;
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+                challenge = OAuthBase64Url(sha.ComputeHash(Encoding.UTF8.GetBytes(verifier)));
+            string state = OAuthBase64Url(OAuthRandomBytes(32));
+            int port = cfg.OAuth.RedirectPort > 0 && cfg.OAuth.RedirectPort <= 65535 ? cfg.OAuth.RedirectPort : OAuthRedirectPortDefault;
+            string redirectUri = "http://127.0.0.1:" + port + "/callback";
+            var listener = new HttpListener();
+            try { listener.Prefixes.Add("http://127.0.0.1:" + port + "/"); } catch { }
+            try { listener.Start(); }
+            catch (Exception ex) { throw new McpException("OAuth sign-in for server '" + name + "' could not listen on 127.0.0.1:" + port + " (" + ex.Message + ") — free the port or set a different oauth redirectPort, then retry."); }
+            try
+            {
+                string scope = cfg.OAuth.Scope != null ? string.Join(" ", cfg.OAuth.Scope) : "";
+                string sep = cfg.OAuth.AuthorizationUrl.Contains("?") ? "&" : "?";
+                string authUrl = cfg.OAuth.AuthorizationUrl.Trim() + sep
+                    + "response_type=code"
+                    + "&client_id=" + Uri.EscapeDataString(cfg.OAuth.ClientId ?? "")
+                    + "&redirect_uri=" + Uri.EscapeDataString(redirectUri)
+                    + "&code_challenge=" + Uri.EscapeDataString(challenge)
+                    + "&code_challenge_method=S256"
+                    + (string.IsNullOrWhiteSpace(scope) ? "" : "&scope=" + Uri.EscapeDataString(scope))
+                    + "&state=" + Uri.EscapeDataString(state);
+                try { Process.Start(authUrl); }
+                catch (Exception ex) { throw new McpException("OAuth sign-in for server '" + name + "' could not open the system browser (" + ex.Message + ") — open the authorization URL manually from the server OAuth settings."); }
+                HttpListenerContext ctx = await WaitOAuthCallbackAsync(listener, OAuthCallbackTimeoutMs, ct).ConfigureAwait(false);
+                if (ctx == null)
+                    throw new McpException("OAuth sign-in for server '" + name + "' timed out after 5 minutes — run OAuth sign-in again and complete the browser approval.");
+                string code = null;
+                string gotState = null;
+                try
+                {
+                    var q = ctx.Request.QueryString;
+                    if (q != null)
+                    {
+                        string qerr = q["error"];
+                        if (!string.IsNullOrEmpty(qerr))
+                        {
+                            string desc = q["error_description"];
+                            try { ReplyOAuthCallback(ctx, false); } catch { }
+                            throw new McpException("OAuth sign-in for server '" + name + "' was rejected by the provider" + (string.IsNullOrEmpty(desc) ? "" : ": " + Trunc(desc, 200)) + " — retry the sign-in.");
+                        }
+                        code = q["code"];
+                        gotState = q["state"];
+                    }
+                }
+                catch (McpException) { throw; }
+                catch { code = null; }
+                bool ok = !string.IsNullOrEmpty(code) && string.Equals(gotState, state, StringComparison.Ordinal);
+                try { ReplyOAuthCallback(ctx, ok); } catch { }
+                if (string.IsNullOrEmpty(code))
+                    throw new McpException("OAuth sign-in for server '" + name + "' returned no authorization code — retry the sign-in and approve the browser request.");
+                if (!string.Equals(gotState, state, StringComparison.Ordinal))
+                    throw new McpException("OAuth sign-in for server '" + name + "' returned a mismatched state — retry the sign-in (a second browser tab may have interfered).");
+                var fields = new List<KeyValuePair<string, string>>();
+                fields.Add(new KeyValuePair<string, string>("grant_type", "authorization_code"));
+                fields.Add(new KeyValuePair<string, string>("code", code));
+                fields.Add(new KeyValuePair<string, string>("redirect_uri", redirectUri));
+                fields.Add(new KeyValuePair<string, string>("client_id", cfg.OAuth.ClientId ?? ""));
+                fields.Add(new KeyValuePair<string, string>("code_verifier", verifier));
+                OAuthToken token = await ExchangeOAuthTokenAsync(cfg.OAuth.TokenUrl, fields, ct).ConfigureAwait(false);
+                if (token == null || string.IsNullOrEmpty(token.AccessToken))
+                    throw new McpException("OAuth sign-in for server '" + name + "' did not return an access token — check the OAuth configuration and retry.");
+                if (string.IsNullOrEmpty(token.Scope)) token.Scope = scope ?? "";
+                if (!SaveOAuthToken(name, token))
+                    throw new McpException("OAuth sign-in for server '" + name + "' succeeded but the token could not be stored — check write access to %APPDATA%\\Forge\\mcp-oauth and retry.");
+                ClearOAuthNeedsAuth(name);
+                return true;
+            }
+            finally { try { listener.Stop(); } catch { } try { listener.Close(); } catch { } }
+        }
+
+        public static string OAuthStatus(string serverName)
+        {
+            try
+            {
+                string name = ResolveName(serverName);
+                var cfg = FindServer(name);
+                if (cfg == null || !cfg.HasOAuth) return "none";
+                if (HasOAuthNeedsAuthFlag(name)) return "needs_auth";
+                OAuthToken tok = null;
+                try { tok = LoadOAuthToken(name); } catch { tok = null; }
+                if (tok == null || string.IsNullOrEmpty(tok.AccessToken)) return "configured";
+                bool live = false;
+                try { live = (tok.ExpiresAtUtc - DateTime.UtcNow).TotalSeconds > OAuthExpirySkewSeconds; } catch { live = false; }
+                return live ? "authenticated" : "expired";
+            }
+            catch { return "none"; }
+        }
+
+        public static bool IsOAuthRequired(string serverName)
+        {
+            try
+            {
+                string name = ResolveName(serverName);
+                var cfg = FindServer(name);
+                if (cfg == null || !cfg.HasOAuth) return false;
+                if (HasOAuthNeedsAuthFlag(name)) return true;
+                OAuthToken tok = null;
+                try { tok = LoadOAuthToken(name); } catch { tok = null; }
+                if (tok == null || string.IsNullOrEmpty(tok.AccessToken)) return true;
+                try { return (tok.ExpiresAtUtc - DateTime.UtcNow).TotalSeconds <= OAuthExpirySkewSeconds && string.IsNullOrEmpty(tok.RefreshToken); }
+                catch { return true; }
+            }
+            catch { return false; }
         }
     }
 }

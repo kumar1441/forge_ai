@@ -22,6 +22,7 @@ namespace Forge.Providers
         public string ToolsJson;
         public string ToolChoice;
         public string ReasoningEffort;
+        public string SessionId;
         public Dictionary<string,string> Headers;
     }
 

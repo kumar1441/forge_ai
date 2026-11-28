@@ -88,6 +88,36 @@ namespace Forge.SolidWorks
             root["dxfFilesOnDisk"] = dxfCount;
             root["dxfNames"] = dxfNames;
 
+            int layerCountMin = 0;
+            int filesWithBend = 0;
+            int bendEntities = 0;
+            var fileDetails = new JArray();
+            try
+            {
+                if (Directory.Exists(outDir))
+                {
+                    string[] dxfFiles = Directory.GetFiles(outDir, "*.dxf");
+                    layerCountMin = int.MaxValue;
+                    foreach (string f in dxfFiles)
+                    {
+                        JObject detail = ScanDxfLayers(f);
+                        fileDetails.Add(detail);
+                        int lc = (int)detail["layerCount"];
+                        if (lc < layerCountMin) layerCountMin = lc;
+                        if ((bool)detail["bendLayerPresent"]) filesWithBend++;
+                        bendEntities += (int)detail["bendEntities"];
+                    }
+                    if (dxfFiles.Length == 0) layerCountMin = 0;
+                }
+            }
+            catch { }
+            root["dxfFiles"] = fileDetails;
+            root["dxfLayerCountMin"] = layerCountMin;
+            root["dxfFilesWithBendLayer"] = filesWithBend;
+            root["bendLayerEntityCount"] = bendEntities;
+            root["bendLayerPresent"] = fileDetails.Count > 0 && filesWithBend == fileDetails.Count;
+            root["bendLinesOnBendLayer"] = bendEntities > 0;
+
             // the headline invariant: at least one flat-pattern DXF per sheet-metal part, sources untouched
             root["dxfMatchesSheetMetal"] = sheet > 0 && dxfCount >= sheet;
             root["sourceUntouched"] = dirty == 0;
@@ -112,6 +142,103 @@ namespace Forge.SolidWorks
                 f = f.GetNextFeature() as Feature;
             }
             return false;
+        }
+
+        private static JObject ScanDxfLayers(string path)
+        {
+            var detail = new JObject();
+            detail["name"] = Path.GetFileName(path);
+            var layerNames = new List<string>();
+            var entityCountByLayer = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            int totalEntities = 0;
+            try
+            {
+                string[] lines = File.ReadAllText(path).Split(new string[] { "\r\n", "\n" }, StringSplitOptions.None);
+                bool pendingSectionName = false;
+                bool inTables = false;
+                bool inEntities = false;
+                bool pendingTableName = false;
+                string openTable = null;
+                bool inLayerEntry = false;
+                string openEntity = null;
+                string openEntityLayer = "0";
+                bool openEntityLayerSet = false;
+                for (int i = 0; i + 1 < lines.Length; i += 2)
+                {
+                    string code = lines[i].Trim();
+                    string value = lines[i + 1].Trim();
+                    if (code == "0")
+                    {
+                        if (openEntity != null)
+                        {
+                            totalEntities++;
+                            int n = 0;
+                            entityCountByLayer.TryGetValue(openEntityLayer, out n);
+                            entityCountByLayer[openEntityLayer] = n + 1;
+                            openEntity = null;
+                        }
+                        if (value == "SECTION") pendingSectionName = true;
+                        else if (value == "ENDSEC") { inTables = false; inEntities = false; pendingSectionName = false; pendingTableName = false; openTable = null; inLayerEntry = false; }
+                        else if (value == "TABLE") pendingTableName = true;
+                        else if (value == "ENDTAB") { openTable = null; pendingTableName = false; inLayerEntry = false; }
+                        else if (value == "LAYER") { if (inTables && openTable == "LAYER") inLayerEntry = true; }
+                        else if (inEntities && IsDxfEntity(value)) { openEntity = value; openEntityLayer = "0"; openEntityLayerSet = false; }
+                        else inLayerEntry = false;
+                    }
+                    else if (code == "2")
+                    {
+                        if (pendingSectionName) { inTables = value == "TABLES"; inEntities = value == "ENTITIES"; pendingSectionName = false; }
+                        else if (pendingTableName) { openTable = value; pendingTableName = false; }
+                        else if (inLayerEntry) { layerNames.Add(value); inLayerEntry = false; }
+                    }
+                    else if (code == "8" && openEntity != null && !openEntityLayerSet) { openEntityLayer = value; openEntityLayerSet = true; }
+                }
+                if (openEntity != null)
+                {
+                    totalEntities++;
+                    int n = 0;
+                    entityCountByLayer.TryGetValue(openEntityLayer, out n);
+                    entityCountByLayer[openEntityLayer] = n + 1;
+                }
+            }
+            catch { }
+            detail["layerCount"] = layerNames.Count;
+            detail["layers"] = new JArray(layerNames);
+            detail["totalEntities"] = totalEntities;
+            int onBend = 0;
+            entityCountByLayer.TryGetValue("BEND", out onBend);
+            detail["bendEntities"] = onBend;
+            detail["bendLayerPresent"] = layerNames.Exists(n => n.Equals("BEND", StringComparison.OrdinalIgnoreCase));
+            return detail;
+        }
+
+        private static bool IsDxfEntity(string value)
+        {
+            switch (value)
+            {
+                case "LINE":
+                case "LWPOLYLINE":
+                case "POLYLINE":
+                case "CIRCLE":
+                case "ARC":
+                case "ELLIPSE":
+                case "SPLINE":
+                case "TEXT":
+                case "MTEXT":
+                case "DIMENSION":
+                case "INSERT":
+                case "HATCH":
+                case "LEADER":
+                case "SOLID":
+                case "POINT":
+                case "TRACE":
+                case "RAY":
+                case "XLINE":
+                case "SHAPE":
+                    return true;
+                default:
+                    return false;
+            }
         }
     }
 }

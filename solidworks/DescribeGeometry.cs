@@ -46,11 +46,12 @@ namespace Forge.SolidWorks
     /// concave cylindrical face on the part, same size-bounded (1.5mm..60%-of-part) noise exclusion
     /// CountThroughHoles proved against thread-root/knurl false positives.
     ///
-    /// KNOWN SCOPE LIMIT: face-level only (v1). Whole-body/whole-part description (volume, face-type breakdown)
-    /// and feature-count context ("3 tapped holes on this face") are NOT implemented — this codebase has no
-    /// thread/tap detection anywhere, so that part of the tool-doc's illustrative example is honestly out of
-    /// scope rather than guessed. A selection that isn't a single face (a body, component, or nothing) is
-    /// refused with a clear message, never misreported as a face. Conical and spherical faces are classified but
+    /// Body-level census: "what is this" with no face named returns a whole-document census (solid type,
+    /// body count, volume, bounding-box extents, face-type counts, hole count via CountThroughHoles) instead
+    /// of a refusal. Feature-count context ("3 tapped holes on this face") is NOT implemented — this codebase
+    /// has no thread/tap detection anywhere, so taps/threads are never claimed; the census says so when
+    /// conical or cylindrical faces are present. A face-level selection that isn't a single face is refused
+    /// with a clear message, never misreported as a face. Conical and spherical faces are classified but
     /// not dimensioned beyond area — no fixture/need has proven a dimensioning scheme for them yet.
     /// </summary>
     public static class DescribeGeometry
@@ -62,15 +63,30 @@ namespace Forge.SolidWorks
             bool verb = Regex.IsMatch(c, @"\bdescribe\b") || Regex.IsMatch(c, @"\bexplain\b") ||
                         Regex.IsMatch(c, @"\bwhat\s+is\s+this\b") || Regex.IsMatch(c, @"\bwhat\s+am\s+i\s+looking\s+at\b");
             if (!verb) return false;
-            return Regex.IsMatch(c, @"\b(face|geometry|shape|surface)\b");
+            if (Regex.IsMatch(c, @"\bwhat\s+is\s+this\b") || Regex.IsMatch(c, @"\bwhat\s+am\s+i\s+looking\s+at\b")) return true;
+            return Regex.IsMatch(c, @"\b(face|geometry|shape|surface|body|bodies|part|assembly|solid)\b");
+        }
+
+        private static bool IsBodyLevelIntent(string intent)
+        {
+            string c = (intent ?? "").ToLowerInvariant();
+            if (Regex.IsMatch(c, @"\b(face|hole|bore)\b")) return false;
+            if (Regex.IsMatch(c, @"\b(body|bodies|part|assembly|solid|everything)\b")) return true;
+            return Regex.IsMatch(c, @"\bwhat\s+is\s+this\b") || Regex.IsMatch(c, @"\bwhat\s+am\s+i\s+looking\s+at\b");
         }
 
         public static async Task<DescribeGeometryResult> Run(ISldWorks app, IModelDoc2 model, string intent, Func<string, string, string, string, Task> emit)
         {
             var res = new DescribeGeometryResult();
-            if (model == null) { res.Error = "Open a part first (.SLDPRT) — open it, then resend."; return res; }
+            if (model == null) { res.Error = "Open a part or assembly first — open it, then resend."; return res; }
+            int docType = -1;
+            try { docType = (int)model.GetType(); } catch (Exception ex) { res.Error = "Couldn't read the active document: " + ex.Message; return res; }
+            if (docType == (int)swDocumentTypes_e.swDocDRAWING) { res.Error = "Describing geometry works on a part or assembly — this is a drawing, open the model instead."; return res; }
             var part = model as PartDoc;
-            if (part == null) { res.Error = "Describing geometry works on a part — open the .SLDPRT, not an assembly."; return res; }
+            var asm = model as AssemblyDoc;
+            if (part == null && asm == null) { res.Error = "Describing geometry works on a part or assembly — open one, then resend."; return res; }
+
+            if (IsBodyLevelIntent(intent)) return await RunBodyCensus(app, model, part, asm, intent, emit, res);
 
             await emit("Narrator", "reading the selected geometry", "run", null);
 
@@ -108,7 +124,7 @@ namespace Forge.SolidWorks
             var face = sel0 as Face2;
             if (face == null)
             {
-                res.Error = "The current selection isn't a single face — select one face to describe (whole-body description isn't implemented yet).";
+                res.Error = "The current selection isn't a single face — select one face to describe (or ask \"what is this\" for a whole-document census).";
                 await emit("Narrator", null, "fail", res.Error);
                 return res;
             }
@@ -164,6 +180,114 @@ namespace Forge.SolidWorks
                 res.ShapeType = "other";
                 res.Description = "Freeform/other surface, " + Math.Round(res.AreaMm2, 1) + " mm2 (not a plane, cylinder, cone, or sphere).";
             }
+
+            res.Success = true;
+            res.Info = res.Description;
+            await emit("Narrator", null, "done", res.Description);
+            return res;
+        }
+
+        private static async Task<DescribeGeometryResult> RunBodyCensus(ISldWorks app, IModelDoc2 model, PartDoc part, AssemblyDoc asm, string intent, Func<string, string, string, string, Task> emit, DescribeGeometryResult res)
+        {
+            await emit("Narrator", "reading the solid bodies", "run", null);
+            var bodies = new List<Body2>();
+            if (part != null)
+            {
+                object[] raw = null;
+                try { raw = part.GetBodies2((int)swBodyType_e.swSolidBody, false) as object[]; }
+                catch (Exception ex) { res.Error = "Couldn't read this part's solid bodies: " + ex.Message; await emit("Narrator", null, "fail", res.Error); return res; }
+                foreach (var bo in raw ?? new object[0]) { var b = bo as Body2; if (b != null) bodies.Add(b); }
+            }
+            else
+            {
+                object[] comps = null;
+                try { comps = asm.GetComponents(true) as object[]; }
+                catch (Exception ex) { res.Error = "Couldn't read this assembly's components: " + ex.Message; await emit("Narrator", null, "fail", res.Error); return res; }
+                foreach (var co in comps ?? new object[0])
+                {
+                    var comp = co as Component2; if (comp == null) continue;
+                    object[] raw = null;
+                    try { object bi; raw = comp.GetBodies3((int)swBodyType_e.swSolidBody, out bi) as object[]; } catch { continue; }
+                    foreach (var bo in raw ?? new object[0]) { var b = bo as Body2; if (b != null) bodies.Add(b); }
+                }
+            }
+            if (bodies.Count == 0)
+            { res.Error = "No solid bodies to describe — this document has no solid geometry."; await emit("Narrator", null, "fail", res.Error); return res; }
+
+            double volumeMm3 = 0;
+            foreach (var b in bodies)
+            {
+                try
+                {
+                    var mp = b.GetMassProperties(0) as double[];
+                    if (mp != null && mp.Length >= 4) volumeMm3 += mp[3] * 1e9;
+                }
+                catch { }
+            }
+            if (volumeMm3 <= 0)
+            {
+                try { var mp2 = model.Extension.CreateMassProperty(); if (mp2 != null) volumeMm3 = mp2.Volume * 1e9; } catch { }
+            }
+
+            double[] box = null;
+            foreach (var b in bodies)
+            {
+                try { box = UnionBox(box, b.GetBodyBox() as double[]); } catch { }
+            }
+
+            int planar = 0, cyl = 0, cone = 0, sphere = 0, tor = 0, other = 0;
+            foreach (var b in bodies)
+            {
+                object[] farr = null;
+                try { farr = b.GetFaces() as object[]; } catch { continue; }
+                foreach (var fo in farr ?? new object[0])
+                {
+                    var f = fo as Face2; if (f == null) continue;
+                    Surface s = null; try { s = f.GetSurface() as Surface; } catch { }
+                    bool v = false;
+                    try { v = s != null && s.IsPlane(); } catch { v = false; }
+                    if (v) { planar++; continue; }
+                    try { v = s != null && s.IsCylinder(); } catch { v = false; }
+                    if (v) { cyl++; continue; }
+                    try { v = s != null && s.IsCone(); } catch { v = false; }
+                    if (v) { cone++; continue; }
+                    try { v = s != null && s.IsSphere(); } catch { v = false; }
+                    if (v) { sphere++; continue; }
+                    try { v = s != null && s.IsTorus(); } catch { v = false; }
+                    if (v) { tor++; continue; }
+                    other++;
+                }
+            }
+            int faces = planar + cyl + cone + sphere + tor + other;
+
+            string holeText;
+            if (part != null)
+            {
+                try
+                {
+                    var hc = await CountThroughHoles.Run(app, model, intent, (a, b2, c2, d) => Task.CompletedTask);
+                    if (hc != null && hc.Verified)
+                        holeText = hc.ThroughCount + " through-hole(s) and " + hc.BlindCount + " blind out of " + hc.TotalCylindricalHoles + " cylindrical hole face(s)";
+                    else if (hc != null && !string.IsNullOrEmpty(hc.Error))
+                        holeText = "hole count unavailable (" + hc.Error + ")";
+                    else
+                        holeText = "hole count unavailable (no verified holes)";
+                }
+                catch { holeText = "hole count unavailable (counter threw)"; }
+            }
+            else holeText = "hole count not attempted on assemblies";
+
+            string solidType = asm != null ? "assembly" : (bodies.Count > 1 ? "multibody part" : "part");
+            res.ShapeType = asm != null ? "assembly" : (bodies.Count > 1 ? "multibody" : "part");
+            res.Criterion = "body";
+            res.Description = "This is a " + solidType + " with " + bodies.Count + " solid bod" + (bodies.Count == 1 ? "y" : "ies") +
+                (volumeMm3 > 0 ? ", volume " + Math.Round(volumeMm3, 1) + " mm3" : ", volume unreadable") +
+                (box != null && box.Length >= 6
+                    ? ", extents X " + Math.Round((box[3] - box[0]) * 1000.0, 1) + " x Y " + Math.Round((box[4] - box[1]) * 1000.0, 1) + " x Z " + Math.Round((box[5] - box[2]) * 1000.0, 1) + " mm"
+                    : ", bounding box unreadable") +
+                ". Faces: " + faces + " total (" + planar + " planar, " + cyl + " cylindrical, " + cone + " conical, " + sphere + " spherical, " + tor + " toroidal, " + other + " other)" +
+                ". Holes: " + holeText + "." +
+                ((cone > 0 || cyl > 0) ? " Thread/tap detection isn't available — conical or cylindrical faces may include thread features, not classified." : "");
 
             res.Success = true;
             res.Info = res.Description;
